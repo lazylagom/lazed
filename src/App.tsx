@@ -1,13 +1,22 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PaneGrid } from "./components/PaneGrid";
+import { AgentPicker } from "./features/AgentPicker";
+import { PromptBar, type PromptTarget } from "./features/PromptBar";
 import {
   type AgentStatus,
   type HerdrEvent,
+  type PaneInfo,
   type Snapshot,
   herdr,
   subscribeEvents,
 } from "./shared/herdr";
+import { InboxButton, InboxPanel } from "./widgets/Inbox";
 import { Sidebar } from "./widgets/Sidebar";
 
 // herdr event envelopes carry the event name in `event` with underscore naming
@@ -38,10 +47,23 @@ function worst(statuses: (AgentStatus | undefined)[]): AgentStatus {
   return "unknown";
 }
 
+async function notify(title: string, body: string) {
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (granted) sendNotification({ title, body });
+  } catch {
+    // notifications unavailable — ignore
+  }
+}
+
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [focusedPane, setFocusedPane] = useState<string | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const refreshTimer = useRef<number | null>(null);
 
   const refresh = useCallback(() => {
@@ -77,6 +99,11 @@ export function App() {
         const paneId = d.pane_id as string | undefined;
         const status = d.agent_status as AgentStatus | undefined;
         if (paneId && status) {
+          if (status === "blocked" || status === "done") {
+            const who =
+              (d.display_agent as string) ?? (d.agent as string) ?? paneId;
+            notify(`${who} is ${status}`, (d.title as string) ?? paneId);
+          }
           setSnap((prev) =>
             prev
               ? {
@@ -184,6 +211,53 @@ export function App() {
       .catch((e) => setError(String(e)));
   }, []);
 
+  const jumpToPane = useCallback(
+    (pane: PaneInfo) => {
+      if (pane.workspace_id && pane.workspace_id !== focusedWsId) {
+        herdr.workspaceFocus(pane.workspace_id).catch(() => {});
+      }
+      if (pane.tab_id && pane.tab_id !== activeTabId) {
+        herdr.tabFocus(pane.tab_id).catch(() => {});
+      }
+      setFocusedPane(pane.pane_id);
+      setInboxOpen(false);
+    },
+    [focusedWsId, activeTabId],
+  );
+
+  const startAgent = useCallback(
+    (kind: string) => {
+      const target = effectiveFocusedPane;
+      setShowPicker(false);
+      if (!target) return;
+      herdr.agentStart(target, kind).catch((e) => setError(String(e)));
+    },
+    [effectiveFocusedPane],
+  );
+
+  const submitPrompt = useCallback(
+    (text: string, target: PromptTarget) => {
+      const wsPanes = [...panesById.values()].filter(
+        (p) => p.workspace_id === focusedWsId,
+      );
+      const agentPanes = wsPanes.filter((p) => p.agent);
+      const run = (p: PaneInfo) =>
+        (p.agent
+          ? herdr.agentPrompt(p.pane_id, text)
+          : herdr.paneSendText(p.pane_id, `${text}\n`)
+        ).catch((e) => setError(String(e)));
+      if (target.kind === "focused") {
+        const p = panesById.get(target.paneId);
+        if (p) run(p);
+      } else if (target.kind === "agents") {
+        for (const p of agentPanes) run(p);
+      } else {
+        for (const p of wsPanes) run(p);
+      }
+    },
+    [panesById, focusedWsId],
+  );
+
   // app-level shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -220,6 +294,15 @@ export function App() {
         e.preventDefault();
         const prev = step(wsIds, focusedWsId, -1);
         if (prev) focusWorkspace(prev);
+      } else if (e.metaKey && !e.shiftKey && e.key === "k") {
+        e.preventDefault();
+        setShowPrompt(true);
+      } else if (e.metaKey && e.shiftKey && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
+        setShowPicker(true);
+      } else if (e.metaKey && e.shiftKey && (e.key === "i" || e.key === "I")) {
+        e.preventDefault();
+        setInboxOpen((o) => !o);
       } else if (e.metaKey && /^[1-9]$/.test(e.key)) {
         e.preventDefault();
         const tab = tabIds[Number(e.key) - 1];
@@ -239,6 +322,28 @@ export function App() {
     focusWorkspace,
     focusTab,
   ]);
+
+  const allPanes = [...panesById.values()];
+  const inboxItems = allPanes
+    .filter((p) => p.agent_status === "blocked" || p.agent_status === "done")
+    .sort((a, b) =>
+      a.agent_status === b.agent_status
+        ? 0
+        : a.agent_status === "blocked"
+          ? -1
+          : 1,
+    )
+    .map((pane) => ({
+      pane,
+      workspace: snap?.workspaces?.find(
+        (w) => w.workspace_id === pane.workspace_id,
+      )?.label,
+      tab: snap?.tabs?.find((t) => t.tab_id === pane.tab_id)?.label,
+    }));
+  const blockedCount = inboxItems.filter(
+    (i) => i.pane.agent_status === "blocked",
+  ).length;
+  const agentCount = allPanes.filter((p) => p.agent).length;
 
   return (
     <div className="app">
@@ -266,6 +371,25 @@ export function App() {
         <button type="button" onClick={newWorkspace} title="⇧⌘N">
           + workspace
         </button>
+        <button
+          type="button"
+          onClick={() => setShowPicker(true)}
+          title="⇧⌘A — start agent in focused pane"
+        >
+          + agent
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowPrompt(true)}
+          title="⌘K — prompt"
+        >
+          prompt
+        </button>
+        <InboxButton
+          blocked={blockedCount}
+          done={inboxItems.length - blockedCount}
+          onToggle={() => setInboxOpen((o) => !o)}
+        />
         <span className="status">
           {error
             ? `error: ${error}`
@@ -274,6 +398,25 @@ export function App() {
               : "connecting…"}
         </span>
       </div>
+      {inboxOpen && (
+        <InboxPanel
+          items={inboxItems}
+          onJump={jumpToPane}
+          onClose={() => setInboxOpen(false)}
+        />
+      )}
+      {showPicker && (
+        <AgentPicker onPick={startAgent} onClose={() => setShowPicker(false)} />
+      )}
+      {showPrompt && (
+        <PromptBar
+          focusedPane={effectiveFocusedPane}
+          agentCount={agentCount}
+          paneCount={allPanes.length}
+          onSubmit={submitPrompt}
+          onClose={() => setShowPrompt(false)}
+        />
+      )}
       <div className="body">
         <Sidebar
           snap={snap}

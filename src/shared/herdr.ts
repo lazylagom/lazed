@@ -110,7 +110,47 @@ export const herdr = {
     invoke("tab_create", { workspaceId, cwd }),
   tabFocus: (tabId: string) => invoke("tab_focus", { tabId }),
   tabClose: (tabId: string) => invoke("tab_close", { tabId }),
+  agentStart: (paneId: string, kind: string, name?: string) =>
+    invoke("agent_start", { paneId, kind, name }),
+  agentPrompt: (paneId: string, text: string) =>
+    invoke("agent_prompt", { paneId, text }),
+  paneSendText: (paneId: string, text: string) =>
+    invoke("pane_send_text", { paneId, text }),
+  worktreeCreate: (
+    cwd: string,
+    branch?: string,
+    label?: string,
+    workspace?: string,
+  ) => invoke("worktree_create", { cwd, branch, label, workspace }),
+  worktreeList: () => invoke("worktree_list"),
 };
+
+/** herdr-supported agent kinds (from `agent start --kind`). */
+export const AGENT_KINDS = [
+  "claude",
+  "codex",
+  "gemini",
+  "opencode",
+  "cursor",
+  "devin",
+  "pi",
+  "copilot",
+  "amp",
+  "grok",
+  "cline",
+  "agy",
+  "droid",
+  "kimi",
+  "kiro",
+  "omp",
+  "hermes",
+  "kilo",
+  "muse",
+  "qwen",
+  "qodercli",
+  "mastracode",
+  "maki",
+] as const;
 
 export function subscribeEvents(handler: (ev: HerdrEvent) => void) {
   const ch = new Channel<HerdrEvent>();

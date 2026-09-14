@@ -82,11 +82,17 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
   - 스냅샷은 `api snapshot` → `result.snapshot`; pane의 에이전트 표시명은 `agents[]`에서 pane_id로 머지
   - 컨트롤 스트림/이벤트 소켓 모두 재연결 루프 보유 → `herdr server stop` 시 앱이 자동으로 서버 재기동+복원
 
-### Phase 2 — 에이전트 UX
+### Phase 2 — 에이전트 UX ✅
 - agent start/prompt/wait를 UI로 노출 (새 에이전트 스폰 모달, 프롬프트 브로드캐스트)
 - blocked 인박스: 승인 필요 에이전트를 한 목록에 → 클릭 시 해당 pane으로 점프
 - macOS 알림 (done/blocked 전이 시)
 - `skills/staylazy/SKILL.md`: pane 안 에이전트가 herdr CLI로 다른 pane 조작 가능하게
+
+구현 노트:
+- `⇧⌘A` AgentPicker (23종 manifest 카탈로그 필터링) → focused pane에 `agent start`
+- `⌘K` PromptBar — 대상: focused pane / all agents / all panes. agent pane은 `agent prompt`, 일반 pane은 `pane send-text`(+\n)
+- `⇧⌘I` 또는 titlebar inbox 버튼 → blocked/done pane 목록, 클릭 시 workspace+tab 포커스 체이닝 후 pane 점프
+- `tauri-plugin-notification` — blocked/done 전이 시 네이티브 알림 (permission은 첫 전이 시 요청, 실패 무시)
 
 ### Phase 3 — Orca식 멀티에이전트
 - worktree fan-out: 프롬프트 하나 → N개 worktree(`worktree.create`) × N개 에이전트 pane

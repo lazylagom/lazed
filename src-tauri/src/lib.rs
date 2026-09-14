@@ -158,6 +158,41 @@ fn tab_close(tab_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn agent_start(pane_id: String, kind: String, name: Option<String>) -> Result<Value, String> {
+    herdr::agent_start(&pane_id, &kind, name.as_deref())
+}
+
+#[tauri::command]
+fn agent_prompt(pane_id: String, text: String) -> Result<Value, String> {
+    herdr::agent_prompt(&pane_id, &text)
+}
+
+#[tauri::command]
+fn pane_send_text(pane_id: String, text: String) -> Result<Value, String> {
+    herdr::pane_send_text(&pane_id, &text)
+}
+
+#[tauri::command]
+fn worktree_create(
+    cwd: String,
+    branch: Option<String>,
+    label: Option<String>,
+    workspace: Option<String>,
+) -> Result<Value, String> {
+    herdr::worktree_create(
+        &cwd,
+        branch.as_deref(),
+        label.as_deref(),
+        workspace.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn worktree_list() -> Result<Value, String> {
+    herdr::worktree_list()
+}
+
+#[tauri::command]
 fn subscribe_events(
     on_event: Channel<Value>,
     state: State<AppState>,
@@ -244,6 +279,7 @@ fn detach_pane_internal(state: &State<AppState>, pane_id: &str) {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             control: Mutex::new(HashMap::new()),
             events_running: Mutex::new(false),
@@ -266,6 +302,11 @@ pub fn run() {
             tab_create,
             tab_focus,
             tab_close,
+            agent_start,
+            agent_prompt,
+            pane_send_text,
+            worktree_create,
+            worktree_list,
             subscribe_events,
         ])
         .run(tauri::generate_context!())

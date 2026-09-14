@@ -213,6 +213,42 @@ pub fn tab_close(tab_id: &str) -> Result<Value, String> {
     run_cli(&["tab", "close", tab_id])
 }
 
+pub fn agent_start(pane_id: &str, kind: &str, name: Option<&str>) -> Result<Value, String> {
+    let args = ["agent", "start", name.unwrap_or(kind), "--kind", kind, "--pane", pane_id];
+    run_cli(&args)
+}
+
+pub fn agent_prompt(pane_id: &str, text: &str) -> Result<Value, String> {
+    run_cli(&["agent", "prompt", pane_id, text])
+}
+
+pub fn pane_send_text(pane_id: &str, text: &str) -> Result<Value, String> {
+    run_cli(&["pane", "send-text", pane_id, text])
+}
+
+pub fn worktree_create(
+    cwd: &str,
+    branch: Option<&str>,
+    label: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<Value, String> {
+    let mut args = vec!["worktree", "create", "--cwd", cwd];
+    if let Some(b) = branch {
+        args.extend(["--branch", b]);
+    }
+    if let Some(l) = label {
+        args.extend(["--label", l]);
+    }
+    if let Some(w) = workspace {
+        args.extend(["--workspace", w]);
+    }
+    run_cli(&args)
+}
+
+pub fn worktree_list() -> Result<Value, String> {
+    run_cli(&["worktree", "list"])
+}
+
 /// Subscription types that apply globally (no pane_id required).
 const GLOBAL_SUBS: &[&str] = &[
     "workspace.created",
