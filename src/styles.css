@@ -810,3 +810,11 @@ body,
   font-size: 12px;
   color: #ddd;
 }
+
+/* ── remote ──────────────────────────────── */
+
+.remote-on {
+  background: #2d4a2f !important;
+  border-color: #4a6b4a !important;
+  color: #a5d6a7 !important;
+}

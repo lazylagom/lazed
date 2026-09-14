@@ -148,6 +148,9 @@ export const herdr = {
       repo,
       branch,
     }),
+  remoteConnect: (target: string) => invoke("remote_connect", { target }),
+  remoteDisconnect: () => invoke("remote_disconnect"),
+  remoteStatus: () => invoke<{ target?: string }>("remote_status"),
 };
 
 /** herdr-supported agent kinds (from `agent start --kind`). */

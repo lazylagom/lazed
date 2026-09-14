@@ -107,9 +107,18 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - 검증: claude+codex fan-out, feat-a diff → "hi instead of hello" 코멘트 → claude가 브랜치 수정 커밋 → main에 머지됨
 - 주의: 에이전트 첫 실행 시 신뢰 프롬프트(claude trust dialog, codex confirm)는 수동 승인 필요 — 자동화하지 않음
 
-### Phase 4 — (후반) 원격/멀티
+### Phase 4 — (후반) 원격/멀티 ✅ (최소 구현)
 - SSH 머신 등록 → 원격 herdr 서버 attach (`herdr --remote` 모델 재사용)
 - 멀티 클라이언트/TUI 공존 polish, 모바일 read-only (Orca 패턴)
+
+구현 노트:
+- `⇧⌘R` 또는 titlebar `⇄ remote` → `user@host` 입력 → SSH attach
+- 메커니즘: `ssh target 'herdr status --json'` → 원격 unix socket 경로 획득 → `ssh -N -L <localsock>:<remotesock>` 포워딩 → 이벤트 스트림은 포워드된 로컬 소켓에 연결
+- 원격 시 모든 CLI 호출이 `ssh <target> herdr <args>`(shell-quoted)로 라우팅, control 스트림은 `ssh target herdr terminal session control` 파이프
+- 컨텍스트 전환 시 이벤트 소켓 shutdown → 재연결 루프가 새 대상으로 자동 재구독; ssh forward 자식이 죽으면 자동 respawn
+- 원격 서버가 안 떠 있으면 `ssh -f target 'herdr server'`로 한 번 기동 시도
+- **미검증 항목**: 실제 SSH 호스트가 없어 e2e 미검증 — 실패 경로(unreachable → 빠른 에러 표시, 로컬 컨텍스트 유지)만 확인. `herdr machine add`로 원격 서버를 준비한 뒤 사용 권장
+- 미구현: 머신 저장/목록(`herdr machine` 연동 UI), 동시 멀티 원격, 모바일 read-only
 
 ---
 

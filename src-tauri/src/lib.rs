@@ -17,8 +17,13 @@ struct AppState {
 #[tauri::command]
 fn bootstrap(state: State<AppState>) -> Result<Value, String> {
     herdr::ensure_server()?;
-    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let workspace = herdr::ensure_workspace(&cwd)?;
+    // remote: let the remote server pick the cwd (local $HOME may not exist)
+    let cwd = if herdr::remote_target().is_some() {
+        None
+    } else {
+        Some(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+    };
+    let workspace = herdr::ensure_workspace(cwd.as_deref())?;
     let panes = herdr::list_panes()?;
     // drop stale control sessions whose pane disappeared
     let live: Vec<String> = panes
@@ -211,6 +216,36 @@ fn worktree_merge(repo: String, branch: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn remote_connect(target: String, state: State<'_, AppState>) -> Result<(), String> {
+    // drop all local control streams before switching context
+    if let Ok(mut map) = state.control.lock() {
+        for (_, mut h) in map.drain() {
+            let _ = h.child.kill();
+        }
+    }
+    // ssh probing + forward setup blocks for seconds — keep it off the
+    // webview's command path
+    tauri::async_runtime::spawn_blocking(move || herdr::remote_connect(&target))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn remote_disconnect(state: State<AppState>) -> Result<(), String> {
+    if let Ok(mut map) = state.control.lock() {
+        for (_, mut h) in map.drain() {
+            let _ = h.child.kill();
+        }
+    }
+    herdr::remote_disconnect()
+}
+
+#[tauri::command]
+fn remote_status() -> Result<Value, String> {
+    Ok(serde_json::json!({"target": herdr::remote_target()}))
+}
+
+#[tauri::command]
 fn subscribe_events(
     on_event: Channel<Value>,
     state: State<AppState>,
@@ -328,6 +363,9 @@ pub fn run() {
             worktree_remove,
             worktree_diff,
             worktree_merge,
+            remote_connect,
+            remote_disconnect,
+            remote_status,
             subscribe_events,
         ])
         .run(tauri::generate_context!())

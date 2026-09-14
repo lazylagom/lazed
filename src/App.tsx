@@ -10,6 +10,7 @@ import { AgentPicker } from "./features/AgentPicker";
 import { DiffView } from "./features/DiffView";
 import { Fanout, type FanoutRequest } from "./features/Fanout";
 import { PromptBar, type PromptTarget } from "./features/PromptBar";
+import { RemoteBar } from "./features/RemoteBar";
 import {
   type AgentStatus,
   type HerdrEvent,
@@ -68,6 +69,8 @@ export function App() {
   const [showFanout, setShowFanout] = useState(false);
   const [diffWsId, setDiffWsId] = useState<string | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const [showRemote, setShowRemote] = useState(false);
+  const [remoteTarget, setRemoteTarget] = useState<string | null>(null);
   const refreshTimer = useRef<number | null>(null);
 
   const refresh = useCallback(() => {
@@ -295,6 +298,43 @@ export function App() {
     }
   }, []);
 
+  const doRemoteConnect = useCallback(
+    (target: string) => {
+      herdr
+        .remoteConnect(target)
+        .then(() => {
+          setRemoteTarget(target);
+          setShowRemote(false);
+          setFocusedPane(null);
+          refresh();
+        })
+        .catch((e) => {
+          setError(String(e));
+          setShowRemote(false);
+        });
+    },
+    [refresh],
+  );
+
+  const doRemoteDisconnect = useCallback(() => {
+    herdr
+      .remoteDisconnect()
+      .then(() => {
+        setRemoteTarget(null);
+        setShowRemote(false);
+        setFocusedPane(null);
+        refresh();
+      })
+      .catch((e) => setError(String(e)));
+  }, [refresh]);
+
+  useEffect(() => {
+    herdr
+      .remoteStatus()
+      .then((r) => setRemoteTarget(r.target ?? null))
+      .catch(() => {});
+  }, []);
+
   // app-level shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -343,6 +383,9 @@ export function App() {
       } else if (e.metaKey && e.shiftKey && (e.key === "f" || e.key === "F")) {
         e.preventDefault();
         setShowFanout(true);
+      } else if (e.metaKey && e.shiftKey && (e.key === "r" || e.key === "R")) {
+        e.preventDefault();
+        setShowRemote(true);
       } else if (e.metaKey && /^[1-9]$/.test(e.key)) {
         e.preventDefault();
         const tab = tabIds[Number(e.key) - 1];
@@ -432,6 +475,14 @@ export function App() {
         >
           fan-out
         </button>
+        <button
+          type="button"
+          className={remoteTarget ? "remote-on" : ""}
+          onClick={() => setShowRemote(true)}
+          title="⇧⌘R — attach remote herdr over SSH"
+        >
+          {remoteTarget ? `⇄ ${remoteTarget}` : "⇄ remote"}
+        </button>
         <InboxButton
           blocked={blockedCount}
           done={inboxItems.length - blockedCount}
@@ -473,6 +524,14 @@ export function App() {
           }
           onSubmit={doFanout}
           onClose={() => setShowFanout(false)}
+        />
+      )}
+      {showRemote && (
+        <RemoteBar
+          connected={remoteTarget ?? undefined}
+          onConnect={doRemoteConnect}
+          onDisconnect={doRemoteDisconnect}
+          onClose={() => setShowRemote(false)}
         />
       )}
       {diffWsId &&
