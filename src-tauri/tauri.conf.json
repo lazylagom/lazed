@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedouble/tauri-apps/main/tauri-conf-v2.schema.json",
+  "productName": "staylazy",
+  "version": "0.0.1",
+  "identifier": "com.staylazy.app",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "staylazy",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 720,
+        "minHeight": 480,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": [],
+    "category": "DeveloperTool",
+    "shortDescription": "GUI client for the herdr agent runtime",
+    "longDescription": "staylazy - a desktop GUI front-end for herdr terminal workspaces"
+  }
+}

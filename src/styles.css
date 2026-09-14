@@ -1,0 +1,154 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #1e2022;
+  color: #e6e6e6;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    sans-serif;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.titlebar {
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 10px 84px;
+  background: #26282b;
+  border-bottom: 1px solid #333;
+  user-select: none;
+}
+
+.titlebar .title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #bbb;
+}
+
+.titlebar button {
+  -webkit-app-region: no-drag;
+  background: #333;
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.titlebar button:hover {
+  background: #3d3f42;
+}
+
+.status {
+  margin-left: auto;
+  font-size: 11px;
+  color: #888;
+}
+
+.panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.pane-cell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+}
+
+.pane-cell:last-child {
+  border-right: none;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #999;
+  background: #232527;
+  border-bottom: 1px solid #2e3033;
+}
+
+.pane-header .badge {
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.badge.working {
+  background: #1f3a5f;
+  color: #7cc4ff;
+}
+.badge.blocked {
+  background: #5f2d1f;
+  color: #ffab7c;
+}
+.badge.done {
+  background: #1f5f33;
+  color: #8ce8a8;
+}
+.badge.idle {
+  background: #333;
+  color: #bbb;
+}
+.badge.unknown {
+  background: #2e2e2e;
+  color: #888;
+}
+
+.pane-header .close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #777;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.pane-header .close:hover {
+  color: #eee;
+}
+
+.pane-term {
+  flex: 1;
+  min-height: 0;
+  padding: 4px;
+}
+
+.pane-term .xterm {
+  height: 100%;
+}
+
+.empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #666;
+  font-size: 13px;
+  flex-direction: column;
+  gap: 8px;
+}
