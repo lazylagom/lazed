@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -24,9 +25,16 @@ fn spawn_forward(target: &str, local: &PathBuf, remote: &str) -> Result<Child, S
             "-o",
             "BatchMode=yes",
             "-o",
+            "ConnectTimeout=8",
+            "-o",
             "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=2",
             "-L",
             &format!("{}:{}", local.display(), remote),
+            "--",
             target,
         ])
         .stdin(Stdio::null())
@@ -43,9 +51,15 @@ static REMOTE: Mutex<Option<Remote>> = Mutex::new(None);
 /// against the new target.
 static EVENT_WRITER: Mutex<Option<UnixStream>> = Mutex::new(None);
 
+/// Bumped on every context switch. `run_event_stream` records it before
+/// connecting and aborts the fresh connection if it changed — closes the
+/// race where a kill lands between connect and writer registration.
+static CONTEXT_GEN: AtomicU64 = AtomicU64::new(0);
+
 pub fn kill_event_stream() {
-    if let Ok(g) = EVENT_WRITER.lock() {
-        if let Some(s) = g.as_ref() {
+    CONTEXT_GEN.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut g) = EVENT_WRITER.lock() {
+        if let Some(s) = g.take() {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -55,19 +69,44 @@ pub fn remote_target() -> Option<String> {
     REMOTE.lock().ok()?.as_ref().map(|r| r.target.clone())
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn ssh_run(target: &str, args: &[&str]) -> Result<Value, String> {
+/// Why an `ssh … herdr` call failed. `Transport` = ssh itself failed or the
+/// remote produced no JSON at all (unreachable host, auth, missing remote
+/// binary) — callers should bail fast instead of retrying. `Remote` = remote
+/// herdr answered with an error object or unparseable JSON.
+enum SshFail {
+    Transport(String),
+    Remote(String),
+}
+
+impl std::fmt::Display for SshFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SshFail::Transport(m) | SshFail::Remote(m) => f.write_str(m),
+        }
+    }
+}
+
+fn ssh_run(target: &str, args: &[&str]) -> Result<Value, SshFail> {
     let remote_cmd = std::iter::once("herdr".to_string())
         .chain(args.iter().map(|a| shell_quote(a)))
         .collect::<Vec<_>>()
         .join(" ");
     let output = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target, &remote_cmd])
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "--",
+            target,
+            &remote_cmd,
+        ])
         .output()
-        .map_err(|e| format!("failed to run ssh {target}: {e}"))?;
+        .map_err(|e| SshFail::Transport(format!("failed to run ssh {target}: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let line = stdout
@@ -76,31 +115,55 @@ fn ssh_run(target: &str, args: &[&str]) -> Result<Value, String> {
         .unwrap_or("")
         .to_string();
     if line.is_empty() {
-        return Err(format!(
+        return Err(SshFail::Transport(format!(
             "ssh {target} herdr {:?} produced no JSON (status {:?}): {}",
             args,
             output.status.code(),
             stderr.trim()
-        ));
+        )));
     }
-    let value: Value =
-        serde_json::from_str(&line).map_err(|e| format!("bad JSON via ssh {:?}: {e}", args))?;
+    let value: Value = serde_json::from_str(&line)
+        .map_err(|e| SshFail::Remote(format!("bad JSON via ssh {:?}: {e}", args)))?;
     if let Some(err) = value.get("error") {
-        return Err(format!("remote herdr {:?} error: {}", args, err));
+        return Err(SshFail::Remote(format!(
+            "remote herdr {:?} error: {}",
+            args, err
+        )));
     }
     Ok(value)
 }
 
-/// Did an ssh-level failure happen (unreachable host/auth) vs a remote-side
-/// herdr error? Used to bail fast instead of retrying dead connections.
-fn is_ssh_failure(e: &str) -> bool {
-    e.contains("ssh ")
-        || e.contains("Connection refused")
-        || e.contains("timed out")
-        || e.contains("Could not resolve")
-        || e.contains("Permission denied")
-        || e.contains("No route to host")
-        || e.contains("Host is down")
+/// Run a remote shell command over ssh (for non-herdr calls like `git` inside
+/// remote worktrees). Returns the raw Output; the caller interprets status.
+pub(crate) fn ssh_shell(target: &str, remote_cmd: &str) -> Result<std::process::Output, String> {
+    Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "--",
+            target,
+            remote_cmd,
+        ])
+        .output()
+        .map_err(|e| format!("failed to run ssh {target}: {e}"))
+}
+
+/// One detached `herdr server` start attempt on the remote host (`ssh -f`).
+fn start_remote_server(target: &str) {
+    let _ = Command::new("ssh")
+        .args([
+            "-f",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "--",
+            target,
+            "herdr server",
+        ])
+        .status();
 }
 
 #[derive(Debug)]
@@ -153,7 +216,7 @@ pub fn herdr_bin() -> Result<PathBuf, String> {
 /// machine is attached) and parse the single JSON response line.
 pub fn run_cli(args: &[&str]) -> Result<Value, String> {
     if let Some(target) = remote_target() {
-        return ssh_run(&target, args);
+        return ssh_run(&target, args).map_err(|e| e.to_string());
     }
     let bin = herdr_bin()?;
     let output = Command::new(bin)
@@ -185,11 +248,30 @@ pub fn run_cli(args: &[&str]) -> Result<Value, String> {
 
 /// Ensure a herdr server is running; spawn a detached `herdr server` if not.
 /// When a remote machine is attached this instead verifies the SSH forward
-/// is alive and the remote server responds.
+/// is alive and the remote server responds — restarting it via ssh if down.
 pub fn ensure_server() -> Result<(), String> {
-    if remote_target().is_some() {
+    if let Some(target) = remote_target() {
         ensure_remote_forward()?;
-        return server_running().map(|_| ());
+        match server_running() {
+            Ok(true) => return Ok(()),
+            // transport-level failure — the next reconnect-loop iteration
+            // retries; a restart over a dead ssh link can't help anyway.
+            Err(e) => return Err(e),
+            // remote herdr answered but the server is down — try one
+            // detached restart (mirrors the local auto-spawn below)
+            Ok(false) => {
+                start_remote_server(&target);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    match server_running() {
+                        Ok(true) => return Ok(()),
+                        Ok(false) => std::thread::sleep(Duration::from_millis(500)),
+                        Err(e) => return Err(e),
+                    }
+                }
+                return Err("remote herdr server did not come up".to_string());
+            }
+        }
     }
     if server_running()? {
         return Ok(());
@@ -234,41 +316,32 @@ pub fn socket_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "herdr status did not report a socket path".to_string())
 }
 
+/// Uniquifier for the local end of forwarded sockets — a live attachment may
+/// still hold the path from its own connect attempt.
+static SOCK_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Attach to a remote herdr server over SSH:
 /// `ssh target 'herdr status --json'` → forward remote unix socket to a local
 /// path via `ssh -N -L`. All subsequent CLI/socket/stream traffic routes remote.
 pub fn remote_connect(target: &str) -> Result<(), String> {
-    remote_disconnect().ok();
-    // remote server must already run (herdr machine add prepares it); if not,
-    // try one detached start before giving up.
+    // Probe the new target BEFORE dropping the current attachment so a failed
+    // connect leaves the existing context (local or previous remote) intact.
+    // The remote server must already run (herdr machine add prepares it); if
+    // not, try one detached start before giving up.
     let mut status = ssh_run(target, &["status", "--json"]);
-    if let Err(e) = &status {
-        if is_ssh_failure(e) {
-            return Err(format!("remote unreachable: {e}"));
-        }
+    if let Err(SshFail::Transport(e)) = &status {
+        return Err(format!("remote unreachable: {e}"));
     }
     if status.is_err() || !status_ok(&status) {
-        let _ = Command::new("ssh")
-            .args([
-                "-f",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=8",
-                target,
-                "herdr server",
-            ])
-            .status();
+        start_remote_server(target);
         let deadline = Instant::now() + Duration::from_secs(12);
         while Instant::now() < deadline {
             status = ssh_run(target, &["status", "--json"]);
             if status_ok(&status) {
                 break;
             }
-            if let Err(e) = &status {
-                if is_ssh_failure(e) {
-                    return Err(format!("remote unreachable: {e}"));
-                }
+            if let Err(SshFail::Transport(e)) = &status {
+                return Err(format!("remote unreachable: {e}"));
             }
             std::thread::sleep(Duration::from_millis(500));
         }
@@ -280,28 +353,45 @@ pub fn remote_connect(target: &str) -> Result<(), String> {
         .ok_or_else(|| "remote herdr status reported no socket".to_string())?
         .to_string();
 
-    let local_sock =
-        std::env::temp_dir().join(format!("staylazy-herdr-{}.sock", std::process::id()));
-    let forward = spawn_forward(target, &local_sock, &remote_sock)?;
+    let seq = SOCK_SEQ.fetch_add(1, Ordering::Relaxed);
+    let local_sock = std::env::temp_dir().join(format!(
+        "staylazy-herdr-{}-{}.sock",
+        std::process::id(),
+        seq
+    ));
+    let mut forward = spawn_forward(target, &local_sock, &remote_sock)?;
 
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
         if local_sock.exists() && UnixStream::connect(&local_sock).is_ok() {
-            *REMOTE.lock().map_err(|e| e.to_string())? = Some(Remote {
+            // swap: install the new attachment, then kill + reap the old one
+            let old = REMOTE.lock().map_err(|e| e.to_string())?.replace(Remote {
                 target: target.to_string(),
                 local_socket: local_sock,
                 remote_socket: PathBuf::from(remote_sock),
                 forward,
             });
+            if let Some(mut o) = old {
+                let _ = o.forward.kill();
+                let _ = o.forward.wait();
+                let _ = std::fs::remove_file(&o.local_socket);
+            }
             kill_event_stream();
             return Ok(());
         }
+        // ExitOnForwardFailure — no point waiting out the deadline
+        if matches!(forward.try_wait(), Ok(Some(_))) {
+            break;
+        }
         std::thread::sleep(Duration::from_millis(200));
     }
+    let _ = forward.kill();
+    let _ = forward.wait();
+    let _ = std::fs::remove_file(&local_sock);
     Err(format!("ssh forward to {target} did not come up"))
 }
 
-fn status_ok(status: &Result<Value, String>) -> bool {
+fn status_ok(status: &Result<Value, SshFail>) -> bool {
     status
         .as_ref()
         .ok()
@@ -311,17 +401,26 @@ fn status_ok(status: &Result<Value, String>) -> bool {
 
 /// Respawn the SSH socket forward if the child died (reconnect path).
 fn ensure_remote_forward() -> Result<(), String> {
-    let mut guard = REMOTE.lock().map_err(|e| e.to_string())?;
-    let Some(r) = guard.as_mut() else {
-        return Err("no remote attached".to_string());
+    // respawn under the lock, but poll for readiness after releasing it so
+    // remote_target()/remote_disconnect stay responsive during the wait
+    let local_sock = {
+        let mut guard = REMOTE.lock().map_err(|e| e.to_string())?;
+        let r = guard
+            .as_mut()
+            .ok_or_else(|| "no remote attached".to_string())?;
+        if matches!(r.forward.try_wait(), Ok(None)) {
+            return Ok(());
+        }
+        r.forward = spawn_forward(
+            &r.target,
+            &r.local_socket,
+            &r.remote_socket.to_string_lossy(),
+        )?;
+        r.local_socket.clone()
     };
-    if matches!(r.forward.try_wait(), Ok(None)) {
-        return Ok(());
-    }
-    r.forward = spawn_forward(&r.target, &r.local_socket, &r.remote_socket.to_string_lossy())?;
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
-        if r.local_socket.exists() && UnixStream::connect(&r.local_socket).is_ok() {
+        if local_sock.exists() && UnixStream::connect(&local_sock).is_ok() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -332,6 +431,7 @@ fn ensure_remote_forward() -> Result<(), String> {
 pub fn remote_disconnect() -> Result<(), String> {
     if let Some(mut r) = REMOTE.lock().map_err(|e| e.to_string())?.take() {
         let _ = r.forward.kill();
+        let _ = r.forward.wait();
         let _ = std::fs::remove_file(&r.local_socket);
     }
     kill_event_stream();
@@ -519,6 +619,7 @@ where
     F: FnMut(&Value, &mut dyn FnMut(&Value)),
 {
     let result = (|| -> Result<(), String> {
+        let gen0 = CONTEXT_GEN.load(Ordering::SeqCst);
         let path = socket_path()?;
         let sock = UnixStream::connect(&path)
             .map_err(|e| format!("failed to connect {}: {e}", path.display()))?;
@@ -527,6 +628,12 @@ where
             .map_err(|e| format!("failed to clone event socket: {e}"))?;
         if let Ok(mut g) = EVENT_WRITER.lock() {
             *g = sock.try_clone().ok();
+        }
+        if CONTEXT_GEN.load(Ordering::SeqCst) != gen0 {
+            // context switched mid-connect — this stream is bound to the
+            // old target; drop it and let the loop reconnect fresh
+            kill_event_stream();
+            return Err("context switched during event connect".to_string());
         }
         let mut reader = BufReader::new(sock);
 
@@ -582,8 +689,16 @@ pub fn open_control_stream(
     let mut cmd = if let Some(target) = remote_target() {
         let mut c = Command::new("ssh");
         c.args([
+            "-T",
             "-o",
             "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=2",
+            "--",
             &target,
             &format!(
                 "herdr terminal session control {} --takeover --cols {} --rows {}",
@@ -634,4 +749,32 @@ pub fn cmd_input_text(text: &str) -> Value {
 
 pub fn cmd_resize(cols: u32, rows: u32) -> Value {
     json!({"type": "terminal.resize", "cols": cols, "rows": rows})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_quote_wraps_and_escapes() {
+        assert_eq!(shell_quote("w1:p1"), "'w1:p1'");
+        assert_eq!(shell_quote(""), "''");
+        // embedded single quote → end-quote, escaped quote, re-open
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        // no way to break out of the single-quoted string
+        assert_eq!(
+            shell_quote("x'; rm -rf /; echo '"),
+            r"'x'\''; rm -rf /; echo '\'''"
+        );
+        assert_eq!(shell_quote("a\nb"), "'a\nb'");
+        assert_eq!(shell_quote("$(whoami)`id`"), "'$(whoami)`id`'");
+    }
+
+    #[test]
+    fn remote_connect_unreachable_host_errors_clean() {
+        // bogus host → ssh transport failure → Err, and nothing stays attached
+        let res = remote_connect("staylazy-no-such-host.invalid");
+        assert!(res.is_err());
+        assert!(remote_target().is_none());
+    }
 }

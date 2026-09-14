@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{Manager, State};
 
 struct AppState {
     control: Mutex<HashMap<String, herdr::ControlHandle>>,
@@ -215,29 +215,39 @@ fn worktree_merge(repo: String, branch: String) -> Result<Value, String> {
     git::worktree_merge(&repo, &branch)
 }
 
-#[tauri::command]
-async fn remote_connect(target: String, state: State<'_, AppState>) -> Result<(), String> {
-    // drop all local control streams before switching context
+/// Kill every pane control stream. Streams are bound to whatever herdr
+/// context was active when they attached, so they must not outlive a context
+/// switch — PaneView's attach retry re-binds them to the current target.
+fn drain_control_streams(state: &State<AppState>) {
     if let Ok(mut map) = state.control.lock() {
         for (_, mut h) in map.drain() {
             let _ = h.child.kill();
+            let _ = h.child.wait();
         }
     }
+}
+
+#[tauri::command]
+async fn remote_connect(target: String, state: State<'_, AppState>) -> Result<(), String> {
     // ssh probing + forward setup blocks for seconds — keep it off the
     // webview's command path
     tauri::async_runtime::spawn_blocking(move || herdr::remote_connect(&target))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    // Drain only after a successful attach: killing streams earlier would let
+    // pane attach-retries rebind streams of the *old* context mid-probe, which
+    // would then survive the switch (colliding pane ids) and keep serving the
+    // old machine under the new context. On failure nothing is touched.
+    drain_control_streams(&state);
+    Ok(())
 }
 
 #[tauri::command]
 fn remote_disconnect(state: State<AppState>) -> Result<(), String> {
-    if let Ok(mut map) = state.control.lock() {
-        for (_, mut h) in map.drain() {
-            let _ = h.child.kill();
-        }
-    }
-    herdr::remote_disconnect()
+    // clear REMOTE first so post-kill attach retries bind locally
+    herdr::remote_disconnect()?;
+    drain_control_streams(&state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -296,7 +306,10 @@ fn subscribe_events(
                 let _ = on_event.send(ev.clone());
             });
             eprintln!("[staylazy] event stream ended: {err}; reconnecting");
-            let _ = on_event.send(serde_json::json!({"type": "events.reconnect"}));
+            // frontend reads the name from `event` (or data.type) — send both
+            let _ = on_event.send(serde_json::json!({
+                "event": "events.reconnect", "type": "events.reconnect"
+            }));
             std::thread::sleep(std::time::Duration::from_millis(800));
             let _ = herdr::ensure_server();
         }
@@ -331,7 +344,7 @@ fn detach_pane_internal(state: &State<AppState>, pane_id: &str) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             control: Mutex::new(HashMap::new()),
@@ -368,6 +381,24 @@ pub fn run() {
             remote_status,
             subscribe_events,
         ])
-        .run(tauri::generate_context!())
-        .unwrap_or_else(|err| eprintln!("error while running staylazy: {err}"));
+        .build(tauri::generate_context!())
+        .unwrap_or_else(|err| {
+            eprintln!("error while building staylazy: {err}");
+            std::process::exit(1);
+        });
+    app.run(|handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // kill the ssh forward + control children — dropping a Child does
+            // not terminate the process, so they would outlive the app
+            if let Some(state) = handle.try_state::<AppState>() {
+                if let Ok(mut map) = state.control.lock() {
+                    for (_, mut h) in map.drain() {
+                        let _ = h.child.kill();
+                        let _ = h.child.wait();
+                    }
+                }
+            }
+            let _ = herdr::remote_disconnect();
+        }
+    });
 }

@@ -93,6 +93,8 @@ export interface Snapshot {
 export interface HerdrEvent {
   /** event name, e.g. "pane_created", "pane_agent_status_changed" */
   event?: string;
+  /** synthetic client-side events also carry `type` (e.g. "events.reconnect") */
+  type?: string;
   data?: Record<string, unknown>;
   id?: string;
   result?: unknown;

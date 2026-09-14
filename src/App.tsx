@@ -40,7 +40,7 @@ const REFRESH_EVENTS = new Set([
   "pane_exited",
   "pane_agent_detected",
   "layout_updated",
-  "events.reconnect",
+  "events_reconnect",
 ]);
 
 function worst(statuses: (AgentStatus | undefined)[]): AgentStatus {
@@ -311,6 +311,11 @@ export function App() {
         .catch((e) => {
           setError(String(e));
           setShowRemote(false);
+          // a failed connect may still have detached a previous attachment
+          herdr
+            .remoteStatus()
+            .then((r) => setRemoteTarget(r.target ?? null))
+            .catch(() => {});
         });
     },
     [refresh],

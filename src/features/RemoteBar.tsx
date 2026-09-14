@@ -26,13 +26,19 @@ export function RemoteBar({
     onConnect(t);
   };
 
+  // an attach can't be cancelled once spawned — don't let Escape/overlay
+  // pretend otherwise (the modal closes itself when the result arrives)
+  const tryClose = () => {
+    if (!busy) onClose();
+  };
+
   return (
-    <div className="modal-overlay" onMouseDown={onClose}>
+    <div className="modal-overlay" onMouseDown={tryClose}>
       <div
         className="modal"
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
+          if (e.key === "Escape") tryClose();
           else if (e.key === "Enter") connect();
         }}
       >
@@ -50,6 +56,7 @@ export function RemoteBar({
               className="modal-input"
               placeholder="user@host — remote herdr machine"
               value={target}
+              disabled={busy}
               onChange={(e) => setTarget(e.target.value)}
             />
             <button

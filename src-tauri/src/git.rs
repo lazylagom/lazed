@@ -3,12 +3,26 @@ use std::process::Command;
 use serde_json::{json, Value};
 
 fn git(dir: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("failed to run git {:?}: {e}", args))?;
+    let out = if let Some(target) = crate::herdr::remote_target() {
+        // remote attach: worktree paths live on the remote host — never feed
+        // them to local git (a same-named local path would diff/merge the
+        // wrong repository)
+        let remote_cmd = ["git", "-C"]
+            .into_iter()
+            .map(str::to_string)
+            .chain(std::iter::once(crate::herdr::shell_quote(dir)))
+            .chain(args.iter().map(|a| crate::herdr::shell_quote(a)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        crate::herdr::ssh_shell(&target, &remote_cmd)?
+    } else {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map_err(|e| format!("failed to run git {:?}: {e}", args))?
+    };
     if !out.status.success() {
         return Err(format!(
             "git {:?} failed: {}",

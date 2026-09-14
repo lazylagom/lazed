@@ -113,11 +113,13 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 
 구현 노트:
 - `⇧⌘R` 또는 titlebar `⇄ remote` → `user@host` 입력 → SSH attach
-- 메커니즘: `ssh target 'herdr status --json'` → 원격 unix socket 경로 획득 → `ssh -N -L <localsock>:<remotesock>` 포워딩 → 이벤트 스트림은 포워드된 로컬 소켓에 연결
-- 원격 시 모든 CLI 호출이 `ssh <target> herdr <args>`(shell-quoted)로 라우팅, control 스트림은 `ssh target herdr terminal session control` 파이프
-- 컨텍스트 전환 시 이벤트 소켓 shutdown → 재연결 루프가 새 대상으로 자동 재구독; ssh forward 자식이 죽으면 자동 respawn
-- 원격 서버가 안 떠 있으면 `ssh -f target 'herdr server'`로 한 번 기동 시도
-- **미검증 항목**: 실제 SSH 호스트가 없어 e2e 미검증 — 실패 경로(unreachable → 빠른 에러 표시, 로컬 컨텍스트 유지)만 확인. `herdr machine add`로 원격 서버를 준비한 뒤 사용 권장
+- 메커니즘: `ssh -- target 'herdr status --json'` → 원격 unix socket 경로 획득 → `ssh -N -L <localsock>:<remotesock>` 포워딩 → 이벤트 스트림은 포워드된 로컬 소켓에 연결
+- 원격 시 모든 CLI 호출이 `ssh -- <target> herdr <args>`(shell-quoted)로 라우팅, control 스트림은 ssh 파이프; `git` diff/merge(`worktree_diff`/`worktree_merge`)도 ssh 경유 — 원격 worktree 경로를 로컬 git에 넘기지 않음
+- ssh target은 항상 `--` 뒤에 위치시켜 `-o`/`-F` 등 옵션 주입 차단; ssh 실패(transport)와 원격 herdr 에러를 구분해 transport 실패 시 즉시 bail
+- 컨텍스트 전환 시 이벤트 소켓 shutdown → 재연결 루프가 새 대상으로 자동 재구독; 연결 중 컨텍스트가 바뀌면 generation 카운터로 스테일 연결 abort. ssh forward 자식이 죽으면 자동 respawn (ServerAliveInterval로 사일런트 단절도 감지)
+- control 스트림은 attach **성공 후에만** kill — probe 도중 pane 재연결 retry가 로컬 스트림을 붙여버리는 레이스 방지
+- 원격 서버가 안 떠 있으면 `ssh -f -- target 'herdr server'`로 기동 시도 (attach 시 + ensure_server 재연결 경로 모두)
+- **미검증 항목**: 실제 SSH 호스트가 없어 e2e 미검증 — 실패 경로(unreachable → 빠른 에러 표시, 로컬 컨텍스트 유지)와 shell quoting/에러 분류는 단위 테스트로 확인. `herdr machine add`로 원격 서버를 준비한 뒤 사용 권장
 - 미구현: 머신 저장/목록(`herdr machine` 연동 UI), 동시 멀티 원격, 모바일 read-only
 
 ---
