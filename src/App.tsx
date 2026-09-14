@@ -7,6 +7,8 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PaneGrid } from "./components/PaneGrid";
 import { AgentPicker } from "./features/AgentPicker";
+import { DiffView } from "./features/DiffView";
+import { Fanout, type FanoutRequest } from "./features/Fanout";
 import { PromptBar, type PromptTarget } from "./features/PromptBar";
 import {
   type AgentStatus,
@@ -63,6 +65,8 @@ export function App() {
   const [focusedPane, setFocusedPane] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
+  const [showFanout, setShowFanout] = useState(false);
+  const [diffWsId, setDiffWsId] = useState<string | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
   const refreshTimer = useRef<number | null>(null);
 
@@ -258,6 +262,39 @@ export function App() {
     [panesById, focusedWsId],
   );
 
+  const doFanout = useCallback(async (req: FanoutRequest) => {
+    setShowFanout(false);
+    if (!req.repo.trim()) {
+      setError("fan-out: repo path is required");
+      return;
+    }
+    for (const kind of req.kinds) {
+      const branch = `${req.prefix}-${kind}`;
+      try {
+        const res = await herdr.worktreeCreate(
+          req.repo,
+          branch,
+          req.base,
+          branch,
+        );
+        const paneId = (
+          res as { result?: { root_pane?: { pane_id?: string } } }
+        )?.result?.root_pane?.pane_id;
+        if (!paneId) continue;
+        // let the fresh shell pane initialize before launching the agent
+        await new Promise((r) => setTimeout(r, 1500));
+        await herdr.agentStart(paneId, kind);
+        if (req.prompt) {
+          // let the agent's TUI come up before typing the prompt
+          await new Promise((r) => setTimeout(r, 3000));
+          await herdr.agentPrompt(paneId, req.prompt);
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    }
+  }, []);
+
   // app-level shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -303,6 +340,9 @@ export function App() {
       } else if (e.metaKey && e.shiftKey && (e.key === "i" || e.key === "I")) {
         e.preventDefault();
         setInboxOpen((o) => !o);
+      } else if (e.metaKey && e.shiftKey && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        setShowFanout(true);
       } else if (e.metaKey && /^[1-9]$/.test(e.key)) {
         e.preventDefault();
         const tab = tabIds[Number(e.key) - 1];
@@ -385,6 +425,13 @@ export function App() {
         >
           prompt
         </button>
+        <button
+          type="button"
+          onClick={() => setShowFanout(true)}
+          title="⇧⌘F — fan out worktrees × agents"
+        >
+          fan-out
+        </button>
         <InboxButton
           blocked={blockedCount}
           done={inboxItems.length - blockedCount}
@@ -417,6 +464,35 @@ export function App() {
           onClose={() => setShowPrompt(false)}
         />
       )}
+      {showFanout && (
+        <Fanout
+          defaultRepo={
+            workspace?.worktree?.repo_root ??
+            panesById.get(effectiveFocusedPane ?? "")?.cwd ??
+            ""
+          }
+          onSubmit={doFanout}
+          onClose={() => setShowFanout(false)}
+        />
+      )}
+      {diffWsId &&
+        (() => {
+          const ws = snap?.workspaces.find((w) => w.workspace_id === diffWsId);
+          if (!ws) return null;
+          const agentPane = allPanes.find(
+            (p) => p.workspace_id === diffWsId && p.agent,
+          );
+          return (
+            <DiffView
+              workspace={ws}
+              agentPaneId={agentPane?.pane_id}
+              onClose={() => setDiffWsId(null)}
+              onJump={() => {
+                if (agentPane) jumpToPane(agentPane);
+              }}
+            />
+          );
+        })()}
       <div className="body">
         <Sidebar
           snap={snap}
@@ -434,6 +510,7 @@ export function App() {
           onCloseTab={(id) =>
             herdr.tabClose(id).catch((e) => setError(String(e)))
           }
+          onDiff={(ws) => setDiffWsId(ws.workspace_id)}
           rollup={worst}
         />
         <div className="main">

@@ -574,3 +574,239 @@ body,
   white-space: nowrap;
   flex: 1;
 }
+
+/* ── fan-out ─────────────────────────────── */
+
+.modal.fanout {
+  width: 480px;
+}
+
+.fanout-row {
+  display: flex;
+}
+
+.fanout-row .modal-input {
+  flex: 1;
+}
+
+.fanout-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 10px;
+}
+
+.fanout-kind {
+  padding: 4px 10px;
+  background: #2c2e31;
+  border: 1px solid #3a3d40;
+  border-radius: 12px;
+  color: #aaa;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fanout-kind.sel {
+  background: #33507a;
+  border-color: #4a6b8a;
+  color: #fff;
+}
+
+.fanout-prompt {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.fanout-go {
+  width: 100%;
+  padding: 10px;
+  background: #33507a;
+  border: none;
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.fanout-go:disabled {
+  background: #2c2e31;
+  color: #666;
+  cursor: default;
+}
+
+/* ── diff view ───────────────────────────── */
+
+.diff-panel {
+  position: fixed;
+  top: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(860px, 92vw);
+  max-height: calc(100vh - 100px);
+  display: flex;
+  flex-direction: column;
+  background: #1e2022;
+  border: 1px solid #3a3d40;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px #000000cc;
+  z-index: 95;
+  overflow: hidden;
+}
+
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2e3033;
+}
+
+.diff-title {
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #ddd;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-head button,
+.diff-draft button,
+.diff-confirm button,
+.diff-comment button {
+  background: #2c2e31;
+  border: 1px solid #3a3d40;
+  border-radius: 6px;
+  color: #ccc;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.diff-merge {
+  background: #2d4a2f !important;
+  border-color: #4a6b4a !important;
+  color: #a5d6a7 !important;
+}
+
+.diff-stat {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #888;
+  border-bottom: 1px solid #26282b;
+  white-space: pre-wrap;
+  font-family: ui-monospace, monospace;
+}
+
+.diff-body {
+  flex: 1;
+  overflow: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.diff-fname {
+  padding: 6px 12px;
+  background: #26282b;
+  color: #ccc;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+.diff-line {
+  display: flex;
+  width: 100%;
+  padding: 0 8px 0 0;
+  white-space: pre;
+  cursor: default;
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
+  color: #bbb;
+}
+
+.diff-line.add {
+  background: #1e3a24;
+  color: #a5d6a7;
+}
+
+.diff-line.del {
+  background: #3a1e1e;
+  color: #ef9a9a;
+}
+
+.diff-line.hunk {
+  color: #7986cb;
+  padding-left: 8px;
+}
+
+.diff-line.add:hover,
+.diff-line.ctx:hover {
+  outline: 1px solid #4a6b8a;
+  cursor: text;
+}
+
+.diff-lno {
+  min-width: 42px;
+  text-align: right;
+  padding-right: 8px;
+  color: #555;
+  user-select: none;
+}
+
+.diff-text {
+  flex: 1;
+}
+
+.diff-draft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid #3a3d40;
+  background: #242628;
+  font-size: 11.5px;
+  color: #999;
+}
+
+.diff-draft .modal-input {
+  border: 1px solid #3a3d40;
+  border-radius: 6px;
+  padding: 6px 10px;
+  flex: 1;
+}
+
+.diff-comments {
+  border-top: 1px solid #3a3d40;
+  padding: 8px 12px;
+  background: #242628;
+}
+
+.diff-comment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: #ccc;
+  padding: 3px 0;
+  font-family: ui-monospace, monospace;
+}
+
+.diff-comment button {
+  padding: 0 6px;
+}
+
+.diff-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid #3a3d40;
+  background: #2d2a24;
+  font-size: 12px;
+  color: #ddd;
+}

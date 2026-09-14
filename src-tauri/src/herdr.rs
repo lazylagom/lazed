@@ -229,12 +229,16 @@ pub fn pane_send_text(pane_id: &str, text: &str) -> Result<Value, String> {
 pub fn worktree_create(
     cwd: &str,
     branch: Option<&str>,
+    base: Option<&str>,
     label: Option<&str>,
     workspace: Option<&str>,
 ) -> Result<Value, String> {
     let mut args = vec!["worktree", "create", "--cwd", cwd];
     if let Some(b) = branch {
         args.extend(["--branch", b]);
+    }
+    if let Some(b) = base {
+        args.extend(["--base", b]);
     }
     if let Some(l) = label {
         args.extend(["--label", l]);
@@ -245,8 +249,20 @@ pub fn worktree_create(
     run_cli(&args)
 }
 
-pub fn worktree_list() -> Result<Value, String> {
-    run_cli(&["worktree", "list"])
+pub fn worktree_list(cwd: Option<&str>) -> Result<Value, String> {
+    let mut args = vec!["worktree", "list"];
+    if let Some(c) = cwd {
+        args.extend(["--cwd", c]);
+    }
+    run_cli(&args)
+}
+
+pub fn worktree_remove(workspace_id: &str, force: bool) -> Result<Value, String> {
+    let mut args = vec!["worktree", "remove", "--workspace", workspace_id];
+    if force {
+        args.push("--force");
+    }
+    run_cli(&args)
 }
 
 /// Subscription types that apply globally (no pane_id required).

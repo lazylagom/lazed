@@ -111,6 +111,7 @@ export function Sidebar({
   onNewTab,
   onCloseWorkspace,
   onCloseTab,
+  onDiff,
   rollup,
 }: {
   snap: Snapshot | null;
@@ -124,6 +125,7 @@ export function Sidebar({
   onNewTab: () => void;
   onCloseWorkspace: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onDiff: (ws: WorkspaceInfo) => void;
   rollup: (s: (AgentStatus | undefined)[]) => AgentStatus;
 }) {
   const workspaces = snap?.workspaces ?? [];
@@ -153,6 +155,16 @@ export function Sidebar({
                   <span>{w.label ?? w.workspace_id}</span>
                   <span className="side-count">{w.pane_count ?? ""}</span>
                 </button>
+                {w.worktree?.is_linked_worktree && (
+                  <button
+                    type="button"
+                    className="side-close"
+                    title={`diff ${w.worktree.checkout_path}`}
+                    onClick={() => onDiff(w)}
+                  >
+                    ⑂
+                  </button>
+                )}
                 <button
                   type="button"
                   className="side-close"

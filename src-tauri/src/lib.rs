@@ -1,3 +1,4 @@
+mod git;
 mod herdr;
 
 use std::collections::HashMap;
@@ -176,20 +177,37 @@ fn pane_send_text(pane_id: String, text: String) -> Result<Value, String> {
 fn worktree_create(
     cwd: String,
     branch: Option<String>,
+    base: Option<String>,
     label: Option<String>,
     workspace: Option<String>,
 ) -> Result<Value, String> {
     herdr::worktree_create(
         &cwd,
         branch.as_deref(),
+        base.as_deref(),
         label.as_deref(),
         workspace.as_deref(),
     )
 }
 
 #[tauri::command]
-fn worktree_list() -> Result<Value, String> {
-    herdr::worktree_list()
+fn worktree_list(cwd: Option<String>) -> Result<Value, String> {
+    herdr::worktree_list(cwd.as_deref())
+}
+
+#[tauri::command]
+fn worktree_remove(workspace_id: String, force: bool) -> Result<Value, String> {
+    herdr::worktree_remove(&workspace_id, force)
+}
+
+#[tauri::command]
+fn worktree_diff(checkout: String, base: Option<String>) -> Result<Value, String> {
+    git::worktree_diff(&checkout, base.as_deref())
+}
+
+#[tauri::command]
+fn worktree_merge(repo: String, branch: String) -> Result<Value, String> {
+    git::worktree_merge(&repo, &branch)
 }
 
 #[tauri::command]
@@ -307,6 +325,9 @@ pub fn run() {
             pane_send_text,
             worktree_create,
             worktree_list,
+            worktree_remove,
+            worktree_diff,
+            worktree_merge,
             subscribe_events,
         ])
         .run(tauri::generate_context!())

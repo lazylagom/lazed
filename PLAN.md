@@ -94,10 +94,18 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - `⇧⌘I` 또는 titlebar inbox 버튼 → blocked/done pane 목록, 클릭 시 workspace+tab 포커스 체이닝 후 pane 점프
 - `tauri-plugin-notification` — blocked/done 전이 시 네이티브 알림 (permission은 첫 전이 시 요청, 실패 무시)
 
-### Phase 3 — Orca식 멀티에이전트
+### Phase 3 — Orca식 멀티에이전트 ✅
 - worktree fan-out: 프롬프트 하나 → N개 worktree(`worktree.create`) × N개 에이전트 pane
 - worktree별 diff 뷰 → 라인 주석 → 해당 에이전트 pane에 회송
 - 결과 비교 후 승자 머지 플로우
+
+구현 노트:
+- `⇧⌘F` Fanout 모달: repo/base/prefix/에이전트 종류(칩 다중선택)/공통 프롬프트 → kind별 `worktree create --branch <prefix>-<kind>` → root pane에 `agent start` → `agent prompt`
+- worktree 응답에 `workspace` + `root_pane` 포함 → 추가 생성 불필요. agent start 전 1.5s 대기(새 셸 init), prompt 전 3s 대기(TUI 부팅)
+- 사이드바 worktree workspace에 `⑂` 버튼 → DiffView: `git diff <merge-base>` 파싱(커밋+작업트리 전부), 라인 클릭 → 코멘트 → `agent prompt`로 `file:line — text` 회송
+- merge 버튼 → 확인 → `git -C <repo_root> merge --no-ff` (컨플릭트는 에러 문자열로 표시)
+- 검증: claude+codex fan-out, feat-a diff → "hi instead of hello" 코멘트 → claude가 브랜치 수정 커밋 → main에 머지됨
+- 주의: 에이전트 첫 실행 시 신뢰 프롬프트(claude trust dialog, codex confirm)는 수동 승인 필요 — 자동화하지 않음
 
 ### Phase 4 — (후반) 원격/멀티
 - SSH 머신 등록 → 원격 herdr 서버 attach (`herdr --remote` 모델 재사용)

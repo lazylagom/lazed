@@ -2,6 +2,14 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 export type AgentStatus = "working" | "blocked" | "done" | "idle" | "unknown";
 
+export interface WorktreeInfo {
+  checkout_path: string;
+  is_linked_worktree: boolean;
+  repo_key?: string;
+  repo_name?: string;
+  repo_root?: string;
+}
+
 export interface WorkspaceInfo {
   workspace_id: string;
   label?: string;
@@ -11,6 +19,7 @@ export interface WorkspaceInfo {
   agent_status?: AgentStatus;
   pane_count?: number;
   tab_count?: number;
+  worktree?: WorktreeInfo;
 }
 
 export interface TabInfo {
@@ -119,10 +128,26 @@ export const herdr = {
   worktreeCreate: (
     cwd: string,
     branch?: string,
+    base?: string,
     label?: string,
     workspace?: string,
-  ) => invoke("worktree_create", { cwd, branch, label, workspace }),
-  worktreeList: () => invoke("worktree_list"),
+  ) => invoke("worktree_create", { cwd, branch, base, label, workspace }),
+  worktreeList: (cwd?: string) => invoke("worktree_list", { cwd }),
+  worktreeRemove: (workspaceId: string, force = false) =>
+    invoke("worktree_remove", { workspaceId, force }),
+  worktreeDiff: (checkout: string, base?: string) =>
+    invoke<{
+      branch: string;
+      base?: string;
+      diff: string;
+      stat: string;
+      untracked: string[];
+    }>("worktree_diff", { checkout, base }),
+  worktreeMerge: (repo: string, branch: string) =>
+    invoke<{ ok: boolean; output: string }>("worktree_merge", {
+      repo,
+      branch,
+    }),
 };
 
 /** herdr-supported agent kinds (from `agent start --kind`). */
