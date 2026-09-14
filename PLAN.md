@@ -121,7 +121,7 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - control 스트림은 attach **성공 후에만** kill — probe 도중 pane 재연결 retry가 로컬 스트림을 붙여버리는 레이스 방지
 - 원격 서버가 안 떠 있으면 `ssh -f -- target 'herdr server'`로 기동 시도 (attach 시 + ensure_server 재연결 경로 모두)
 - **미검증 항목**: 실제 SSH 호스트가 없어 e2e 미검증 — 실패 경로(unreachable → 빠른 에러 표시, 로컬 컨텍스트 유지)와 shell quoting/에러 분류는 단위 테스트로 확인. `herdr machine add`로 원격 서버를 준비한 뒤 사용 권장
-- 미구현: 머신 add/remove 등 관리 UI(attach 목록만), 동시 멀티 원격, 모바일 read-only
+- 미구현: 머신 add/remove 등 관리 UI(attach 목록만), 동시 멀티 원격, 모바일 read-only — 상세·구현 메모는 §7 백로그 참조
 
 ---
 
@@ -185,10 +185,25 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 
 ---
 
-## 7. 오픈 이슈
+## 7. 오픈 이슈 & 다음 작업
 
-- [ ] herdr 바이너리 배포: 앱 번들 포함(서명/크기) vs 런타임 설치 유도 — Phase 0에서 결정
-- [ ] pane/session ID의 재시작 후 안정성 (session.json 스키마 확인)
-- [ ] `terminal session control` 프레임 스트림의 고부하 성능 (scrollback 재생, 대량 출력)
-- [ ] herdr 업그레이드 정책: 스키마 diff 체크 루틴
-- [ ] staylazy 이름/브랜딩, herdr attribution 표기 위치
+### 검증
+
+- [ ] **실기 SSH e2e** — `herdr machine add <host>`로 원격 준비 → `⇧⌘R` attach → pane 조작/이벤트 스트림/git diff·merge 라우팅/원격 서버 재기동 확인. 실패 경로·셸 quoting·컨텍스트 전환은 단위 테스트로만 확인된 상태.
+- [ ] **프레임 스트림 고부하 성능 계측** — 접근법: throwaway `herdr --session staylazy-perf` 세션(소켓 `~/.config/herdr/sessions/<name>/herdr.sock` — 사용자 워크스페이스와 격리)에 pane 생성 → `seq 1 300000` 등 flood → control stream의 프레임 수/bytes/wall-time 측정 → `echo <marker>` 회송으로 무부하 round-trip 지연 측정. 의심 구간: per-frame `Channel.send` IPC, 프론트 `atob`, `term.write` — 병목 확인 시 reader thread에서 프레임 배칭.
+
+### 기능 (Phase 4 후속)
+
+- [ ] **머신 관리 UI** — 목록/attach 완료. 남은 것:
+  - `machine remove <id>` / `machine rename <id> --label <l>` — 비대화형이라 그대로 호출 가능
+  - `machine add` — 원격 설치/서버 교체 승인 프롬프트가 interactive라 백그라운드 exec 불가 → staylazy pane 안에서 `pane run 'herdr machine add <target> --label <l>'`로 실행해 사용자가 pane에서 승인하는 방식이 자연스러움
+  - 저장 머신 row 스키마 `{id, label, target, session, enabled, selected}` (herdr v0.9.0 `src/cli/machine.rs` 확인)
+- [ ] **동시 멀티 원격** — 현재 단일 `REMOTE` static(`remote_ctx()` 경계). 멀티화하려면 target별 context map + 이벤트/control 스트림을 context별로 라우팅 + pane id 네임스페이스 처리 필요 (서로 다른 서버가 같은 `w1:p1`을 가질 수 있음 — UI에서 서버 프리픽스 필요, herdr 스킬 문서도 동일 경고)
+- [ ] **모바일 read-only 뷰** — Orca 모니터링 패턴 참고
+
+### 배포/운영
+
+- [ ] **herdr 바이너리 번들** — 방향: 번들 포함(§5 결정). 구현 메모: `tauri.conf.json` `bundle.resources: ["bin/herdr"]` + `setup()`에서 `resource_dir()/herdr` 존재 시 `OnceLock` 등록 → `herdr_bin()`이 번들 우선 조회. 바이너리는 플랫폼별이라 git에 넣지 않고 `scripts/fetch-herdr`가 `HERDR_BIN`/PATH/mise에서 `src-tauri/bin/`으로 복사(`src-tauri/bin/`은 gitignore) + `beforeBuildCommand`에 연결. Apache-2.0 재배포 → `NOTICE`에 herdr 표기 필요. 대안(미채택 시): 미설치 감지 시 brew/install.sh 안내 — 현재 `herdr_bin()` 에러 메시지가 이미 그 역할.
+- [ ] **herdr 업그레이드 정책** — `herdr status --json`이 `client.version`/`server.version`/`protocol`/`compatible`/`endpoint_compatible`을 이미 노출 → bootstrap에서 고정 버전(0.9.0)·`compatible` 검사 후 불일치 시 UI 경고로 충분. 스키마 diff 체크 루틴: staylazy가 의존하는 필드(`/server/socket`, `/server/running`, `/result/snapshot`, `panes[]`, `pane_id`, 이벤트 `{event,data}` 봉투, machine list row 스키마) 존재 여부를 검증하는 스크립트/테스트를 두고 herdr 버전업 때 실행.
+- [x] pane/session ID 재시작 후 안정성 — Phase 0 검증 완료: 스냅샷 복원 시 동일 ID/cwd 유지.
+- [ ] **브랜딩/attribution** — 제품명 staylazy 확정 + `NOTICE`/About에 herdr(Apache-2.0) 표기 위치 결정.
