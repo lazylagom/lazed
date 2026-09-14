@@ -112,7 +112,8 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - 멀티 클라이언트/TUI 공존 polish, 모바일 read-only (Orca 패턴)
 
 구현 노트:
-- `⇧⌘R` 또는 titlebar `⇄ remote` → `user@host` 입력 → SSH attach
+- `⇧⌘R` 또는 titlebar `⇄ remote` → `user@host` 입력 또는 저장된 머신 선택(`herdr machine list --json` 연동, 로컬 클라이언트 상태라 attach 중에도 항상 로컬 실행) → SSH attach
+- named session 지원: 저장 머신의 `session`이 `default`가 아니면 모든 원격 호출이 `herdr --session '<name>'`로 라우팅 (수동 입력은 default 세션)
 - 메커니즘: `ssh -- target 'herdr status --json'` → 원격 unix socket 경로 획득 → `ssh -N -L <localsock>:<remotesock>` 포워딩 → 이벤트 스트림은 포워드된 로컬 소켓에 연결
 - 원격 시 모든 CLI 호출이 `ssh -- <target> herdr <args>`(shell-quoted)로 라우팅, control 스트림은 ssh 파이프; `git` diff/merge(`worktree_diff`/`worktree_merge`)도 ssh 경유 — 원격 worktree 경로를 로컬 git에 넘기지 않음
 - ssh target은 항상 `--` 뒤에 위치시켜 `-o`/`-F` 등 옵션 주입 차단; ssh 실패(transport)와 원격 herdr 에러를 구분해 transport 실패 시 즉시 bail
@@ -120,7 +121,7 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - control 스트림은 attach **성공 후에만** kill — probe 도중 pane 재연결 retry가 로컬 스트림을 붙여버리는 레이스 방지
 - 원격 서버가 안 떠 있으면 `ssh -f -- target 'herdr server'`로 기동 시도 (attach 시 + ensure_server 재연결 경로 모두)
 - **미검증 항목**: 실제 SSH 호스트가 없어 e2e 미검증 — 실패 경로(unreachable → 빠른 에러 표시, 로컬 컨텍스트 유지)와 shell quoting/에러 분류는 단위 테스트로 확인. `herdr machine add`로 원격 서버를 준비한 뒤 사용 권장
-- 미구현: 머신 저장/목록(`herdr machine` 연동 UI), 동시 멀티 원격, 모바일 read-only
+- 미구현: 머신 add/remove 등 관리 UI(attach 목록만), 동시 멀티 원격, 모바일 read-only
 
 ---
 

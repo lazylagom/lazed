@@ -818,3 +818,20 @@ body,
   border-color: #4a6b4a !important;
   color: #a5d6a7 !important;
 }
+
+.remote-machine {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.remote-machine:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.remote-machine-target {
+  color: #777;
+  font-size: 11px;
+}

@@ -25,16 +25,25 @@ fn bootstrap(state: State<AppState>) -> Result<Value, String> {
     };
     let workspace = herdr::ensure_workspace(cwd.as_deref())?;
     let panes = herdr::list_panes()?;
-    // drop stale control sessions whose pane disappeared
+    // drop stale control sessions whose pane disappeared — kill + reap so
+    // the child (or its ssh pipe) doesn't leak as a zombie/orphan
     let live: Vec<String> = panes
         .iter()
         .filter_map(|p| p.get("pane_id").and_then(Value::as_str).map(str::to_string))
         .collect();
-    state
-        .control
-        .lock()
-        .map_err(|e| e.to_string())?
-        .retain(|id, _| live.contains(id));
+    if let Ok(mut map) = state.control.lock() {
+        let stale: Vec<String> = map
+            .keys()
+            .filter(|id| !live.contains(id))
+            .cloned()
+            .collect();
+        for id in stale {
+            if let Some(mut h) = map.remove(&id) {
+                let _ = h.child.kill();
+                let _ = h.child.wait();
+            }
+        }
+    }
     Ok(serde_json::json!({"workspace": workspace, "panes": panes}))
 }
 
@@ -228,12 +237,18 @@ fn drain_control_streams(state: &State<AppState>) {
 }
 
 #[tauri::command]
-async fn remote_connect(target: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn remote_connect(
+    target: String,
+    session: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     // ssh probing + forward setup blocks for seconds — keep it off the
     // webview's command path
-    tauri::async_runtime::spawn_blocking(move || herdr::remote_connect(&target))
-        .await
-        .map_err(|e| e.to_string())??;
+    tauri::async_runtime::spawn_blocking(move || {
+        herdr::remote_connect(&target, session.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     // Drain only after a successful attach: killing streams earlier would let
     // pane attach-retries rebind streams of the *old* context mid-probe, which
     // would then survive the switch (colliding pane ids) and keep serving the
@@ -252,7 +267,16 @@ fn remote_disconnect(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn remote_status() -> Result<Value, String> {
-    Ok(serde_json::json!({"target": herdr::remote_target()}))
+    let (target, session) = herdr::remote_ctx().unwrap_or((String::new(), None));
+    Ok(serde_json::json!({
+        "target": if target.is_empty() { None } else { Some(target) },
+        "session": session,
+    }))
+}
+
+#[tauri::command]
+fn machine_list() -> Result<Value, String> {
+    herdr::machine_list()
 }
 
 #[tauri::command]
@@ -339,6 +363,7 @@ fn detach_pane_internal(state: &State<AppState>, pane_id: &str) {
         if let Some(mut handle) = map.remove(pane_id) {
             let _ = handle.send(&serde_json::json!({"type": "terminal.release"}));
             let _ = handle.child.kill();
+            let _ = handle.child.wait();
         }
     }
 }
@@ -379,6 +404,7 @@ pub fn run() {
             remote_connect,
             remote_disconnect,
             remote_status,
+            machine_list,
             subscribe_events,
         ])
         .build(tauri::generate_context!())

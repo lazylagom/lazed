@@ -150,10 +150,24 @@ export const herdr = {
       repo,
       branch,
     }),
-  remoteConnect: (target: string) => invoke("remote_connect", { target }),
+  remoteConnect: (target: string, session?: string) =>
+    invoke("remote_connect", { target, session }),
   remoteDisconnect: () => invoke("remote_disconnect"),
-  remoteStatus: () => invoke<{ target?: string }>("remote_status"),
+  remoteStatus: () =>
+    invoke<{ target?: string; session?: string }>("remote_status"),
+  machineList: () => invoke<MachineInfo[]>("machine_list"),
 };
+
+/** A saved herdr SSH machine profile (`herdr machine list --json`). */
+export interface MachineInfo {
+  id: string;
+  label: string;
+  target: string;
+  /** remote session name — "default" needs no --session flag */
+  session: string;
+  enabled: boolean;
+  selected: boolean;
+}
 
 /** herdr-supported agent kinds (from `agent start --kind`). */
 export const AGENT_KINDS = [

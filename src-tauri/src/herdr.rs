@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 /// server. When set, all CLI calls and streams route through `ssh <target>`.
 pub struct Remote {
     pub target: String,
+    /// Remote herdr session name; `None` = the remote default session.
+    /// Mirrors `herdr --session <name>` on the remote host.
+    pub session: Option<String>,
     pub local_socket: PathBuf,
     pub remote_socket: PathBuf,
     pub forward: Child,
@@ -69,6 +72,27 @@ pub fn remote_target() -> Option<String> {
     REMOTE.lock().ok()?.as_ref().map(|r| r.target.clone())
 }
 
+/// (target, session) of the active attachment — needed together when
+/// building remote commands.
+pub(crate) fn remote_ctx() -> Option<(String, Option<String>)> {
+    REMOTE
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|r| (r.target.clone(), r.session.clone()))
+}
+
+/// A saved-machine session becomes ` --session '<name>'`; the default
+/// session (or none) needs no flag — same as `herdr --session` semantics.
+fn session_flag(session: Option<&str>) -> String {
+    match session {
+        Some(s) if !s.is_empty() && s != "default" => {
+            format!(" --session {}", shell_quote(s))
+        }
+        _ => String::new(),
+    }
+}
+
 pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -90,11 +114,12 @@ impl std::fmt::Display for SshFail {
     }
 }
 
-fn ssh_run(target: &str, args: &[&str]) -> Result<Value, SshFail> {
-    let remote_cmd = std::iter::once("herdr".to_string())
-        .chain(args.iter().map(|a| shell_quote(a)))
-        .collect::<Vec<_>>()
-        .join(" ");
+fn ssh_run(target: &str, session: Option<&str>, args: &[&str]) -> Result<Value, SshFail> {
+    let remote_cmd = format!("herdr{}", session_flag(session))
+        + &args
+            .iter()
+            .map(|a| format!(" {}", shell_quote(a)))
+            .collect::<String>();
     let output = Command::new("ssh")
         .args([
             "-o",
@@ -151,7 +176,8 @@ pub(crate) fn ssh_shell(target: &str, remote_cmd: &str) -> Result<std::process::
 }
 
 /// One detached `herdr server` start attempt on the remote host (`ssh -f`).
-fn start_remote_server(target: &str) {
+fn start_remote_server(target: &str, session: Option<&str>) {
+    let cmd = format!("herdr{} server", session_flag(session));
     let _ = Command::new("ssh")
         .args([
             "-f",
@@ -161,7 +187,7 @@ fn start_remote_server(target: &str) {
             "ConnectTimeout=8",
             "--",
             target,
-            "herdr server",
+            &cmd,
         ])
         .status();
 }
@@ -215,8 +241,8 @@ pub fn herdr_bin() -> Result<PathBuf, String> {
 /// Run `herdr <args>` (locally, or `ssh <target> herdr <args>` when a remote
 /// machine is attached) and parse the single JSON response line.
 pub fn run_cli(args: &[&str]) -> Result<Value, String> {
-    if let Some(target) = remote_target() {
-        return ssh_run(&target, args).map_err(|e| e.to_string());
+    if let Some((target, session)) = remote_ctx() {
+        return ssh_run(&target, session.as_deref(), args).map_err(|e| e.to_string());
     }
     let bin = herdr_bin()?;
     let output = Command::new(bin)
@@ -250,7 +276,7 @@ pub fn run_cli(args: &[&str]) -> Result<Value, String> {
 /// When a remote machine is attached this instead verifies the SSH forward
 /// is alive and the remote server responds — restarting it via ssh if down.
 pub fn ensure_server() -> Result<(), String> {
-    if let Some(target) = remote_target() {
+    if let Some((target, session)) = remote_ctx() {
         ensure_remote_forward()?;
         match server_running() {
             Ok(true) => return Ok(()),
@@ -260,7 +286,7 @@ pub fn ensure_server() -> Result<(), String> {
             // remote herdr answered but the server is down — try one
             // detached restart (mirrors the local auto-spawn below)
             Ok(false) => {
-                start_remote_server(&target);
+                start_remote_server(&target, session.as_deref());
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while Instant::now() < deadline {
                     match server_running() {
@@ -323,20 +349,22 @@ static SOCK_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Attach to a remote herdr server over SSH:
 /// `ssh target 'herdr status --json'` → forward remote unix socket to a local
 /// path via `ssh -N -L`. All subsequent CLI/socket/stream traffic routes remote.
-pub fn remote_connect(target: &str) -> Result<(), String> {
+/// `session` selects a named remote herdr session (`None`/"default" = default).
+pub fn remote_connect(target: &str, session: Option<&str>) -> Result<(), String> {
+    let session = session.filter(|s| !s.is_empty() && *s != "default");
     // Probe the new target BEFORE dropping the current attachment so a failed
     // connect leaves the existing context (local or previous remote) intact.
     // The remote server must already run (herdr machine add prepares it); if
     // not, try one detached start before giving up.
-    let mut status = ssh_run(target, &["status", "--json"]);
+    let mut status = ssh_run(target, session, &["status", "--json"]);
     if let Err(SshFail::Transport(e)) = &status {
         return Err(format!("remote unreachable: {e}"));
     }
     if status.is_err() || !status_ok(&status) {
-        start_remote_server(target);
+        start_remote_server(target, session);
         let deadline = Instant::now() + Duration::from_secs(12);
         while Instant::now() < deadline {
-            status = ssh_run(target, &["status", "--json"]);
+            status = ssh_run(target, session, &["status", "--json"]);
             if status_ok(&status) {
                 break;
             }
@@ -367,6 +395,7 @@ pub fn remote_connect(target: &str) -> Result<(), String> {
             // swap: install the new attachment, then kill + reap the old one
             let old = REMOTE.lock().map_err(|e| e.to_string())?.replace(Remote {
                 target: target.to_string(),
+                session: session.map(str::to_string),
                 local_socket: local_sock,
                 remote_socket: PathBuf::from(remote_sock),
                 forward,
@@ -436,6 +465,19 @@ pub fn remote_disconnect() -> Result<(), String> {
     }
     kill_event_stream();
     Ok(())
+}
+
+/// `herdr machine list --json` — saved SSH profiles are local client state,
+/// so this intentionally bypasses remote routing even while attached.
+pub fn machine_list() -> Result<Value, String> {
+    let bin = herdr_bin()?;
+    let output = Command::new(bin)
+        .args(["machine", "list", "--json"])
+        .output()
+        .map_err(|e| format!("failed to run herdr machine list: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("bad JSON from herdr machine list: {e}"))
 }
 
 pub fn snapshot() -> Result<Value, String> {
@@ -686,7 +728,7 @@ pub fn open_control_stream(
     cols: u32,
     rows: u32,
 ) -> Result<(Child, BufReader<std::process::ChildStdout>), String> {
-    let mut cmd = if let Some(target) = remote_target() {
+    let mut cmd = if let Some((target, session)) = remote_ctx() {
         let mut c = Command::new("ssh");
         c.args([
             "-T",
@@ -701,7 +743,8 @@ pub fn open_control_stream(
             "--",
             &target,
             &format!(
-                "herdr terminal session control {} --takeover --cols {} --rows {}",
+                "herdr{} terminal session control {} --takeover --cols {} --rows {}",
+                session_flag(session.as_deref()),
                 shell_quote(pane_id),
                 cols,
                 rows
@@ -771,9 +814,18 @@ mod tests {
     }
 
     #[test]
+    fn session_flag_only_for_named_sessions() {
+        assert_eq!(session_flag(None), "");
+        assert_eq!(session_flag(Some("")), "");
+        assert_eq!(session_flag(Some("default")), "");
+        assert_eq!(session_flag(Some("work")), " --session 'work'");
+        assert_eq!(session_flag(Some("a b")), " --session 'a b'");
+    }
+
+    #[test]
     fn remote_connect_unreachable_host_errors_clean() {
         // bogus host → ssh transport failure → Err, and nothing stays attached
-        let res = remote_connect("staylazy-no-such-host.invalid");
+        let res = remote_connect("staylazy-no-such-host.invalid", None);
         assert!(res.is_err());
         assert!(remote_target().is_none());
     }

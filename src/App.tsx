@@ -50,6 +50,11 @@ function worst(statuses: (AgentStatus | undefined)[]): AgentStatus {
   return "unknown";
 }
 
+function remoteLabel(r: { target?: string; session?: string }): string | null {
+  if (!r.target) return null;
+  return r.session ? `${r.target}·${r.session}` : r.target;
+}
+
 async function notify(title: string, body: string) {
   try {
     let granted = await isPermissionGranted();
@@ -299,11 +304,11 @@ export function App() {
   }, []);
 
   const doRemoteConnect = useCallback(
-    (target: string) => {
+    (target: string, session?: string) => {
       herdr
-        .remoteConnect(target)
+        .remoteConnect(target, session)
         .then(() => {
-          setRemoteTarget(target);
+          setRemoteTarget(remoteLabel({ target, session }));
           setShowRemote(false);
           setFocusedPane(null);
           refresh();
@@ -314,7 +319,7 @@ export function App() {
           // a failed connect may still have detached a previous attachment
           herdr
             .remoteStatus()
-            .then((r) => setRemoteTarget(r.target ?? null))
+            .then((r) => setRemoteTarget(remoteLabel(r)))
             .catch(() => {});
         });
     },
@@ -336,7 +341,7 @@ export function App() {
   useEffect(() => {
     herdr
       .remoteStatus()
-      .then((r) => setRemoteTarget(r.target ?? null))
+      .then((r) => setRemoteTarget(remoteLabel(r)))
       .catch(() => {});
   }, []);
 
