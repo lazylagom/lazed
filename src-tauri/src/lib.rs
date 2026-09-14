@@ -10,6 +10,7 @@ use tauri::State;
 
 struct AppState {
     control: Mutex<HashMap<String, herdr::ControlHandle>>,
+    events_running: Mutex<bool>,
 }
 
 #[tauri::command]
@@ -117,6 +118,105 @@ fn split_pane(pane_id: String, direction: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn session_snapshot() -> Result<Value, String> {
+    herdr::snapshot()
+}
+
+#[tauri::command]
+fn resize_pane(pane_id: String, direction: String, amount: f64) -> Result<Value, String> {
+    herdr::resize_pane(&pane_id, &direction, amount)
+}
+
+#[tauri::command]
+fn workspace_create(cwd: Option<String>, label: Option<String>) -> Result<Value, String> {
+    herdr::workspace_create(cwd.as_deref(), label.as_deref())
+}
+
+#[tauri::command]
+fn workspace_focus(workspace_id: String) -> Result<Value, String> {
+    herdr::workspace_focus(&workspace_id)
+}
+
+#[tauri::command]
+fn workspace_close(workspace_id: String) -> Result<Value, String> {
+    herdr::workspace_close(&workspace_id)
+}
+
+#[tauri::command]
+fn tab_create(workspace_id: String, cwd: Option<String>) -> Result<Value, String> {
+    herdr::tab_create(&workspace_id, cwd.as_deref())
+}
+
+#[tauri::command]
+fn tab_focus(tab_id: String) -> Result<Value, String> {
+    herdr::tab_focus(&tab_id)
+}
+
+#[tauri::command]
+fn tab_close(tab_id: String) -> Result<Value, String> {
+    herdr::tab_close(&tab_id)
+}
+
+#[tauri::command]
+fn subscribe_events(
+    on_event: Channel<Value>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    // only one subscription loop at a time
+    {
+        let mut flag = state.events_running.lock().map_err(|e| e.to_string())?;
+        if *flag {
+            return Ok(());
+        }
+        *flag = true;
+    }
+    std::thread::spawn(move || {
+        loop {
+            let pane_ids: Vec<String> = herdr::snapshot()
+                .ok()
+                .and_then(|s| {
+                    s.pointer("/panes").and_then(Value::as_array).map(|p| {
+                        p.iter()
+                            .filter_map(|x| x.get("pane_id").and_then(Value::as_str).map(str::to_string))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+
+            let mut subscribed: std::collections::HashSet<String> =
+                pane_ids.iter().cloned().collect();
+            let err = herdr::run_event_stream(&pane_ids, |ev, add_sub| {
+                // dynamically subscribe to status changes for newly created panes
+                // (event names arrive as "pane_created" or "pane.created")
+                let name = ev
+                    .pointer("/event")
+                    .or_else(|| ev.pointer("/data/type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .replace('.', "_");
+                if name == "pane_created" {
+                    if let Some(id) = ev
+                        .pointer("/data/pane/pane_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                    {
+                        if subscribed.insert(id.clone()) {
+                            add_sub(&herdr::status_sub_for_pane(&id));
+                        }
+                    }
+                }
+                let _ = on_event.send(ev.clone());
+            });
+            eprintln!("[staylazy] event stream ended: {err}; reconnecting");
+            let _ = on_event.send(serde_json::json!({"type": "events.reconnect"}));
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            let _ = herdr::ensure_server();
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
 fn run_in_pane(pane_id: String, command: String) -> Result<Value, String> {
     herdr::run_in_pane(&pane_id, &command)
 }
@@ -146,6 +246,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             control: Mutex::new(HashMap::new()),
+            events_running: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
@@ -157,6 +258,15 @@ pub fn run() {
             run_in_pane,
             close_pane,
             detach_pane,
+            session_snapshot,
+            resize_pane,
+            workspace_create,
+            workspace_focus,
+            workspace_close,
+            tab_create,
+            tab_focus,
+            tab_close,
+            subscribe_events,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|err| eprintln!("error while running staylazy: {err}"));

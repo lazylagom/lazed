@@ -1,4 +1,5 @@
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -112,6 +113,23 @@ fn server_running() -> Result<bool, String> {
         .unwrap_or(false))
 }
 
+pub fn socket_path() -> Result<PathBuf, String> {
+    let status = run_cli(&["status", "--json"])?;
+    status
+        .pointer("/server/socket")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| "herdr status did not report a socket path".to_string())
+}
+
+pub fn snapshot() -> Result<Value, String> {
+    let v = run_cli(&["api", "snapshot"])?;
+    Ok(v
+        .pointer("/result/snapshot")
+        .cloned()
+        .unwrap_or_else(|| v.get("result").cloned().unwrap_or(v)))
+}
+
 pub fn list_panes() -> Result<Vec<Value>, String> {
     let v = run_cli(&["pane", "list"])?;
     Ok(v
@@ -145,6 +163,137 @@ pub fn run_in_pane(pane_id: &str, command: &str) -> Result<Value, String> {
 
 pub fn close_pane(pane_id: &str) -> Result<Value, String> {
     run_cli(&["pane", "close", pane_id])
+}
+
+pub fn resize_pane(pane_id: &str, direction: &str, amount: f64) -> Result<Value, String> {
+    run_cli(&[
+        "pane",
+        "resize",
+        "--pane",
+        pane_id,
+        "--direction",
+        direction,
+        "--amount",
+        &format!("{amount:.4}"),
+    ])
+}
+
+pub fn workspace_create(cwd: Option<&str>, label: Option<&str>) -> Result<Value, String> {
+    let mut args = vec!["workspace", "create"];
+    if let Some(c) = cwd {
+        args.extend(["--cwd", c]);
+    }
+    if let Some(l) = label {
+        args.extend(["--label", l]);
+    }
+    run_cli(&args)
+}
+
+pub fn workspace_focus(workspace_id: &str) -> Result<Value, String> {
+    run_cli(&["workspace", "focus", workspace_id])
+}
+
+pub fn workspace_close(workspace_id: &str) -> Result<Value, String> {
+    run_cli(&["workspace", "close", workspace_id])
+}
+
+pub fn tab_create(workspace_id: &str, cwd: Option<&str>) -> Result<Value, String> {
+    let mut args = vec!["tab", "create", "--workspace", workspace_id];
+    if let Some(c) = cwd {
+        args.extend(["--cwd", c]);
+    }
+    run_cli(&args)
+}
+
+pub fn tab_focus(tab_id: &str) -> Result<Value, String> {
+    run_cli(&["tab", "focus", tab_id])
+}
+
+pub fn tab_close(tab_id: &str) -> Result<Value, String> {
+    run_cli(&["tab", "close", tab_id])
+}
+
+/// Subscription types that apply globally (no pane_id required).
+const GLOBAL_SUBS: &[&str] = &[
+    "workspace.created",
+    "workspace.updated",
+    "workspace.renamed",
+    "workspace.closed",
+    "workspace.focused",
+    "tab.created",
+    "tab.closed",
+    "tab.focused",
+    "tab.renamed",
+    "tab.moved",
+    "pane.created",
+    "pane.closed",
+    "pane.updated",
+    "pane.focused",
+    "pane.exited",
+    "pane.agent_detected",
+    "layout.updated",
+];
+
+fn subscribe_request(subs: &Value) -> Value {
+    json!({"id": "staylazy", "method": "events.subscribe", "params": {"subscriptions": subs}})
+}
+
+/// Connect the event socket, subscribe to global + per-pane events for `pane_ids`,
+/// and call `on_line` for every subsequent JSON line until EOF/error.
+/// Returns the error that ended the connection.
+pub fn run_event_stream<F>(pane_ids: &[String], mut on_line: F) -> String
+where
+    F: FnMut(&Value, &mut dyn FnMut(&Value)),
+{
+    let result = (|| -> Result<(), String> {
+        let path = socket_path()?;
+        let sock = UnixStream::connect(&path)
+            .map_err(|e| format!("failed to connect {}: {e}", path.display()))?;
+        let mut writer = sock
+            .try_clone()
+            .map_err(|e| format!("failed to clone event socket: {e}"))?;
+        let mut reader = BufReader::new(sock);
+
+        let mut subs: Vec<Value> = GLOBAL_SUBS.iter().map(|t| json!({"type": t})).collect();
+        for id in pane_ids {
+            subs.push(json!({"type": "pane.agent_status_changed", "pane_id": id}));
+        }
+        let req = serde_json::to_string(&subscribe_request(&json!(subs))).map_err(|e| e.to_string())?;
+        writer
+            .write_all(req.as_bytes())
+            .and_then(|_| writer.write_all(b"\n"))
+            .and_then(|_| writer.flush())
+            .map_err(|e| format!("failed to write subscription: {e}"))?;
+
+        let mut add_sub = |v: &Value| {
+            let line = serde_json::to_string(v).unwrap_or_default() + "\n";
+            let _ = writer.write_all(line.as_bytes());
+            let _ = writer.flush();
+        };
+
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => return Err("event socket closed".to_string()),
+                Err(e) => return Err(format!("event socket read failed: {e}")),
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                        on_line(&v, &mut add_sub);
+                    }
+                }
+            }
+        }
+    })();
+    result.err().unwrap_or_else(|| "event stream ended".to_string())
+}
+
+pub fn status_sub_for_pane(pane_id: &str) -> Value {
+    subscribe_request(&json!([{"type": "pane.agent_status_changed", "pane_id": pane_id}]))
 }
 
 /// Spawn `herdr terminal session control <pane> --takeover` and return the child

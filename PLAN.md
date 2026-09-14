@@ -1,7 +1,7 @@
 # StayLazy — Product & Architecture Plan (v2)
 
 > herdr(런타임·도메인 모델 그대로 사용) + Tauri GUI(Orca UX 패턴)
-> 작성일: 2026-09-14 / 상태: draft v2 — **Phase 0 스파이크 검증 완료**
+> 작성일: 2026-09-14 / 상태: draft v2 — **Phase 0·1 완료**
 > - herdr 0.9.0 (mise) 헤드리스 서버 + `terminal session control` NDJSON 프레임 → xterm.js 렌더/입력 왕복 확인
 > - pane opaque ID(w1:p1…)는 서버 재시작 후에도 유지됨 (스냅샷 복원 시 동일 ID/cwd)
 > v1→v2 변경: 자체 데몬 재구현(Path A) 폐기 → herdr 바이너리를 런타임으로 사용(Path B).
@@ -70,11 +70,17 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - **성공 기준**: Tauri 창 안에서 claude/codex TUI를 마우스+키보드로 조작 가능, 지연 체감 없음
 - 확인: pane opaque ID가 서버 재시작 후에도 안정적인지 (session.json)
 
-### Phase 1 — 코어 셸
+### Phase 1 — 코어 셸 ✅ (완료)
 - workspace/tab/pane 사이드바 + 분할 레이아웃 UI (herdr 모델 그대로)
-- `event.subscribe`로 상태 배지(blocked/working/done) 실시간 반영
+- `events.subscribe`(unix socket 직접 연결)로 상태 배지 실시간 반영
 - detach/reattach, 앱 재실행 후 세션 복원 UX
 - 키보드 단축키 체계 (Tauri/webview 레벨 — prefix 불필요) + 마우스 드래그 분할
+- 구현 노트:
+  - 이벤트 엔벨로프는 `{"data":{...},"event":"<name>"}` — 이름이 혼용됨(`pane_created` vs `pane.agent_status_changed`) → 정규화해서 처리
+  - `pane.agent_status_changed`/`pane.scroll_changed`/`pane.output_matched`는 per-pane 구독(`pane_id` 필수). 나머지는 전역
+  - pane 포커스는 클라이언트-로컬 상태 (herdr API에 pane focus-by-id 없음 — `pane.focus`는 방향 탐색 전용)
+  - 스냅샷은 `api snapshot` → `result.snapshot`; pane의 에이전트 표시명은 `agents[]`에서 pane_id로 머지
+  - 컨트롤 스트림/이벤트 소켓 모두 재연결 루프 보유 → `herdr server stop` 시 앱이 자동으로 서버 재기동+복원
 
 ### Phase 2 — 에이전트 UX
 - agent start/prompt/wait를 UI로 노출 (새 에이전트 스폰 모달, 프롬프트 브로드캐스트)
