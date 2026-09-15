@@ -1,3 +1,12 @@
+import {
+  AppWindowIcon,
+  BotIcon,
+  FolderImportIcon,
+  FolderLibraryIcon,
+  GitBranchIcon,
+  TerminalIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
 import type {
   AgentStatus,
@@ -39,6 +48,12 @@ function PaneRow({
       title={pane.cwd ?? pane.pane_id}
     >
       <StatusDot status={pane.agent_status} />
+      <HugeiconsIcon
+        icon={pane.agent ? BotIcon : TerminalIcon}
+        size={12}
+        strokeWidth={1.5}
+        className="side-ico"
+      />
       <span className="side-pane-name">
         {pane.display_agent ??
           pane.agent ??
@@ -138,6 +153,12 @@ function TabBlock({
             title="double-click to rename"
           >
             <StatusDot status={tab.agent_status} />
+            <HugeiconsIcon
+              icon={AppWindowIcon}
+              size={12}
+              strokeWidth={1.5}
+              className="side-ico"
+            />
             <span>{tab.label ?? tab.tab_id}</span>
           </button>
         )}
@@ -239,6 +260,12 @@ export function Sidebar({
                     title="double-click to rename"
                   >
                     <StatusDot status={paneStatus(w.workspace_id)} />
+                    <HugeiconsIcon
+                      icon={FolderLibraryIcon}
+                      size={13}
+                      strokeWidth={1.5}
+                      className="side-ico"
+                    />
                     <span>{w.label ?? w.workspace_id}</span>
                     <span className="side-count">{w.pane_count ?? ""}</span>
                   </button>
@@ -250,7 +277,11 @@ export function Sidebar({
                     title={`diff ${w.worktree.checkout_path}`}
                     onClick={() => onDiff(w)}
                   >
-                    ⑂
+                    <HugeiconsIcon
+                      icon={GitBranchIcon}
+                      size={11}
+                      strokeWidth={1.5}
+                    />
                   </button>
                 )}
                 <button
@@ -291,7 +322,13 @@ export function Sidebar({
       </div>
       <div className="side-footer">
         <button type="button" className="side-add" onClick={onNewWorkspace}>
-          + workspace
+          <HugeiconsIcon
+            icon={FolderImportIcon}
+            size={12}
+            strokeWidth={1.5}
+            className="side-ico"
+          />
+          import project
         </button>
       </div>
     </div>

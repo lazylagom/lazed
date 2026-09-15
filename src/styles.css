@@ -46,6 +46,9 @@ body,
   padding: 4px 10px;
   font-size: 12px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .titlebar button:hover {
@@ -208,8 +211,20 @@ body,
   white-space: nowrap;
 }
 
+.side-ico {
+  flex-shrink: 0;
+  color: #8a8f94;
+}
+
+.side-pane.focused .side-ico {
+  color: #ddd;
+}
+
 .side-add {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   width: calc(100% - 8px);
   margin: 4px;
   padding: 4px 8px;
@@ -496,6 +511,37 @@ body,
   white-space: pre-wrap;
 }
 
+.import-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 14px;
+  color: #ddd;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid #333639;
+}
+
+.import-row {
+  display: flex;
+  align-items: stretch;
+}
+
+.import-row .modal-input {
+  border-bottom: 1px solid #333639;
+}
+
+.import-row button {
+  background: none;
+  border: none;
+  border-bottom: 1px solid #333639;
+  color: #7aa2c7;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
 .prompt-targets {
   display: flex;
   gap: 6px;
@@ -523,23 +569,6 @@ body,
 }
 
 /* ── inbox ───────────────────────────────── */
-
-.inbox-btn {
-  -webkit-app-region: no-drag;
-  background: #333;
-  color: #ddd;
-  border: 1px solid #444;
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.inbox-btn.alert {
-  background: #5f2d1f;
-  border-color: #8a4a3a;
-  color: #ffab7c;
-}
 
 .inbox-panel {
   position: fixed;
@@ -884,12 +913,6 @@ body,
 }
 
 /* ── remote ──────────────────────────────── */
-
-.remote-on {
-  background: #2d4a2f !important;
-  border-color: #4a6b4a !important;
-  color: #a5d6a7 !important;
-}
 
 .remote-machine {
   display: flex;

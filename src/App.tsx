@@ -1,3 +1,15 @@
+import {
+  AppWindowIcon,
+  BotIcon,
+  ColumnInsertIcon,
+  CommandLineIcon,
+  FolderImportIcon,
+  InformationCircleIcon,
+  InsertRowDownIcon,
+  ServerIcon,
+  WorkflowIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
@@ -10,6 +22,7 @@ import { About } from "./features/About";
 import { AgentPicker } from "./features/AgentPicker";
 import { DiffView } from "./features/DiffView";
 import { Fanout, type FanoutRequest } from "./features/Fanout";
+import { ImportProject } from "./features/ImportProject";
 import { PromptBar, type PromptTarget } from "./features/PromptBar";
 import { RemoteBar } from "./features/RemoteBar";
 import {
@@ -79,6 +92,7 @@ export function App() {
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
   const [showRemote, setShowRemote] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [remoteTarget, setRemoteTarget] = useState<string | null>(null);
   const refreshTimer = useRef<number | null>(null);
 
@@ -224,9 +238,10 @@ export function App() {
       .catch((e) => setError(String(e)));
   }, [focusedWsId]);
 
-  const newWorkspace = useCallback(() => {
+  const newWorkspace = useCallback((cwd?: string, label?: string) => {
+    setShowImport(false);
     herdr
-      .workspaceCreate()
+      .workspaceCreate(cwd, label)
       .then((res) => {
         const wsId =
           (res as { result?: { workspace?: { workspace_id?: string } } })
@@ -412,7 +427,7 @@ export function App() {
         newTab();
       } else if (e.metaKey && e.shiftKey && (e.key === "n" || e.key === "N")) {
         e.preventDefault();
-        newWorkspace();
+        setShowImport(true);
       } else if (e.metaKey && e.shiftKey && e.key === "]") {
         e.preventDefault();
         const next = step(wsIds, focusedWsId, 1);
@@ -451,7 +466,6 @@ export function App() {
     split,
     closePane,
     newTab,
-    newWorkspace,
     focusWorkspace,
     focusTab,
   ]);
@@ -495,31 +509,41 @@ export function App() {
           }
         }}
       >
-        <span className="title">staylazy</span>
+        <span className="title">STAY LAZY</span>
         <button type="button" onClick={() => split("right")} title="⌘D">
+          <HugeiconsIcon icon={ColumnInsertIcon} size={13} strokeWidth={1.5} />
           split →
         </button>
         <button type="button" onClick={() => split("down")} title="⇧⌘D">
+          <HugeiconsIcon icon={InsertRowDownIcon} size={13} strokeWidth={1.5} />
           split ↓
         </button>
         <button type="button" onClick={newTab} title="⌘T">
-          + tab
+          <HugeiconsIcon icon={AppWindowIcon} size={13} strokeWidth={1.5} />
+          tab
         </button>
-        <button type="button" onClick={newWorkspace} title="⇧⌘N">
-          + workspace
+        <button
+          type="button"
+          onClick={() => setShowImport(true)}
+          title="⇧⌘N — import a project directory as a workspace"
+        >
+          <HugeiconsIcon icon={FolderImportIcon} size={13} strokeWidth={1.5} />
+          import
         </button>
         <button
           type="button"
           onClick={() => setShowPicker(true)}
           title="⇧⌘A — start agent in focused pane"
         >
-          + agent
+          <HugeiconsIcon icon={BotIcon} size={13} strokeWidth={1.5} />
+          agent
         </button>
         <button
           type="button"
           onClick={() => setShowPrompt(true)}
           title="⌘K — prompt"
         >
+          <HugeiconsIcon icon={CommandLineIcon} size={13} strokeWidth={1.5} />
           prompt
         </button>
         <button
@@ -527,6 +551,7 @@ export function App() {
           onClick={() => setShowFanout(true)}
           title="⇧⌘F — fan out worktrees × agents"
         >
+          <HugeiconsIcon icon={WorkflowIcon} size={13} strokeWidth={1.5} />
           fan-out
         </button>
         <button
@@ -535,7 +560,8 @@ export function App() {
           onClick={() => setShowRemote(true)}
           title="⇧⌘R — attach remote herdr over SSH"
         >
-          {remoteTarget ? `⇄ ${remoteTarget}` : "⇄ remote"}
+          <HugeiconsIcon icon={ServerIcon} size={13} strokeWidth={1.5} />
+          {remoteTarget ? remoteTarget : "remote"}
         </button>
         <InboxButton
           blocked={blockedCount}
@@ -547,7 +573,11 @@ export function App() {
           onClick={() => setShowAbout(true)}
           title="about / licenses"
         >
-          about
+          <HugeiconsIcon
+            icon={InformationCircleIcon}
+            size={13}
+            strokeWidth={1.5}
+          />
         </button>
         <span className="status">
           {error
@@ -555,7 +585,7 @@ export function App() {
             : warning
               ? `⚠ ${warning}`
               : snap
-                ? `${workspace?.label ?? focusedWsId ?? "?"} · ${layout?.panes.length ?? 0} pane(s)`
+                ? `${remoteTarget ? `⇄ ${remoteTarget} · ` : ""}${workspace?.label ?? focusedWsId ?? "?"} · ${layout?.panes.length ?? 0} pane(s)`
                 : "connecting…"}
         </span>
       </div>
@@ -597,6 +627,12 @@ export function App() {
         />
       )}
       {showAbout && <About onClose={() => setShowAbout(false)} />}
+      {showImport && (
+        <ImportProject
+          onImport={newWorkspace}
+          onClose={() => setShowImport(false)}
+        />
+      )}
       {showRemote && (
         <RemoteBar
           connected={remoteTarget ?? undefined}
@@ -633,7 +669,7 @@ export function App() {
           onFocusWorkspace={focusWorkspace}
           onFocusTab={focusTab}
           onFocusPane={setFocusedPane}
-          onNewWorkspace={newWorkspace}
+          onNewWorkspace={() => setShowImport(true)}
           onNewTab={newTab}
           onCloseWorkspace={(id) =>
             herdr.workspaceClose(id).catch((e) => setError(String(e)))

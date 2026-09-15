@@ -1,3 +1,5 @@
+import { InboxIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import type { PaneInfo } from "../shared/herdr";
 
 export function InboxButton({
@@ -16,6 +18,7 @@ export function InboxButton({
       onClick={onToggle}
       title="agents needing attention"
     >
+      <HugeiconsIcon icon={InboxIcon} size={13} strokeWidth={1.5} />
       inbox{blocked > 0 ? ` ${blocked}` : done > 0 ? ` ·${done}` : ""}
     </button>
   );
