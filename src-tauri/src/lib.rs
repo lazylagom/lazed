@@ -3,7 +3,7 @@ mod herdr;
 
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tauri::ipc::Channel;
@@ -12,6 +12,9 @@ use tauri::{Manager, State};
 struct AppState {
     control: Mutex<HashMap<String, herdr::ControlHandle>>,
     events_running: Mutex<bool>,
+    /// The live webview's event channel. A reload re-invokes subscribe_events
+    /// with a fresh Channel — the stream thread must send to the newest one.
+    events_channel: Arc<Mutex<Option<Channel<Value>>>>,
 }
 
 #[tauri::command]
@@ -320,6 +323,17 @@ fn subscribe_events(
     on_event: Channel<Value>,
     state: State<AppState>,
 ) -> Result<(), String> {
+    // always swap in the caller's channel — after a webview reload the old
+    // channel is dead, and without this the stream keeps sending into it
+    let chan_slot = state.events_channel.clone();
+    *chan_slot.lock().map_err(|e| e.to_string())? = Some(on_event);
+    let send = move |v: &Value| {
+        if let Ok(g) = chan_slot.lock() {
+            if let Some(c) = g.as_ref() {
+                let _ = c.send(v.clone());
+            }
+        }
+    };
     // only one subscription loop at a time
     {
         let mut flag = state.events_running.lock().map_err(|e| e.to_string())?;
@@ -363,11 +377,11 @@ fn subscribe_events(
                         }
                     }
                 }
-                let _ = on_event.send(ev.clone());
+                send(ev);
             });
             eprintln!("[staylazy] event stream ended: {err}; reconnecting");
             // frontend reads the name from `event` (or data.type) — send both
-            let _ = on_event.send(serde_json::json!({
+            send(&serde_json::json!({
                 "event": "events.reconnect", "type": "events.reconnect"
             }));
             std::thread::sleep(std::time::Duration::from_millis(800));
@@ -407,6 +421,7 @@ fn detach_pane_internal(state: &State<AppState>, pane_id: &str) {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Prefer the bundled herdr binary when the package ships one
             // (bundle.resources → src-tauri/bin/herdr, staged by
@@ -425,6 +440,7 @@ pub fn run() {
         .manage(AppState {
             control: Mutex::new(HashMap::new()),
             events_running: Mutex::new(false),
+            events_channel: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
