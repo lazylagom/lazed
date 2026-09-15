@@ -26,6 +26,19 @@ export class IMEOverlay {
   private pendingHangulFlushTimerId: number | null = null;
   private pendingHangulConsumedByComposition = false;
   private suppressedPostCompositionInput: string | null = null;
+  private keydownAwaitingInput: {
+    code: string;
+    key: string;
+    shift: boolean;
+  } | null = null;
+  private swallowedKey: {
+    code: string;
+    key: string;
+    shift: boolean;
+    at: number;
+  } | null = null;
+  private lastQueuedJamoValue = "";
+  private lastQueuedJamoAt = 0;
 
   constructor(
     private terminal: Terminal,
@@ -71,6 +84,7 @@ export class IMEOverlay {
 
   private setupCompositionEvents(): void {
     this.on(this.input, "compositionstart", () => {
+      this.debugLog("compositionstart");
       this.clearPendingHangulFlushTimer();
       if (this.pendingHangulJamo) {
         this.pendingHangulConsumedByComposition = true;
@@ -85,20 +99,32 @@ export class IMEOverlay {
     });
 
     this.on(this.input, "compositionend", (e: CompositionEvent) => {
+      this.debugLog("compositionend", e.data);
       const committed = e.data ?? "";
-      const { text: pending, consumedByComposition } =
-        this.takePendingHangulJamo();
       this.isComposing = false;
       this.preview.style.display = "none";
       this.preview.textContent = "";
 
-      if (!consumedByComposition && pending && pending !== committed) {
-        this.writeToPty(pending);
-      }
-
-      if (committed) {
-        this.writeToPty(committed);
+      if (committed && containsHangul(committed)) {
+        // Right after an input-source switch, WKWebView splits a syllable
+        // across sessions: the first jamo commits as plain insertText and
+        // the rest arrive as separate one-jamo compositions. Route every
+        // Hangul commit back through the jamo buffer so the fragments
+        // recompose — the jamo stream keeps its order regardless of where
+        // the composition boundaries fell.
+        this.queuePendingHangulReplacement(jamoText(committed));
+        this.flushCompletedPendingUnits();
         this.suppressedPostCompositionInput = committed;
+      } else {
+        const { text: pending, consumedByComposition } =
+          this.takePendingHangulJamo();
+        if (!consumedByComposition && pending && pending !== committed) {
+          this.writeToPty(pending);
+        }
+        if (committed) {
+          this.writeToPty(committed);
+          this.suppressedPostCompositionInput = committed;
+        }
       }
       this.input.value = "";
     });
@@ -108,8 +134,41 @@ export class IMEOverlay {
 
   private setupKeyboardEvents(): void {
     this.on(this.input, "keydown", (e: KeyboardEvent) => {
+      this.debugLog("keydown", {
+        key: e.key,
+        code: e.code,
+        keyCode: e.keyCode,
+        isComposing: e.isComposing,
+      });
+      // A letter keydown that produced no input event before the next
+      // keydown was eaten — WKWebView consumes the first keystroke while
+      // rebuilding the input context after an input-source switch. Keep its
+      // physical key code so the jamo can be recovered when Hangul input
+      // arrives right after.
+      if (this.keydownAwaitingInput) {
+        this.swallowedKey = {
+          ...this.keydownAwaitingInput,
+          at: Date.now(),
+        };
+        this.keydownAwaitingInput = null;
+      }
+
       // never interfere while the IME is composing
       if (this.isComposing || e.isComposing || e.keyCode === 229) return;
+
+      if (
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey &&
+        e.key.length === 1 &&
+        (/^[a-zA-Z]$/.test(e.key) || isHangulJamoCharacter(e.key))
+      ) {
+        this.keydownAwaitingInput = {
+          code: e.code,
+          key: e.key,
+          shift: e.shiftKey,
+        };
+      }
 
       // in some environments the first keydown after switching to Hangul
       // arrives before compositionstart; forwarding the jamo as a plain
@@ -142,6 +201,43 @@ export class IMEOverlay {
     this.on(this.input, "input", (e: Event) => {
       const inputEvent = e as InputEvent;
       const inputType = inputEvent.inputType ?? "";
+      this.debugLog("input", {
+        inputType,
+        data: inputEvent.data,
+        isComposing: inputEvent.isComposing,
+        value: this.input.value,
+      });
+      this.keydownAwaitingInput = null;
+
+      // WKWebView can run an entire composition without any composition*
+      // events — this is the path the first syllable takes right after the
+      // input source is switched to Hangul. The in-progress text arrives as
+      // insertReplacementText / insertCompositionText / isComposing input;
+      // merge it into the pending buffer and flag it as session-owned so a
+      // real compositionend (if one ever arrives) wins over the buffer.
+      const isMarkedInput =
+        inputEvent.isComposing ||
+        inputType === "insertCompositionText" ||
+        inputType === "insertReplacementText" ||
+        inputType === "insertFromComposition";
+
+      if (!this.isComposing && isMarkedInput) {
+        const value = this.input.value || inputEvent.data || "";
+        this.input.value = "";
+        if (!value) return;
+        this.recoverSwallowedKey(value, true);
+        if (containsOnlyHangulJamo(value)) {
+          this.queuePendingHangulJamo(value);
+        } else if (containsHangul(value)) {
+          this.queuePendingHangulReplacement(value);
+        } else {
+          this.flushPendingHangulJamo();
+          this.writeToPty(value);
+        }
+        this.pendingHangulConsumedByComposition = true;
+        return;
+      }
+
       const isCompositionInput =
         inputEvent.isComposing ||
         inputType === "insertCompositionText" ||
@@ -154,14 +250,17 @@ export class IMEOverlay {
         return;
       }
 
-      if (containsOnlyHangulJamo(this.input.value)) {
-        this.queuePendingHangulJamo(this.input.value);
+      const value = this.input.value;
+      this.recoverSwallowedKey(value, false);
+
+      if (containsOnlyHangulJamo(value)) {
+        this.queuePendingHangulJamo(value);
         this.input.value = "";
         return;
       }
 
       this.flushPendingHangulJamo();
-      this.writeToPty(this.input.value);
+      this.writeToPty(value);
       this.input.value = "";
     });
   }
@@ -240,17 +339,106 @@ export class IMEOverlay {
   private queuePendingHangulJamo(value: string): void {
     if (!value) return;
 
+    // some input methods resend the last jamo as its own event — only skip
+    // it when it arrives back-to-back with the previous queue, so a real
+    // repeated keystroke (ㄴㄴ in 안녕) is never dropped
+    const now = Date.now();
+    const isResend =
+      value === this.lastQueuedJamoValue &&
+      now - this.lastQueuedJamoAt < JAMO_RESEND_WINDOW_MS;
+    this.lastQueuedJamoValue = value;
+    this.lastQueuedJamoAt = now;
+
     if (!this.pendingHangulJamo) {
       this.pendingHangulJamo = value;
       this.pendingHangulConsumedByComposition = false;
     } else if (value.length > 1 && value.startsWith(this.pendingHangulJamo)) {
       // some input methods resend the accumulated string
       this.pendingHangulJamo = value;
-    } else if (!this.pendingHangulJamo.endsWith(value)) {
+    } else if (!(isResend && this.pendingHangulJamo.endsWith(value))) {
       this.pendingHangulJamo += value;
     }
 
+    this.showPendingPreview();
     this.schedulePendingHangulFlush();
+  }
+
+  /**
+   * insertReplacementText carries the IME's in-progress text as
+   * already-composed text. When it extends the pending buffer's trailing
+   * unit ("ㅎ" → "하" → "한") the unit is replaced; when it starts a fresh
+   * unit ("한" → "그") it is appended.
+   */
+  private queuePendingHangulReplacement(value: string): void {
+    const chars = [...this.pendingHangulJamo];
+    const unitStart = lastComposingUnitStart(chars);
+    const unit = chars.slice(unitStart).join("");
+    if (unit && jamoText(value).startsWith(jamoText(unit))) {
+      this.pendingHangulJamo = chars.slice(0, unitStart).join("") + value;
+    } else {
+      this.pendingHangulJamo += value;
+    }
+    this.pendingHangulConsumedByComposition = false;
+    this.showPendingPreview();
+    this.schedulePendingHangulFlush();
+  }
+
+  /**
+   * A swallowed letter keydown is recovered once Hangul input arrives right
+   * after it: the pressed jamo (or the physical key code mapped through the
+   * 2-set layout) is prepended ahead of the pending buffer so the syllable
+   * composes correctly.
+   */
+  private recoverSwallowedKey(value: string, isMarkedInput: boolean): void {
+    const key = this.swallowedKey;
+    this.swallowedKey = null;
+    if (!key || !containsHangul(value)) return;
+    if (Date.now() - key.at > SWALLOWED_KEY_RECOVERY_MS) return;
+
+    const jamo = isHangulJamoCharacter(key.key)
+      ? key.key
+      : (key.shift ? KOREAN_2SET_SHIFT_KEYCODE : KOREAN_2SET_KEYCODE)[key.code];
+    if (!jamo) return;
+
+    // composition text that already begins with the lost jamo means the IME
+    // did deliver it — prepending again would double the initial consonant
+    if (isMarkedInput && jamoText(value).startsWith(jamo)) return;
+
+    this.pendingHangulJamo = jamo + this.pendingHangulJamo;
+    this.pendingHangulConsumedByComposition = false;
+    this.showPendingPreview();
+    this.schedulePendingHangulFlush();
+  }
+
+  /**
+   * The WKWebView jamo/replacement paths never fire compositionupdate, so
+   * the in-progress syllable would otherwise be invisible until the PTY
+   * echoes the flushed text — mirror it in the composition preview.
+   */
+  private showPendingPreview(): void {
+    const chars = [...this.pendingHangulJamo];
+    const unit = chars.slice(lastComposingUnitStart(chars)).join("");
+    this.preview.textContent = composeHangulJamo(unit);
+    this.preview.style.display = unit ? "block" : "none";
+  }
+
+  /**
+   * Composition commits keep flowing through the pending buffer, but only
+   * the trailing unit can still merge with a following fragment — every
+   * unit before it is final and can reach the PTY immediately, so earlier
+   * syllables echo while the user keeps typing instead of waiting for the
+   * idle flush.
+   */
+  private flushCompletedPendingUnits(): void {
+    if (!this.pendingHangulJamo) return;
+    const chars = [...this.pendingHangulJamo];
+    const unitStart = lastComposingUnitStart(chars);
+    if (unitStart <= 0) return;
+
+    const completed = composeHangulJamo(chars.slice(0, unitStart).join(""));
+    this.pendingHangulJamo = chars.slice(unitStart).join("");
+    if (completed) this.writeToPty(completed);
+    this.showPendingPreview();
   }
 
   private schedulePendingHangulFlush(): void {
@@ -282,6 +470,7 @@ export class IMEOverlay {
     const consumedByComposition = this.pendingHangulConsumedByComposition;
     this.pendingHangulJamo = "";
     this.pendingHangulConsumedByComposition = false;
+    this.hidePendingPreview();
     return { text, consumedByComposition };
   }
 
@@ -289,6 +478,13 @@ export class IMEOverlay {
     this.clearPendingHangulFlushTimer();
     this.pendingHangulJamo = "";
     this.pendingHangulConsumedByComposition = false;
+    this.hidePendingPreview();
+  }
+
+  private hidePendingPreview(): void {
+    if (this.isComposing) return;
+    this.preview.style.display = "none";
+    this.preview.textContent = "";
   }
 
   private flushPendingHangulJamo(): void {
@@ -393,6 +589,16 @@ export class IMEOverlay {
 
   /* ── Util ─────────────────────────────────── */
 
+  /**
+   * Event-stream logging for IME regression diagnosis — enable from the
+   * webview console with `window.__staylazyImeDebug = true`.
+   */
+  private debugLog(...args: unknown[]): void {
+    if ((window as unknown as Record<string, unknown>).__staylazyImeDebug) {
+      console.log("[ime]", ...args);
+    }
+  }
+
   private on<K extends keyof HTMLElementEventMap>(
     el: EventTarget,
     event: K,
@@ -413,6 +619,8 @@ export class IMEOverlay {
 
     this.isComposing = false;
     this.suppressedPostCompositionInput = null;
+    this.keydownAwaitingInput = null;
+    this.swallowedKey = null;
     this.preview.style.display = "none";
     this.preview.textContent = "";
     this.input.value = "";
@@ -575,7 +783,67 @@ function containsOnlyHangulJamo(value: string): boolean {
   return true;
 }
 
-const HANGUL_JAMO_FLUSH_DELAY_MS = 80;
+function containsHangul(value: string): boolean {
+  for (const char of value) {
+    if (isHangulCharacter(char)) return true;
+  }
+  return false;
+}
+
+/**
+ * Idle delay before buffered jamo are committed to the PTY. Kept generous:
+ * right after an input-source switch, WKWebView delivers the first
+ * syllable's events with extra latency and the composition preview already
+ * gives the user immediate feedback.
+ */
+const HANGUL_JAMO_FLUSH_DELAY_MS = 300;
+
+/** how long a swallowed keydown stays recoverable after the switch */
+const SWALLOWED_KEY_RECOVERY_MS = 800;
+
+/** back-to-back window for treating a repeated jamo event as a resend */
+const JAMO_RESEND_WINDOW_MS = 60;
+
+/** physical key (KeyboardEvent.code) → 2-set jamo, used to recover the
+ * first keystroke eaten by an input-source switch */
+const KOREAN_2SET_KEYCODE: Record<string, string> = {
+  KeyQ: "ㅂ",
+  KeyW: "ㅈ",
+  KeyE: "ㄷ",
+  KeyR: "ㄱ",
+  KeyT: "ㅅ",
+  KeyY: "ㅛ",
+  KeyU: "ㅕ",
+  KeyI: "ㅑ",
+  KeyO: "ㅐ",
+  KeyP: "ㅔ",
+  KeyA: "ㅁ",
+  KeyS: "ㄴ",
+  KeyD: "ㅇ",
+  KeyF: "ㄹ",
+  KeyG: "ㅎ",
+  KeyH: "ㅗ",
+  KeyJ: "ㅓ",
+  KeyK: "ㅏ",
+  KeyL: "ㅣ",
+  KeyZ: "ㅋ",
+  KeyX: "ㅌ",
+  KeyC: "ㅊ",
+  KeyV: "ㅍ",
+  KeyB: "ㅠ",
+  KeyN: "ㅜ",
+  KeyM: "ㅡ",
+};
+
+const KOREAN_2SET_SHIFT_KEYCODE: Record<string, string> = {
+  KeyQ: "ㅃ",
+  KeyW: "ㅉ",
+  KeyE: "ㄸ",
+  KeyR: "ㄲ",
+  KeyT: "ㅆ",
+  KeyO: "ㅒ",
+  KeyP: "ㅖ",
+};
 const HANGUL_SYLLABLE_BASE = 0xac00;
 const HANGUL_SYLLABLE_V_COUNT = 21;
 const HANGUL_SYLLABLE_T_COUNT = 28;
@@ -702,6 +970,31 @@ function combineCompatFinal(first: string, second: string): string | null {
   return COMBINED_FINALS[`${first}${second}`] ?? null;
 }
 
+function reverseIndex(map: Record<string, number>, size: number): string[] {
+  const list = new Array<string>(size).fill("");
+  for (const [char, index] of Object.entries(map)) list[index] = char;
+  return list;
+}
+
+const INITIAL_LIST = reverseIndex(INITIAL_COMPAT_INDEX, 19);
+const VOWEL_LIST = reverseIndex(VOWEL_COMPAT_INDEX, 21);
+const FINAL_LIST = reverseIndex(FINAL_COMPAT_INDEX, 28);
+
+function decomposeHangulChar(char: string): string {
+  const code = char.charCodeAt(0);
+  if (code < 0xac00 || code > 0xd7a3) return char;
+  const offset = code - 0xac00;
+  const initial = INITIAL_LIST[Math.floor(offset / 588)];
+  const vowel = VOWEL_LIST[Math.floor((offset % 588) / 28)];
+  const final = FINAL_LIST[offset % 28];
+  return `${initial}${vowel}${final}`;
+}
+
+/** compat-jamo text of a value — syllables decompose, other chars pass */
+function jamoText(value: string): string {
+  return [...value].map(decomposeHangulChar).join("");
+}
+
 function composeCompatSyllable(
   initial: string,
   vowel: string,
@@ -722,6 +1015,80 @@ function composeCompatSyllable(
   return String.fromCharCode(syllableCode);
 }
 
+interface ParsedHangulUnit {
+  /** chars consumed by this unit */
+  length: number;
+  vowel: string;
+  final: string;
+}
+
+/**
+ * Parse one in-progress syllable unit starting at chars[start]:
+ * initial + vowel [+ final [+ final]].
+ * Returns null when chars[start] can't open a syllable.
+ */
+function parseHangulUnit(
+  chars: string[],
+  start: number,
+): ParsedHangulUnit | null {
+  const initial = chars[start];
+  if (!hasOwn(INITIAL_COMPAT_INDEX, initial)) return null;
+
+  const next = chars[start + 1];
+  if (!next || !isCompatVowel(next)) return null;
+
+  let length = 2;
+  let vowel = next;
+  const nextVowel = chars[start + length];
+  if (nextVowel && isCompatVowel(nextVowel)) {
+    const combined = combineCompatVowel(vowel, nextVowel);
+    if (combined) {
+      vowel = combined;
+      length += 1;
+    }
+  }
+
+  let finalConsonant = "";
+  const finalCandidate = chars[start + length];
+  if (finalCandidate && isCompatConsonant(finalCandidate)) {
+    const afterFinal = chars[start + length + 1];
+    if (!afterFinal || !isCompatVowel(afterFinal)) {
+      let finalValue = finalCandidate;
+      let finalLength = 1;
+
+      if (isCompatConsonant(afterFinal)) {
+        const combinedFinal = combineCompatFinal(finalCandidate, afterFinal);
+        const afterCombinedFinal = chars[start + length + 2];
+        if (
+          combinedFinal &&
+          (!afterCombinedFinal || !isCompatVowel(afterCombinedFinal))
+        ) {
+          finalValue = combinedFinal;
+          finalLength = 2;
+        }
+      }
+
+      if (hasOwn(FINAL_COMPAT_INDEX, finalValue)) {
+        finalConsonant = finalValue;
+        length += finalLength;
+      }
+    }
+  }
+
+  return { length, vowel, final: finalConsonant };
+}
+
+/** start index of the trailing in-progress syllable unit */
+function lastComposingUnitStart(chars: string[]): number {
+  let last = 0;
+  let i = 0;
+  while (i < chars.length) {
+    last = i;
+    i += parseHangulUnit(chars, i)?.length ?? 1;
+  }
+  return last;
+}
+
 function composeHangulJamo(value: string): string {
   const chars = [...value];
   let result = "";
@@ -729,62 +1096,14 @@ function composeHangulJamo(value: string): string {
 
   while (i < chars.length) {
     const current = chars[i];
-    if (!hasOwn(INITIAL_COMPAT_INDEX, current)) {
+    const unit = parseHangulUnit(chars, i);
+    if (!unit) {
       result += current;
       i += 1;
       continue;
     }
 
-    const next = chars[i + 1];
-    if (!next || !isCompatVowel(next)) {
-      result += current;
-      i += 1;
-      continue;
-    }
-
-    let consumed = 2;
-    let vowel = next;
-    const nextVowel = chars[i + consumed];
-    if (nextVowel && isCompatVowel(nextVowel)) {
-      const combined = combineCompatVowel(vowel, nextVowel);
-      if (combined) {
-        vowel = combined;
-        consumed += 1;
-      }
-    }
-
-    let finalConsonant = "";
-    const finalCandidate = chars[i + consumed];
-    if (finalCandidate && isCompatConsonant(finalCandidate)) {
-      const afterFinal = chars[i + consumed + 1];
-      if (!afterFinal || !isCompatVowel(afterFinal)) {
-        let finalValue = finalCandidate;
-        let finalConsumed = 1;
-
-        const secondFinalCandidate = chars[i + consumed + 1];
-        const afterCombinedFinal = chars[i + consumed + 2];
-        if (secondFinalCandidate && isCompatConsonant(secondFinalCandidate)) {
-          const combinedFinal = combineCompatFinal(
-            finalCandidate,
-            secondFinalCandidate,
-          );
-          if (
-            combinedFinal &&
-            (!afterCombinedFinal || !isCompatVowel(afterCombinedFinal))
-          ) {
-            finalValue = combinedFinal;
-            finalConsumed = 2;
-          }
-        }
-
-        if (hasOwn(FINAL_COMPAT_INDEX, finalValue)) {
-          finalConsonant = finalValue;
-          consumed += finalConsumed;
-        }
-      }
-    }
-
-    const composed = composeCompatSyllable(current, vowel, finalConsonant);
+    const composed = composeCompatSyllable(current, unit.vowel, unit.final);
     if (!composed) {
       result += current;
       i += 1;
@@ -792,7 +1111,7 @@ function composeHangulJamo(value: string): string {
     }
 
     result += composed;
-    i += consumed;
+    i += unit.length;
   }
 
   return result;
