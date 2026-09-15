@@ -1,7 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import "@xterm/xterm/css/xterm.css";
@@ -41,7 +40,10 @@ export function PaneView({
     if (!host) return;
 
     const term = new Terminal({
-      fontFamily: "Menlo, monospace",
+      // WebKit canvas ignores numeric weight selection (300/400 render
+      // identically) — thinner text needs a thinner *face*, and Courier New
+      // is the lightest stock monospace on macOS.
+      fontFamily: "'Courier New', ui-monospace, Menlo, monospace",
       fontSize: 13,
       cursorBlink: true,
       allowProposedApi: true,
@@ -56,11 +58,6 @@ export function PaneView({
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
     term.open(host);
-    try {
-      term.loadAddon(new WebglAddon());
-    } catch {
-      // fall back to canvas renderer
-    }
     fit.fit();
     termRef.current = term;
 
