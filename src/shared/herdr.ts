@@ -168,6 +168,8 @@ export const herdr = {
   remoteStatus: () =>
     invoke<{ target?: string; session?: string }>("remote_status"),
   machineList: () => invoke<MachineInfo[]>("machine_list"),
+  /** compat check against the ACTIVE server — refresh after context switches */
+  compatWarning: () => invoke<string | null>("compat_warning"),
   machineRemove: (id: string) => invoke("machine_remove", { id }),
   machineRename: (id: string, label: string) =>
     invoke("machine_rename", { id, label }),

@@ -200,14 +200,14 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 
 ### 배포/운영
 
-- [x] **herdr 바이너리 번들** — `bun run dist` = `scripts/fetch-herdr`(→`src-tauri/bin/herdr`, gitignore·shim 거부) + `tauri build --config src-tauri/tauri.bundle.json`(resources merge — base conf에 두면 bin 없을 때 `cargo test`가 깨져서 분리). `setup()`이 `resource_dir()/bin/herdr` 존재 시 `BUNDLED_HERDR`에 등록 → `herdr_bin()`이 번들 우선. `NOTICE`에 herdr(Apache-2.0) 표기. 검증: `staylazy.app/Contents/Resources/bin/herdr` 확인됨.
-- [x] **herdr 업그레이드 정책** — bootstrap이 `compat_warning()` 반환 → 타이틀바 `⚠` 표시 (`compatible`/`endpoint_compatible` false 또는 server 버전 ≠ pinned `EXPECTED_HERDR_VERSION` = 0.9.0). 스키마 diff 체크 = `scripts/check_herdr_schema.py` (status/snapshot/machine-list의 의존 필드 존재 검증, herdr 버전업 때 실행).
+- [x] **herdr 바이너리 번들** — `bun run dist` = `scripts/fetch-herdr`(→`src-tauri/bin/herdr`, gitignore·shim 거부·PATH shim이면 known dirs까지 계속 탐색) + `tauri build --config src-tauri/tauri.bundle.json`(resources merge — base conf에 두면 bin 없을 때 `cargo test`가 깨져서 분리). `setup()`이 `resource_dir()/bin/herdr` 존재 시 `BUNDLED_HERDR`에 등록 → `herdr_bin()` 해석 순서: `HERDR_BIN`(명시적 override 최우선) → 번들 → PATH → known dirs. `NOTICE`에 herdr(Apache-2.0) 표기. 검증: `staylazy.app/Contents/Resources/bin/herdr` 확인됨.
+- [x] **herdr 업그레이드 정책** — bootstrap + remote attach/detach 시 `compat_warning()` 재검사 → 타이틀바 `⚠` 표시 (`compatible`/`endpoint_compatible` false 또는 server 버전 ≠ pinned `EXPECTED_HERDR_VERSION` = 0.9.0). 스키마 diff 체크 = `scripts/check_herdr_schema.py` (status/snapshot/machine-list의 의존 필드 존재 검증, herdr 버전업 때 실행).
 - [x] pane/session ID 재시작 후 안정성 — Phase 0 검증 완료: 스냅샷 복원 시 동일 ID/cwd 유지.
 - [ ] **브랜딩/attribution** — `NOTICE` 추가 완료. 남은 것: 앱 내 About/표기 위치 결정.
 
 ### 코드 정리 (v2.1)
 
-- `DiffView`에 `remove`(worktree 정리) 버튼 + 머지 성공 후 "remove worktree?" 제안 — `worktree_remove` 연결. `parseDiff` 버그 수정: `---`/`+++` 헤더가 del/add로 잘못 분류되던 것(vitest로 포착).
+- `DiffView`에 `remove`(worktree 정리) 버튼 + 머지 성공 후 "remove worktree?" 제안 — `worktree_remove` 연결. `parseDiff` 버그 수정: `---`/`+++` 헤더가 del/add로 잘못 분류되던 것 → meta 라인은 파일의 첫 `@@` 이전에만 적용(in-hunk `+++i`/`---x` 콘텐츠 라인은 유지), `\ No newline` 주석은 라인 번호 미소비 (vitest 커버).
 - Inbox: 항목별 dismiss ✕ + clear all — working/idle 전이 시 dismiss 자동 해제.
 - Sidebar: workspace/tab 라벨 더블클릭 → 인라인 rename (`workspace rename`/`tab rename` 연결).
 - Fanout: 고정 3s sleep → `agent get` 폴링(최대 4s, status != unknown 감지) + 1s settle.

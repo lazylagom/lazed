@@ -4,8 +4,12 @@
 #   $HERDR_BIN → `mise which herdr` → PATH → known install dirs.
 # Toolchain shims (mise reshims etc.) are scripts, not binaries — never copy
 # one; it would exec through the manager at runtime and fail on a clean box.
+# A script found on PATH is skipped so a real binary in a known dir can win;
+# a script from HERDR_BIN/`mise which`/known dirs is a hard error.
 set -eu
 cd "$(dirname "$0")/../src-tauri"
+
+is_script() { head -c 2 "$1" 2>/dev/null | grep -q '#!'; }
 
 src=""
 if [ -n "${HERDR_BIN:-}" ] && [ -f "$HERDR_BIN" ]; then
@@ -15,14 +19,17 @@ if [ -z "$src" ] && command -v mise >/dev/null 2>&1; then
   src="$(mise which herdr 2>/dev/null || true)"
 fi
 if [ -z "$src" ]; then
-  src="$(command -v herdr || true)"
+  c="$(command -v herdr || true)"
+  # a PATH hit may be a shim — don't settle for it before trying known dirs
+  if [ -n "$c" ] && [ -f "$c" ] && ! is_script "$c"; then
+    src="$c"
+  fi
 fi
 if [ -z "$src" ]; then
   for c in \
     /opt/homebrew/bin/herdr \
     /usr/local/bin/herdr \
-    "$HOME/.local/bin/herdr" \
-    "$HOME/.local/share/mise/installs" ; do
+    "$HOME/.local/bin/herdr" ; do
     [ -f "$c" ] && src="$c" && break
   done
 fi
@@ -30,7 +37,7 @@ if [ -z "$src" ] || [ ! -f "$src" ]; then
   echo "fetch-herdr: herdr binary not found — set HERDR_BIN or install herdr" >&2
   exit 1
 fi
-if head -c 2 "$src" | grep -q '#!'; then
+if is_script "$src"; then
   echo "fetch-herdr: $src is a script/shim, not a binary — point HERDR_BIN at the real binary" >&2
   exit 1
 fi

@@ -218,14 +218,16 @@ pub fn register_bundled(path: Option<PathBuf>) {
 }
 
 pub fn herdr_bin() -> Result<PathBuf, String> {
-    if let Some(Some(p)) = BUNDLED_HERDR.get() {
-        return Ok(p.clone());
-    }
+    // explicit override first — a dev setting HERDR_BIN means it, even in
+    // a packaged build
     if let Ok(custom) = std::env::var("HERDR_BIN") {
         let p = PathBuf::from(custom);
         if p.is_file() {
             return Ok(p);
         }
+    }
+    if let Some(Some(p)) = BUNDLED_HERDR.get() {
+        return Ok(p.clone());
     }
     if let Some(path_env) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_env) {

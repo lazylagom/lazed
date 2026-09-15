@@ -43,4 +43,51 @@ describe("parseDiff", () => {
     const lastCtx = foo.lines[foo.lines.length - 1];
     expect(lastCtx.newNo).toBe(3);
   });
+
+  it("keeps +++/--- content lines inside hunks", () => {
+    // meta prefixes only apply before the first @@ — inside a hunk,
+    // `+++i;` is an added `++i;` line, `---x;` a removed `--x;` line.
+    const d = `diff --git a/f.c b/f.c
+index 1..2 100644
+--- a/f.c
++++ b/f.c
+@@ -1,3 +1,4 @@
+ int main() {
++++i;
+---x;
+ }
+`;
+    const f = parseDiff(d)[0];
+    expect(f.lines.map((l) => l.kind)).toEqual([
+      "hunk",
+      "ctx",
+      "add",
+      "del",
+      "ctx",
+    ]);
+    expect(f.lines[2]).toMatchObject({ kind: "add", text: "+++i;", newNo: 2 });
+    expect(f.lines[4].newNo).toBe(3); // } — numbering unaffected
+  });
+
+  it("does not charge a line number to \\-annotations", () => {
+    const d = `diff --git a/f b/f
+index 1..2 100644
+--- a/f
++++ b/f
+@@ -1,2 +1,2 @@
+-old
+\\ No newline at end of file
++new
+\\ No newline at end of file
+`;
+    const f = parseDiff(d)[0];
+    expect(f.lines.map((l) => l.kind)).toEqual([
+      "hunk",
+      "del",
+      "meta",
+      "add",
+      "meta",
+    ]);
+    expect(f.lines[3].newNo).toBe(1); // +new is still line 1
+  });
 });

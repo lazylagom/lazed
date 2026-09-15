@@ -293,6 +293,13 @@ fn remote_status() -> Result<Value, String> {
     }))
 }
 
+/// Re-check the ACTIVE server's compat status (local, or the attached
+/// remote) — bootstrap alone can't see a context that attached later.
+#[tauri::command]
+fn compat_warning() -> Option<String> {
+    herdr::compat_warning()
+}
+
 #[tauri::command]
 fn machine_list() -> Result<Value, String> {
     herdr::machine_list()
@@ -454,6 +461,7 @@ pub fn run() {
             machine_list,
             machine_remove,
             machine_rename,
+            compat_warning,
             subscribe_events,
         ])
         .build(tauri::generate_context!())

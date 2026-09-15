@@ -337,6 +337,11 @@ export function App() {
           setShowRemote(false);
           setFocusedPane(null);
           refresh();
+          // the warning tracks whichever server is now active
+          herdr
+            .compatWarning()
+            .then(setWarning)
+            .catch(() => {});
         })
         .catch((e) => {
           setError(String(e));
@@ -345,6 +350,10 @@ export function App() {
           herdr
             .remoteStatus()
             .then((r) => setRemoteTarget(remoteLabel(r)))
+            .catch(() => {});
+          herdr
+            .compatWarning()
+            .then(setWarning)
             .catch(() => {});
         });
     },
@@ -359,6 +368,10 @@ export function App() {
         setShowRemote(false);
         setFocusedPane(null);
         refresh();
+        herdr
+          .compatWarning()
+          .then(setWarning)
+          .catch(() => {});
       })
       .catch((e) => setError(String(e)));
   }, [refresh]);
