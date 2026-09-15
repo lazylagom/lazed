@@ -203,7 +203,7 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 - [x] **herdr 바이너리 번들** — `bun run dist` = `scripts/fetch-herdr`(→`src-tauri/bin/herdr`, gitignore·shim 거부·PATH shim이면 known dirs까지 계속 탐색) + `tauri build --config src-tauri/tauri.bundle.json`(resources merge — base conf에 두면 bin 없을 때 `cargo test`가 깨져서 분리). `setup()`이 `resource_dir()/bin/herdr` 존재 시 `BUNDLED_HERDR`에 등록 → `herdr_bin()` 해석 순서: `HERDR_BIN`(명시적 override 최우선) → 번들 → PATH → known dirs. `NOTICE`에 herdr(Apache-2.0) 표기. 검증: `staylazy.app/Contents/Resources/bin/herdr` 확인됨.
 - [x] **herdr 업그레이드 정책** — bootstrap + remote attach/detach 시 `compat_warning()` 재검사 → 타이틀바 `⚠` 표시 (`compatible`/`endpoint_compatible` false 또는 server 버전 ≠ pinned `EXPECTED_HERDR_VERSION` = 0.9.0). 스키마 diff 체크 = `scripts/check_herdr_schema.py` (status/snapshot/machine-list의 의존 필드 존재 검증, herdr 버전업 때 실행).
 - [x] pane/session ID 재시작 후 안정성 — Phase 0 검증 완료: 스냅샷 복원 시 동일 ID/cwd 유지.
-- [ ] **브랜딩/attribution** — `NOTICE` 추가 완료. 남은 것: 앱 내 About/표기 위치 결정.
+- [x] **브랜딩/attribution** — `NOTICE` 추가 + 앱 내 표기 완료: 타이틀바 `about` 버튼 → About 모달 (이름/`getVersion()` 버전/NOTICE 전문, `NOTICE?raw` 임포트로 단일 소스 유지).
 
 ### 코드 정리 (v2.1)
 

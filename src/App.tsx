@@ -6,6 +6,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PaneGrid } from "./components/PaneGrid";
+import { About } from "./features/About";
 import { AgentPicker } from "./features/AgentPicker";
 import { DiffView } from "./features/DiffView";
 import { Fanout, type FanoutRequest } from "./features/Fanout";
@@ -77,6 +78,7 @@ export function App() {
   const [inboxOpen, setInboxOpen] = useState(false);
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
   const [showRemote, setShowRemote] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [remoteTarget, setRemoteTarget] = useState<string | null>(null);
   const refreshTimer = useRef<number | null>(null);
 
@@ -540,6 +542,13 @@ export function App() {
           done={inboxItems.length - blockedCount}
           onToggle={() => setInboxOpen((o) => !o)}
         />
+        <button
+          type="button"
+          onClick={() => setShowAbout(true)}
+          title="about / licenses"
+        >
+          about
+        </button>
         <span className="status">
           {error
             ? `error: ${error}`
@@ -587,6 +596,7 @@ export function App() {
           onClose={() => setShowFanout(false)}
         />
       )}
+      {showAbout && <About onClose={() => setShowAbout(false)} />}
       {showRemote && (
         <RemoteBar
           connected={remoteTarget ?? undefined}
