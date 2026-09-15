@@ -108,3 +108,39 @@ pub fn worktree_merge(repo: &str, branch: &str) -> Result<Value, String> {
         Err(e) => Ok(json!({"ok": false, "output": e})),
     }
 }
+
+/// Resolve a directory's repo identity for project grouping/import dedupe.
+/// `repo_key` = the shared git dir — matches `workspace.worktree.repo_key`
+/// that herdr reports (for a linked worktree it resolves to the main repo's
+/// .git, so importing a worktree path maps to the same project). `repo_root`
+/// = the main checkout root. Ok(None) for non-repo paths; remote-aware
+/// through `git()` — an attached remote's paths resolve on that host.
+pub fn resolve_repo(dir: &str) -> Result<Option<Value>, String> {
+    let common = match git_ok(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let key = if common.starts_with('/') {
+        common
+    } else {
+        format!("{}/{}", dir.trim_end_matches('/'), common)
+    };
+    // `<root>/.git` → the main checkout root; anything else (bare repo,
+    // odd layout) falls back to this dir's own toplevel
+    let root = key
+        .strip_suffix("/.git")
+        .map(str::to_string)
+        .or_else(|| git_ok(dir, &["rev-parse", "--show-toplevel"]));
+    let name = root
+        .as_deref()
+        .and_then(|r| r.rsplit('/').next())
+        .map(str::to_string);
+    Ok(Some(json!({
+        "repo_key": key,
+        "repo_root": root,
+        "name": name,
+    })))
+}

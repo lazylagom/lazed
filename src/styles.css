@@ -513,6 +513,7 @@ body,
 }
 
 .pane-term {
+  position: relative;
   flex: 1;
   min-height: 0;
   padding: 4px;
@@ -520,6 +521,53 @@ body,
 
 .pane-term .xterm {
   height: 100%;
+}
+
+/* ── IME overlay (Korean input) ────────────── */
+/* Required for Hangul composition: the invisible input owns all keyboard
+ * events. Do not change pointer-events, opacity or font-size — doing so
+ * breaks IME input (see laze docs/korean-ime.md). */
+
+.ime-overlay-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  outline: none;
+  opacity: 0;
+  z-index: 10;
+  pointer-events: none;
+  font-size: 16px;
+  caret-color: transparent;
+  background: transparent;
+  color: transparent;
+}
+
+.ime-composition-preview {
+  display: none;
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(38, 40, 43, 0.92);
+  color: #e6e6e6;
+  font-family: "Cascadia Code", "CaskaydiaCove Nerd Font", "MesloLGS NF",
+    "JetBrainsMono Nerd Font", "Hack Nerd Font Mono", "Symbols Nerd Font Mono",
+    Consolas, "Courier New", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  z-index: 20;
+  border: 1px solid #3a3d40;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px #00000066;
+  white-space: pre;
 }
 
 /* ── dividers ────────────────────────────── */

@@ -16,7 +16,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PaneGrid } from "./components/PaneGrid";
 import { About } from "./features/About";
 import { AgentPicker } from "./features/AgentPicker";
@@ -29,7 +29,9 @@ import {
   type AgentStatus,
   type HerdrEvent,
   type PaneInfo,
+  type RepoRef,
   type Snapshot,
+  type WorkspaceInfo,
   herdr,
   subscribeEvents,
 } from "./shared/herdr";
@@ -79,6 +81,46 @@ async function notify(title: string, body: string) {
   }
 }
 
+/** Root-pane cwd for a workspace — the directory it was created in. */
+function rootCwd(snap: Snapshot | null, wsId: string): string | undefined {
+  const p = snap?.panes.find((p) => p.workspace_id === wsId);
+  return p?.cwd ?? p?.foreground_cwd;
+}
+
+/** Workspaces belonging to a repo_key — via herdr's worktree meta when
+ * present, else by resolving each workspace's root-pane cwd (fresh imports
+ * have no worktree stamp until the first worktree op). */
+async function projectMembers(
+  snap: Snapshot | null,
+  repoKey: string,
+): Promise<WorkspaceInfo[]> {
+  const out: WorkspaceInfo[] = [];
+  await Promise.all(
+    (snap?.workspaces ?? []).map(async (w) => {
+      let key = w.worktree?.repo_key;
+      if (!key) {
+        const cwd = rootCwd(snap, w.workspace_id);
+        if (!cwd) return;
+        const r = await herdr.resolveRepo(cwd).catch(() => null);
+        key = r?.repo_key;
+      }
+      if (key === repoKey) out.push(w);
+    }),
+  );
+  return out;
+}
+
+/** First prompt for a project's control-tower agent — self-bootstraps via
+ * `herdr --skill`, then coordinates work in linked worktrees. */
+function towerPreamble(repoRoot: string): string {
+  return [
+    "You are the control tower for this project. First run `herdr --skill` and read it — you are inside a herdr pane and orchestrate other panes through the herdr CLI.",
+    `Repo root: ${repoRoot}. Do all implementation work in worktrees — use this pane only to coordinate (status, merge, report).`,
+    "For each task: `herdr worktree create --cwd <repo> --branch <slug>` → `herdr agent start claude --pane <root_pane>` → `herdr agent prompt <pane> <task>` → `herdr agent wait <pane> --until done` → verify via `herdr pane read <pane>` and report branch + commit.",
+    "If a spawned agent sits on a workspace trust dialog, approve it with `herdr pane send-keys <pane> Down` then `herdr pane send-keys <pane> Enter`.",
+  ].join("\n");
+}
+
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +136,15 @@ export function App() {
   const [showAbout, setShowAbout] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [remoteTarget, setRemoteTarget] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const refreshTimer = useRef<number | null>(null);
+  const noticeTimer = useRef<number | null>(null);
+
+  const flash = useCallback((msg: string) => {
+    setNotice(msg);
+    if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(null), 5000);
+  }, []);
 
   const refresh = useCallback(() => {
     herdr
@@ -110,6 +160,60 @@ export function App() {
       refresh();
     }, 40);
   }, [refresh]);
+
+  // Project identity: herdr only stamps `worktree.repo_key` on workspaces
+  // after a worktree op, so a freshly imported repo workspace reports none.
+  // We derive the same key ourselves by resolving each workspace's root-pane
+  // cwd (cached by path — a workspace's root cwd doesn't change).
+  const [repoCache, setRepoCache] = useState<Map<string, RepoRef | null>>(
+    new Map(),
+  );
+  useEffect(() => {
+    if (!snap) return;
+    const missing = new Set<string>();
+    for (const w of snap.workspaces) {
+      if (w.worktree?.repo_key) continue;
+      const cwd = rootCwd(snap, w.workspace_id);
+      if (cwd && !repoCache.has(cwd)) missing.add(cwd);
+    }
+    if (!missing.size) return;
+    let alive = true;
+    Promise.all(
+      [...missing].map(async (cwd) => {
+        const r = await herdr.resolveRepo(cwd).catch(() => null);
+        return [cwd, r] as const;
+      }),
+    ).then((entries) => {
+      if (!alive) return;
+      setRepoCache((prev) => {
+        const next = new Map(prev);
+        for (const [cwd, r] of entries) next.set(cwd, r);
+        return next;
+      });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [snap, repoCache]);
+
+  const repoRefs = useMemo(() => {
+    const m = new Map<string, RepoRef>();
+    for (const w of snap?.workspaces ?? []) {
+      const wt = w.worktree;
+      if (wt?.repo_key) {
+        m.set(w.workspace_id, {
+          repo_key: wt.repo_key,
+          repo_root: wt.repo_root,
+          name: wt.repo_name,
+        });
+        continue;
+      }
+      const cwd = rootCwd(snap, w.workspace_id);
+      const r = cwd ? repoCache.get(cwd) : undefined;
+      if (r) m.set(w.workspace_id, r);
+    }
+    return m;
+  }, [snap, repoCache]);
 
   useEffect(() => {
     herdr
@@ -238,20 +342,104 @@ export function App() {
       .catch((e) => setError(String(e)));
   }, [focusedWsId]);
 
-  const newWorkspace = useCallback((cwd?: string, label?: string) => {
-    setShowImport(false);
-    herdr
-      .workspaceCreate(cwd, label)
-      .then((res) => {
+  const newWorkspace = useCallback(
+    async (cwd?: string, label?: string) => {
+      setShowImport(false);
+      try {
+        // one workspace per project: if this path resolves to a repo that
+        // already has a workspace in the session, just focus it
+        if (cwd) {
+          const repo = await herdr.resolveRepo(cwd).catch(() => null);
+          if (repo?.repo_key) {
+            const live = await herdr.snapshot().catch(() => null);
+            const members = await projectMembers(live, repo.repo_key);
+            const existing =
+              members.find((w) => w.worktree?.is_linked_worktree === false) ??
+              members.find(
+                (w) =>
+                  repoRefs.get(w.workspace_id)?.repo_root ===
+                  rootCwd(live, w.workspace_id),
+              ) ??
+              members[0];
+            if (existing) {
+              focusWorkspace(existing.workspace_id);
+              flash(
+                `already imported — focused ${existing.label ?? existing.workspace_id}`,
+              );
+              return;
+            }
+          }
+        }
+        const res = await herdr.workspaceCreate(cwd, label);
         const wsId =
           (res as { result?: { workspace?: { workspace_id?: string } } })
             ?.result?.workspace?.workspace_id ??
           (res as { workspace?: { workspace_id?: string } })?.workspace
             ?.workspace_id;
-        if (wsId) return herdr.workspaceFocus(wsId);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
+        if (wsId) await herdr.workspaceFocus(wsId);
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [focusWorkspace, flash, repoRefs],
+  );
+
+  const spawnTower = useCallback(
+    async (repoKey: string) => {
+      const live = await herdr.snapshot().catch(() => null);
+      const members = await projectMembers(live, repoKey);
+      const towerWs =
+        members.find((w) => w.worktree?.is_linked_worktree === false) ??
+        members.find(
+          (w) =>
+            repoRefs.get(w.workspace_id)?.repo_root ===
+            rootCwd(live, w.workspace_id),
+        ) ??
+        members[0];
+      if (!towerWs) return;
+      const pane = (live?.panes ?? []).find(
+        (p) => p.workspace_id === towerWs.workspace_id,
+      );
+      if (!pane) {
+        setError("tower: workspace has no pane");
+        return;
+      }
+      focusWorkspace(towerWs.workspace_id);
+      // agentStart errors when the pane already runs an agent — fine, the
+      // readiness poll below just re-arms the preamble on the live one
+      await herdr.agentStart(pane.pane_id, "claude", "tower").catch(() => {});
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const a = await herdr.agentGet(pane.pane_id).catch(() => null);
+        if (
+          a?.interactive_ready ||
+          a?.agent_status === "idle" ||
+          a?.agent_status === "working" ||
+          a?.agent_status === "done"
+        ) {
+          await herdr
+            .agentPrompt(
+              pane.pane_id,
+              towerPreamble(
+                towerWs.worktree?.repo_root ??
+                  repoRefs.get(towerWs.workspace_id)?.repo_root ??
+                  "",
+              ),
+            )
+            .then(() => flash("control tower started"))
+            .catch((e) => setError(String(e)));
+          return;
+        }
+        // blocked usually means a trust dialog — leave it to the user,
+        // approval flips the status and the poll continues
+        await new Promise((r) => setTimeout(r, 600));
+      }
+      setError(
+        "tower: agent not ready — approve the dialog in the pane, then retry",
+      );
+    },
+    [focusWorkspace, flash, repoRefs],
+  );
 
   const jumpToPane = useCallback(
     (pane: PaneInfo) => {
@@ -582,11 +770,13 @@ export function App() {
         <span className="status">
           {error
             ? `error: ${error}`
-            : warning
-              ? `⚠ ${warning}`
-              : snap
-                ? `${remoteTarget ? `⇄ ${remoteTarget} · ` : ""}${workspace?.label ?? focusedWsId ?? "?"} · ${layout?.panes.length ?? 0} pane(s)`
-                : "connecting…"}
+            : notice
+              ? notice
+              : warning
+                ? `⚠ ${warning}`
+                : snap
+                  ? `${remoteTarget ? `⇄ ${remoteTarget} · ` : ""}${workspace?.label ?? focusedWsId ?? "?"} · ${layout?.panes.length ?? 0} pane(s)`
+                  : "connecting…"}
         </span>
       </div>
       {inboxOpen && (
@@ -663,6 +853,7 @@ export function App() {
       <div className="body">
         <Sidebar
           snap={snap}
+          repoRefs={repoRefs}
           focusedWsId={focusedWsId}
           activeTabId={activeTabId}
           focusedPane={effectiveFocusedPane}
@@ -670,7 +861,6 @@ export function App() {
           onFocusTab={focusTab}
           onFocusPane={setFocusedPane}
           onNewWorkspace={() => setShowImport(true)}
-          onNewTab={newTab}
           onCloseWorkspace={(id) =>
             herdr.workspaceClose(id).catch((e) => setError(String(e)))
           }
@@ -684,6 +874,7 @@ export function App() {
             herdr.tabRename(id, label).catch((e) => setError(String(e)))
           }
           onDiff={(ws) => setDiffWsId(ws.workspace_id)}
+          onTower={spawnTower}
           rollup={worst}
         />
         <div className="main">

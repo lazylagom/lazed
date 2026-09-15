@@ -10,6 +10,13 @@ export interface WorktreeInfo {
   repo_root?: string;
 }
 
+/** Repo identity resolved by `resolve_repo` — null when the path is not a repo. */
+export interface RepoRef {
+  repo_key: string;
+  repo_root?: string;
+  name?: string;
+}
+
 export interface WorkspaceInfo {
   workspace_id: string;
   label?: string;
@@ -162,6 +169,7 @@ export const herdr = {
       repo,
       branch,
     }),
+  resolveRepo: (cwd: string) => invoke<RepoRef | null>("resolve_repo", { cwd }),
   remoteConnect: (target: string, session?: string) =>
     invoke("remote_connect", { target, session }),
   remoteDisconnect: () => invoke("remote_disconnect"),

@@ -246,6 +246,13 @@ fn worktree_merge(repo: String, branch: String) -> Result<Value, String> {
     git::worktree_merge(&repo, &branch)
 }
 
+/// Repo identity for a path ({repo_key, repo_root, name} or null) — powers
+/// project grouping and import dedupe in the sidebar/import flow.
+#[tauri::command]
+fn resolve_repo(cwd: String) -> Result<Value, String> {
+    Ok(git::resolve_repo(&cwd)?.unwrap_or(Value::Null))
+}
+
 /// Kill every pane control stream. Streams are bound to whatever herdr
 /// context was active when they attached, so they must not outlive a context
 /// switch — PaneView's attach retry re-binds them to the current target.
@@ -471,6 +478,7 @@ pub fn run() {
             worktree_remove,
             worktree_diff,
             worktree_merge,
+            resolve_repo,
             remote_connect,
             remote_disconnect,
             remote_status,
