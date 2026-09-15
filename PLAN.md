@@ -1,7 +1,7 @@
 # StayLazy — Product & Architecture Plan (v2)
 
 > herdr(런타임·도메인 모델 그대로 사용) + Tauri GUI(Orca UX 패턴)
-> 작성일: 2026-09-14 / 상태: draft v2 — **Phase 0·1 완료**
+> 작성일: 2026-09-14 / 상태: draft v2.1 — **Phase 0-4 완료 + §7 백로그 대부분 처리**
 > - herdr 0.9.0 (mise) 헤드리스 서버 + `terminal session control` NDJSON 프레임 → xterm.js 렌더/입력 왕복 확인
 > - pane opaque ID(w1:p1…)는 서버 재시작 후에도 유지됨 (스냅샷 복원 시 동일 ID/cwd)
 > v1→v2 변경: 자체 데몬 재구현(Path A) 폐기 → herdr 바이너리를 런타임으로 사용(Path B).
@@ -189,21 +189,27 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 
 ### 검증
 
-- [ ] **실기 SSH e2e** — `herdr machine add <host>`로 원격 준비 → `⇧⌘R` attach → pane 조작/이벤트 스트림/git diff·merge 라우팅/원격 서버 재기동 확인. 실패 경로·셸 quoting·컨텍스트 전환은 단위 테스트로만 확인된 상태.
-- [ ] **프레임 스트림 고부하 성능 계측** — 접근법: throwaway `herdr --session staylazy-perf` 세션(소켓 `~/.config/herdr/sessions/<name>/herdr.sock` — 사용자 워크스페이스와 격리)에 pane 생성 → `seq 1 300000` 등 flood → control stream의 프레임 수/bytes/wall-time 측정 → `echo <marker>` 회송으로 무부하 round-trip 지연 측정. 의심 구간: per-frame `Channel.send` IPC, 프론트 `atob`, `term.write` — 병목 확인 시 reader thread에서 프레임 배칭.
+- [ ] **실기 SSH e2e** — `herdr machine add <host>`로 원격 준비 → `⇧⌘R` attach → pane 조작/이벤트 스트림/git diff·merge 라우팅/원격 서버 재기동 확인. 실패 경로·셸 quoting·컨텍스트 전환은 단위 테스트로만 확인된 상태. (localhost SSH·등록 머신 없어 아직 미검증)
+- [x] **프레임 스트림 고부하 성능 계측** — `scripts/perf_stream.py` (throwaway `--session staylazy-perf`). 측정 결과 (200x50 pane): `seq 1 300000` flood → 246 frames/0.13MB/0.33s (herdr가 viewport diff로 coalesce — 스크롤 flood는 클라이언트에 안 닿음). 지속 전면 repaint → ~54 frames/s, ~26KB/s, 평균 프레임 ~480B. idle round-trip(input→echo frame) 15-55ms. 결론: `Channel.send`/`atob`/`term.write` 병목 없음 — 프레임 배칭 불필요. 주의: 마커 검출 시 타이핑된 명령행 echo와 ANSI diff 분할에 유의(스크립트에 split-marker + `clear` 패턴으로 처리).
 
 ### 기능 (Phase 4 후속)
 
-- [ ] **머신 관리 UI** — 목록/attach 완료. 남은 것:
-  - `machine remove <id>` / `machine rename <id> --label <l>` — 비대화형이라 그대로 호출 가능
-  - `machine add` — 원격 설치/서버 교체 승인 프롬프트가 interactive라 백그라운드 exec 불가 → staylazy pane 안에서 `pane run 'herdr machine add <target> --label <l>'`로 실행해 사용자가 pane에서 승인하는 방식이 자연스러움
-  - 저장 머신 row 스키마 `{id, label, target, session, enabled, selected}` (herdr v0.9.0 `src/cli/machine.rs` 확인)
+- [x] **머신 관리 UI** — `⇧⌘R` 모달에서 목록/attach + rename(✎ 인라인)/remove(✕ 확인) + add는 focused pane에 `pane run 'herdr machine add …'`로 실행해 pane에서 승인. `machine_remove`/`machine_rename`은 로컬 전용 실행(`run_local` — attach 중에도 remote 라우팅 안 함).
 - [ ] **동시 멀티 원격** — 현재 단일 `REMOTE` static(`remote_ctx()` 경계). 멀티화하려면 target별 context map + 이벤트/control 스트림을 context별로 라우팅 + pane id 네임스페이스 처리 필요 (서로 다른 서버가 같은 `w1:p1`을 가질 수 있음 — UI에서 서버 프리픽스 필요, herdr 스킬 문서도 동일 경고)
 - [ ] **모바일 read-only 뷰** — Orca 모니터링 패턴 참고
 
 ### 배포/운영
 
-- [ ] **herdr 바이너리 번들** — 방향: 번들 포함(§5 결정). 구현 메모: `tauri.conf.json` `bundle.resources: ["bin/herdr"]` + `setup()`에서 `resource_dir()/herdr` 존재 시 `OnceLock` 등록 → `herdr_bin()`이 번들 우선 조회. 바이너리는 플랫폼별이라 git에 넣지 않고 `scripts/fetch-herdr`가 `HERDR_BIN`/PATH/mise에서 `src-tauri/bin/`으로 복사(`src-tauri/bin/`은 gitignore) + `beforeBuildCommand`에 연결. Apache-2.0 재배포 → `NOTICE`에 herdr 표기 필요. 대안(미채택 시): 미설치 감지 시 brew/install.sh 안내 — 현재 `herdr_bin()` 에러 메시지가 이미 그 역할.
-- [ ] **herdr 업그레이드 정책** — `herdr status --json`이 `client.version`/`server.version`/`protocol`/`compatible`/`endpoint_compatible`을 이미 노출 → bootstrap에서 고정 버전(0.9.0)·`compatible` 검사 후 불일치 시 UI 경고로 충분. 스키마 diff 체크 루틴: staylazy가 의존하는 필드(`/server/socket`, `/server/running`, `/result/snapshot`, `panes[]`, `pane_id`, 이벤트 `{event,data}` 봉투, machine list row 스키마) 존재 여부를 검증하는 스크립트/테스트를 두고 herdr 버전업 때 실행.
+- [x] **herdr 바이너리 번들** — `bun run dist` = `scripts/fetch-herdr`(→`src-tauri/bin/herdr`, gitignore·shim 거부) + `tauri build --config src-tauri/tauri.bundle.json`(resources merge — base conf에 두면 bin 없을 때 `cargo test`가 깨져서 분리). `setup()`이 `resource_dir()/bin/herdr` 존재 시 `BUNDLED_HERDR`에 등록 → `herdr_bin()`이 번들 우선. `NOTICE`에 herdr(Apache-2.0) 표기. 검증: `staylazy.app/Contents/Resources/bin/herdr` 확인됨.
+- [x] **herdr 업그레이드 정책** — bootstrap이 `compat_warning()` 반환 → 타이틀바 `⚠` 표시 (`compatible`/`endpoint_compatible` false 또는 server 버전 ≠ pinned `EXPECTED_HERDR_VERSION` = 0.9.0). 스키마 diff 체크 = `scripts/check_herdr_schema.py` (status/snapshot/machine-list의 의존 필드 존재 검증, herdr 버전업 때 실행).
 - [x] pane/session ID 재시작 후 안정성 — Phase 0 검증 완료: 스냅샷 복원 시 동일 ID/cwd 유지.
-- [ ] **브랜딩/attribution** — 제품명 staylazy 확정 + `NOTICE`/About에 herdr(Apache-2.0) 표기 위치 결정.
+- [ ] **브랜딩/attribution** — `NOTICE` 추가 완료. 남은 것: 앱 내 About/표기 위치 결정.
+
+### 코드 정리 (v2.1)
+
+- `DiffView`에 `remove`(worktree 정리) 버튼 + 머지 성공 후 "remove worktree?" 제안 — `worktree_remove` 연결. `parseDiff` 버그 수정: `---`/`+++` 헤더가 del/add로 잘못 분류되던 것(vitest로 포착).
+- Inbox: 항목별 dismiss ✕ + clear all — working/idle 전이 시 dismiss 자동 해제.
+- Sidebar: workspace/tab 라벨 더블클릭 → 인라인 rename (`workspace rename`/`tab rename` 연결).
+- Fanout: 고정 3s sleep → `agent get` 폴링(최대 4s, status != unknown 감지) + 1s settle.
+- vitest 도입 (`bun run test`) — parseDiff/shQuote 단위 테스트.
+- 미사용 `base64` 크레이트 제거, `document.title` 디버그 잔재 제거.

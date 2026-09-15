@@ -44,7 +44,11 @@ fn bootstrap(state: State<AppState>) -> Result<Value, String> {
             }
         }
     }
-    Ok(serde_json::json!({"workspace": workspace, "panes": panes}))
+    Ok(serde_json::json!({
+        "workspace": workspace,
+        "panes": panes,
+        "herdr_warning": herdr::compat_warning(),
+    }))
 }
 
 #[tauri::command]
@@ -158,6 +162,11 @@ fn workspace_close(workspace_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn workspace_rename(workspace_id: String, label: String) -> Result<Value, String> {
+    herdr::workspace_rename(&workspace_id, &label)
+}
+
+#[tauri::command]
 fn tab_create(workspace_id: String, cwd: Option<String>) -> Result<Value, String> {
     herdr::tab_create(&workspace_id, cwd.as_deref())
 }
@@ -173,6 +182,11 @@ fn tab_close(tab_id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn tab_rename(tab_id: String, label: String) -> Result<Value, String> {
+    herdr::tab_rename(&tab_id, &label)
+}
+
+#[tauri::command]
 fn agent_start(pane_id: String, kind: String, name: Option<String>) -> Result<Value, String> {
     herdr::agent_start(&pane_id, &kind, name.as_deref())
 }
@@ -180,6 +194,11 @@ fn agent_start(pane_id: String, kind: String, name: Option<String>) -> Result<Va
 #[tauri::command]
 fn agent_prompt(pane_id: String, text: String) -> Result<Value, String> {
     herdr::agent_prompt(&pane_id, &text)
+}
+
+#[tauri::command]
+fn agent_get(pane_id: String) -> Result<Value, String> {
+    herdr::agent_get(&pane_id)
 }
 
 #[tauri::command]
@@ -280,6 +299,16 @@ fn machine_list() -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn machine_remove(id: String) -> Result<(), String> {
+    herdr::machine_remove(&id)
+}
+
+#[tauri::command]
+fn machine_rename(id: String, label: String) -> Result<(), String> {
+    herdr::machine_rename(&id, &label)
+}
+
+#[tauri::command]
 fn subscribe_events(
     on_event: Channel<Value>,
     state: State<AppState>,
@@ -371,6 +400,21 @@ fn detach_pane_internal(state: &State<AppState>, pane_id: &str) {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            // Prefer the bundled herdr binary when the package ships one
+            // (bundle.resources → src-tauri/bin/herdr, staged by
+            // scripts/fetch-herdr). Dev runs register nothing → PATH lookup.
+            let bundled = app.path().resource_dir().ok().and_then(|dir| {
+                [dir.join("herdr"), dir.join("bin").join("herdr")]
+                    .into_iter()
+                    .find(|p| p.is_file())
+            });
+            if let Some(p) = &bundled {
+                eprintln!("[staylazy] using bundled herdr: {}", p.display());
+            }
+            herdr::register_bundled(bundled);
+            Ok(())
+        })
         .manage(AppState {
             control: Mutex::new(HashMap::new()),
             events_running: Mutex::new(false),
@@ -390,11 +434,14 @@ pub fn run() {
             workspace_create,
             workspace_focus,
             workspace_close,
+            workspace_rename,
             tab_create,
             tab_focus,
             tab_close,
+            tab_rename,
             agent_start,
             agent_prompt,
+            agent_get,
             pane_send_text,
             worktree_create,
             worktree_list,
@@ -405,6 +452,8 @@ pub fn run() {
             remote_disconnect,
             remote_status,
             machine_list,
+            machine_remove,
+            machine_rename,
             subscribe_events,
         ])
         .build(tauri::generate_context!())

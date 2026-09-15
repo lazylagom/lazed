@@ -1,0 +1,41 @@
+#!/bin/sh
+# Stage the pinned herdr binary into src-tauri/bin/ so `tauri build` can
+# bundle it via bundle.resources. Resolution order:
+#   $HERDR_BIN → `mise which herdr` → PATH → known install dirs.
+# Toolchain shims (mise reshims etc.) are scripts, not binaries — never copy
+# one; it would exec through the manager at runtime and fail on a clean box.
+set -eu
+cd "$(dirname "$0")/../src-tauri"
+
+src=""
+if [ -n "${HERDR_BIN:-}" ] && [ -f "$HERDR_BIN" ]; then
+  src="$HERDR_BIN"
+fi
+if [ -z "$src" ] && command -v mise >/dev/null 2>&1; then
+  src="$(mise which herdr 2>/dev/null || true)"
+fi
+if [ -z "$src" ]; then
+  src="$(command -v herdr || true)"
+fi
+if [ -z "$src" ]; then
+  for c in \
+    /opt/homebrew/bin/herdr \
+    /usr/local/bin/herdr \
+    "$HOME/.local/bin/herdr" \
+    "$HOME/.local/share/mise/installs" ; do
+    [ -f "$c" ] && src="$c" && break
+  done
+fi
+if [ -z "$src" ] || [ ! -f "$src" ]; then
+  echo "fetch-herdr: herdr binary not found — set HERDR_BIN or install herdr" >&2
+  exit 1
+fi
+if head -c 2 "$src" | grep -q '#!'; then
+  echo "fetch-herdr: $src is a script/shim, not a binary — point HERDR_BIN at the real binary" >&2
+  exit 1
+fi
+
+mkdir -p bin
+cp "$src" bin/herdr
+chmod +x bin/herdr
+echo "fetch-herdr: bundled $src"

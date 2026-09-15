@@ -8,7 +8,10 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "check": "tsc --noEmit && biome check .",
-    "format": "biome format --write ."
+    "test": "vitest run",
+    "format": "biome format --write .",
+    "fetch-herdr": "sh scripts/fetch-herdr",
+    "dist": "bun run fetch-herdr && tauri build --config src-tauri/tauri.bundle.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",
@@ -27,6 +30,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.0",
     "typescript": "^5.7.0",
-    "vite": "^6.1.0"
+    "vite": "^6.1.0",
+    "vitest": "^5.0.0"
   }
 }

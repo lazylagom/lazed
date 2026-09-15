@@ -18,7 +18,7 @@ interface Comment {
   text: string;
 }
 
-function parseDiff(diff: string): DiffFile[] {
+export function parseDiff(diff: string): DiffFile[] {
   const files: DiffFile[] = [];
   let cur: DiffFile | null = null;
   let newNo = 0;
@@ -28,7 +28,17 @@ function parseDiff(diff: string): DiffFile[] {
       cur = { path: m?.[1] ?? "?", lines: [] };
       files.push(cur);
     } else if (cur) {
-      if (raw.startsWith("@@")) {
+      if (
+        raw.startsWith("index ") ||
+        raw.startsWith("---") ||
+        raw.startsWith("+++") ||
+        raw.startsWith("new file") ||
+        raw.startsWith("deleted file") ||
+        raw.startsWith("old mode") ||
+        raw.startsWith("new mode")
+      ) {
+        // file meta — not rendered
+      } else if (raw.startsWith("@@")) {
         const m = /\+(\d+)/.exec(raw);
         newNo = m ? Number(m[1]) : 0;
         cur.lines.push({ kind: "hunk", text: raw });
@@ -36,13 +46,7 @@ function parseDiff(diff: string): DiffFile[] {
         cur.lines.push({ kind: "add", text: raw, newNo: newNo++ });
       } else if (raw.startsWith("-")) {
         cur.lines.push({ kind: "del", text: raw });
-      } else if (
-        !raw.startsWith("index ") &&
-        !raw.startsWith("---") &&
-        !raw.startsWith("+++") &&
-        !raw.startsWith("new file") &&
-        !raw.startsWith("deleted file")
-      ) {
+      } else {
         cur.lines.push({ kind: "ctx", text: raw, newNo: newNo++ });
       }
     }
@@ -76,8 +80,13 @@ export function DiffView({
     line: number;
   } | null>(null);
   const [draft, setDraft] = useState("");
-  const [mergeMsg, setMergeMsg] = useState<string | null>(null);
+  const [mergeRes, setMergeRes] = useState<{
+    ok: boolean;
+    output: string;
+  } | null>(null);
   const [confirmMerge, setConfirmMerge] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removeErr, setRemoveErr] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (!wt) return;
@@ -119,9 +128,17 @@ export function DiffView({
     if (!wt?.repo_root || !data) return;
     herdr
       .worktreeMerge(wt.repo_root, data.branch)
-      .then((r) => setMergeMsg(r.output.trim() || (r.ok ? "merged" : "failed")))
-      .catch((e) => setMergeMsg(String(e)));
+      .then(setMergeRes)
+      .catch((e) => setMergeRes({ ok: false, output: String(e) }));
     setConfirmMerge(false);
+  };
+
+  const doRemove = (force: boolean) => {
+    setConfirmRemove(false);
+    herdr
+      .worktreeRemove(workspace.workspace_id, force)
+      .then(() => onClose())
+      .catch((e) => setRemoveErr(String(e)));
   };
 
   const files = data ? parseDiff(data.diff) : [];
@@ -149,6 +166,14 @@ export function DiffView({
             merge
           </button>
         )}
+        <button
+          type="button"
+          className="diff-merge"
+          onClick={() => setConfirmRemove(true)}
+          title="remove this worktree and close its workspace"
+        >
+          remove
+        </button>
         <button type="button" className="side-close" onClick={onClose}>
           ✕
         </button>
@@ -157,7 +182,21 @@ export function DiffView({
       {(data?.untracked?.length ?? 0) > 0 && (
         <div className="diff-stat">untracked: {data?.untracked.join(", ")}</div>
       )}
-      {mergeMsg && <div className="diff-stat">{mergeMsg}</div>}
+      {mergeRes && (
+        <div className="diff-stat">
+          {mergeRes.output.trim() || (mergeRes.ok ? "merged" : "failed")}
+          {mergeRes.ok && (
+            <button
+              type="button"
+              className="diff-merge"
+              onClick={() => setConfirmRemove(true)}
+            >
+              remove worktree?
+            </button>
+          )}
+        </div>
+      )}
+      {removeErr && <div className="diff-stat">remove failed: {removeErr}</div>}
       {error && <div className="diff-stat">error: {error}</div>}
       <div className="diff-body">
         {files.length === 0 && !error && (
@@ -240,6 +279,20 @@ export function DiffView({
             yes, merge
           </button>
           <button type="button" onClick={() => setConfirmMerge(false)}>
+            cancel
+          </button>
+        </div>
+      )}
+      {confirmRemove && (
+        <div className="diff-confirm">
+          remove worktree <b>{wt?.checkout_path}</b> and close this workspace?
+          <button type="button" onClick={() => doRemove(false)}>
+            yes, remove
+          </button>
+          <button type="button" onClick={() => doRemove(true)}>
+            force
+          </button>
+          <button type="button" onClick={() => setConfirmRemove(false)}>
             cancel
           </button>
         </div>

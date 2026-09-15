@@ -101,8 +101,15 @@ export interface HerdrEvent {
   error?: unknown;
 }
 
+export interface BootstrapResult {
+  workspace?: unknown;
+  panes?: unknown[];
+  /** set when the live herdr server fails the compat/version check */
+  herdr_warning?: string;
+}
+
 export const herdr = {
-  bootstrap: () => invoke<Record<string, unknown>>("bootstrap"),
+  bootstrap: () => invoke<BootstrapResult>("bootstrap"),
   snapshot: () => invoke<Snapshot>("session_snapshot"),
   splitPane: (paneId: string, direction: "right" | "down") =>
     invoke("split_pane", { paneId, direction }),
@@ -117,14 +124,19 @@ export const herdr = {
     invoke("workspace_focus", { workspaceId }),
   workspaceClose: (workspaceId: string) =>
     invoke("workspace_close", { workspaceId }),
+  workspaceRename: (workspaceId: string, label: string) =>
+    invoke("workspace_rename", { workspaceId, label }),
   tabCreate: (workspaceId: string, cwd?: string) =>
     invoke("tab_create", { workspaceId, cwd }),
   tabFocus: (tabId: string) => invoke("tab_focus", { tabId }),
   tabClose: (tabId: string) => invoke("tab_close", { tabId }),
+  tabRename: (tabId: string, label: string) =>
+    invoke("tab_rename", { tabId, label }),
   agentStart: (paneId: string, kind: string, name?: string) =>
     invoke("agent_start", { paneId, kind, name }),
   agentPrompt: (paneId: string, text: string) =>
     invoke("agent_prompt", { paneId, text }),
+  agentGet: (paneId: string) => invoke<AgentInfo>("agent_get", { paneId }),
   paneSendText: (paneId: string, text: string) =>
     invoke("pane_send_text", { paneId, text }),
   worktreeCreate: (
@@ -156,7 +168,15 @@ export const herdr = {
   remoteStatus: () =>
     invoke<{ target?: string; session?: string }>("remote_status"),
   machineList: () => invoke<MachineInfo[]>("machine_list"),
+  machineRemove: (id: string) => invoke("machine_remove", { id }),
+  machineRename: (id: string, label: string) =>
+    invoke("machine_rename", { id, label }),
 };
+
+/** POSIX single-quote escaping for commands sent through `pane run`. */
+export function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
 
 /** A saved herdr SSH machine profile (`herdr machine list --json`). */
 export interface MachineInfo {

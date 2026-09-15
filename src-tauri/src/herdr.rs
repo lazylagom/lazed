@@ -3,7 +3,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -209,7 +209,18 @@ impl ControlHandle {
     }
 }
 
+/// Bundled-binary override, registered once from `setup()` when the app
+/// bundle ships herdr in resources (see scripts/fetch-herdr).
+static BUNDLED_HERDR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+pub fn register_bundled(path: Option<PathBuf>) {
+    let _ = BUNDLED_HERDR.set(path);
+}
+
 pub fn herdr_bin() -> Result<PathBuf, String> {
+    if let Some(Some(p)) = BUNDLED_HERDR.get() {
+        return Ok(p.clone());
+    }
     if let Ok(custom) = std::env::var("HERDR_BIN") {
         let p = PathBuf::from(custom);
         if p.is_file() {
@@ -320,12 +331,52 @@ pub fn ensure_server() -> Result<(), String> {
     Err("herdr server did not become ready within 10s".to_string())
 }
 
+/// `herdr status --json` — raw client/server/update status payload.
+pub fn status() -> Result<Value, String> {
+    run_cli(&["status", "--json"])
+}
+
 fn server_running() -> Result<bool, String> {
-    let status = run_cli(&["status", "--json"])?;
-    Ok(status
+    Ok(status()?
         .pointer("/server/running")
         .and_then(Value::as_bool)
         .unwrap_or(false))
+}
+
+/// herdr version this build was tested against. Version drift isn't fatal —
+/// pre-1.0 schema moves are the real risk — so it surfaces as a UI warning.
+pub const EXPECTED_HERDR_VERSION: &str = "0.9.0";
+
+/// Compatibility check against the live herdr server. Flags only explicit
+/// incompatibilities and version drift; absent fields stay silent so a
+/// schema change degrades to "unknown", not a false alarm.
+pub fn compat_warning() -> Option<String> {
+    let st = status().ok()?;
+    let mut issues = Vec::new();
+    if st.pointer("/server/compatible").and_then(Value::as_bool) == Some(false) {
+        issues.push("client/server protocol incompatible".to_string());
+    }
+    if st
+        .pointer("/server/endpoint_compatible")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        issues.push("terminal endpoint protocol incompatible".to_string());
+    }
+    let server_ver = st
+        .pointer("/server/version")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if server_ver != EXPECTED_HERDR_VERSION {
+        issues.push(format!(
+            "herdr server {server_ver} ≠ pinned {EXPECTED_HERDR_VERSION}"
+        ));
+    }
+    if issues.is_empty() {
+        None
+    } else {
+        Some(issues.join("; "))
+    }
 }
 
 pub fn socket_path() -> Result<PathBuf, String> {
@@ -467,17 +518,45 @@ pub fn remote_disconnect() -> Result<(), String> {
     Ok(())
 }
 
-/// `herdr machine list --json` — saved SSH profiles are local client state,
-/// so this intentionally bypasses remote routing even while attached.
-pub fn machine_list() -> Result<Value, String> {
-    let bin = herdr_bin()?;
-    let output = Command::new(bin)
-        .args(["machine", "list", "--json"])
+/// `herdr <args>` on the LOCAL client. Saved machines are local client state,
+/// so machine management never routes through an attached remote.
+fn run_local(args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new(herdr_bin()?)
+        .args(args)
         .output()
-        .map_err(|e| format!("failed to run herdr machine list: {e}"))?;
+        .map_err(|e| format!("failed to run herdr {:?}: {e}", args))
+}
+
+/// Mutations print human text rather than JSON — success means exit 0.
+fn local_ok(out: std::process::Output, args: &[&str]) -> Result<(), String> {
+    if out.status.success() {
+        return Ok(());
+    }
+    let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(if msg.is_empty() {
+        format!("herdr {:?} failed (status {:?})", args, out.status.code())
+    } else {
+        msg
+    })
+}
+
+/// `herdr machine list --json`
+pub fn machine_list() -> Result<Value, String> {
+    let output = run_local(&["machine", "list", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim())
         .map_err(|e| format!("bad JSON from herdr machine list: {e}"))
+}
+
+pub fn machine_remove(id: &str) -> Result<(), String> {
+    local_ok(run_local(&["machine", "remove", id])?, &["machine", "remove", id])
+}
+
+pub fn machine_rename(id: &str, label: &str) -> Result<(), String> {
+    local_ok(
+        run_local(&["machine", "rename", id, "--label", label])?,
+        &["machine", "rename", id, "--label", label],
+    )
 }
 
 pub fn snapshot() -> Result<Value, String> {
@@ -560,6 +639,10 @@ pub fn workspace_close(workspace_id: &str) -> Result<Value, String> {
     run_cli(&["workspace", "close", workspace_id])
 }
 
+pub fn workspace_rename(workspace_id: &str, label: &str) -> Result<Value, String> {
+    run_cli(&["workspace", "rename", workspace_id, label])
+}
+
 pub fn tab_create(workspace_id: &str, cwd: Option<&str>) -> Result<Value, String> {
     let mut args = vec!["tab", "create", "--workspace", workspace_id];
     if let Some(c) = cwd {
@@ -576,6 +659,10 @@ pub fn tab_close(tab_id: &str) -> Result<Value, String> {
     run_cli(&["tab", "close", tab_id])
 }
 
+pub fn tab_rename(tab_id: &str, label: &str) -> Result<Value, String> {
+    run_cli(&["tab", "rename", tab_id, label])
+}
+
 pub fn agent_start(pane_id: &str, kind: &str, name: Option<&str>) -> Result<Value, String> {
     let args = ["agent", "start", name.unwrap_or(kind), "--kind", kind, "--pane", pane_id];
     run_cli(&args)
@@ -583,6 +670,12 @@ pub fn agent_start(pane_id: &str, kind: &str, name: Option<&str>) -> Result<Valu
 
 pub fn agent_prompt(pane_id: &str, text: &str) -> Result<Value, String> {
     run_cli(&["agent", "prompt", pane_id, text])
+}
+
+/// `herdr agent get <pane>` → the agent object (unwrapped from the envelope).
+pub fn agent_get(pane_id: &str) -> Result<Value, String> {
+    let v = run_cli(&["agent", "get", pane_id])?;
+    Ok(v.pointer("/result/agent").cloned().unwrap_or(v))
 }
 
 pub fn pane_send_text(pane_id: &str, text: &str) -> Result<Value, String> {

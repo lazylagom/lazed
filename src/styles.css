@@ -136,6 +136,18 @@ body,
   opacity: 1;
 }
 
+.side-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  background: #26282b;
+  border: 1px solid #33507a;
+  border-radius: 4px;
+  color: #eee;
+  font-size: 12px;
+  outline: none;
+}
+
 .side-close:hover {
   color: #eee;
 }
@@ -540,15 +552,21 @@ body,
   text-align: center;
 }
 
+.inbox-item-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid #26282b;
+}
+
 .inbox-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 8px 12px;
   background: none;
   border: none;
-  border-bottom: 1px solid #26282b;
   color: #ddd;
   font-size: 12px;
   cursor: pointer;
@@ -557,6 +575,34 @@ body,
 
 .inbox-item:hover {
   background: #2b2e31;
+}
+
+.inbox-dismiss {
+  padding: 0 10px;
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.inbox-dismiss:hover {
+  color: #eee;
+}
+
+.inbox-clear {
+  background: none;
+  border: none;
+  color: #777;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  margin-right: 8px;
+}
+
+.inbox-clear:hover {
+  color: #ddd;
 }
 
 .inbox-name {
@@ -834,4 +880,85 @@ body,
 .remote-machine-target {
   color: #777;
   font-size: 11px;
+}
+
+.remote-machine-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.remote-machine-row .remote-machine {
+  flex: 1;
+}
+
+.remote-machine-act {
+  padding: 4px 6px;
+  background: none;
+  border: none;
+  color: #777;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.remote-machine-act:hover {
+  color: #ddd;
+}
+
+.remote-machine-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  color: #ccc;
+  font-size: 12px;
+}
+
+.remote-machine-edit .modal-input {
+  flex: 1;
+  padding: 6px 8px;
+  border-bottom: none;
+  background: #26282b;
+  border-radius: 4px;
+}
+
+.remote-machine-edit button {
+  padding: 4px 10px;
+  background: #33507a;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.remote-add {
+  border-top: 1px solid #333639;
+}
+
+.remote-add-row {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+}
+
+.remote-add-row button {
+  flex: 1;
+  padding: 8px;
+  background: #2c2e31;
+  border: none;
+  border-radius: 6px;
+  color: #bbb;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.remote-add-row button:disabled {
+  color: #555;
+  cursor: default;
+}
+
+.remote-add-row button:not(:disabled):hover {
+  color: #eee;
+  background: #35383c;
 }

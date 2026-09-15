@@ -24,42 +24,66 @@ export function InboxButton({
 export function InboxPanel({
   items,
   onJump,
+  onDismiss,
+  onDismissAll,
   onClose,
 }: {
   items: { pane: PaneInfo; workspace?: string; tab?: string }[];
   onJump: (pane: PaneInfo) => void;
+  onDismiss: (paneId: string) => void;
+  onDismissAll: () => void;
   onClose: () => void;
 }) {
   return (
     <div className="inbox-panel">
       <div className="inbox-head">
         <span>needs attention</span>
-        <button type="button" className="side-close" onClick={onClose}>
-          ✕
-        </button>
+        <span>
+          {items.length > 0 && (
+            <button
+              type="button"
+              className="inbox-clear"
+              onClick={onDismissAll}
+            >
+              clear all
+            </button>
+          )}
+          <button type="button" className="side-close" onClick={onClose}>
+            ✕
+          </button>
+        </span>
       </div>
       {items.length === 0 ? (
         <div className="inbox-empty">all clear</div>
       ) : (
         items.map(({ pane, workspace, tab }) => (
-          <button
-            key={pane.pane_id}
-            type="button"
-            className="inbox-item"
-            onClick={() => onJump(pane)}
-          >
-            <span className={`dot ${pane.agent_status}`} />
-            <span className="inbox-name">
-              {pane.display_agent ?? pane.agent ?? pane.pane_id}
-            </span>
-            <span className="inbox-where">
-              {workspace}
-              {tab ? ` › ${tab}` : ""}
-            </span>
-            <span className={`badge ${pane.agent_status}`}>
-              {pane.agent_status}
-            </span>
-          </button>
+          <div key={pane.pane_id} className="inbox-item-row">
+            <button
+              type="button"
+              className="inbox-item"
+              onClick={() => onJump(pane)}
+            >
+              <span className={`dot ${pane.agent_status}`} />
+              <span className="inbox-name">
+                {pane.display_agent ?? pane.agent ?? pane.pane_id}
+              </span>
+              <span className="inbox-where">
+                {workspace}
+                {tab ? ` › ${tab}` : ""}
+              </span>
+              <span className={`badge ${pane.agent_status}`}>
+                {pane.agent_status}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="inbox-dismiss"
+              title="dismiss"
+              onClick={() => onDismiss(pane.pane_id)}
+            >
+              ✕
+            </button>
+          </div>
         ))
       )}
     </div>

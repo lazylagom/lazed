@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type {
   AgentStatus,
   PaneInfo,
@@ -49,34 +50,97 @@ function PaneRow({
   );
 }
 
+function RenameInput({
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  onCommit: (label: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  return (
+    <input
+      ref={ref}
+      className="side-rename"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onCommit(value.trim());
+        if (e.key === "Escape") onCancel();
+      }}
+      onBlur={onCancel}
+    />
+  );
+}
+
+interface RenameTarget {
+  kind: "ws" | "tab";
+  id: string;
+  label: string;
+}
+
 function TabBlock({
   tab,
   panes,
   active,
   focusedPane,
+  renaming,
   onFocusTab,
   onFocusPane,
   onCloseTab,
+  onRenameTab,
+  onRenameStart,
+  onRenameCancel,
 }: {
   tab: TabInfo;
   panes: PaneInfo[];
   active: boolean;
   focusedPane: string | null;
+  renaming: RenameTarget | null;
   onFocusTab: (id: string) => void;
   onFocusPane: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onRenameTab: (id: string, label: string) => void;
+  onRenameStart: (t: RenameTarget) => void;
+  onRenameCancel: () => void;
 }) {
   return (
     <div className="side-tab">
       <div className={`side-tab-head ${active ? "active" : ""}`}>
-        <button
-          type="button"
-          className="side-tab-label"
-          onClick={() => onFocusTab(tab.tab_id)}
-        >
-          <StatusDot status={tab.agent_status} />
-          <span>{tab.label ?? tab.tab_id}</span>
-        </button>
+        {renaming?.kind === "tab" && renaming.id === tab.tab_id ? (
+          <RenameInput
+            initial={renaming.label}
+            onCommit={(l) => {
+              if (l) onRenameTab(tab.tab_id, l);
+              onRenameCancel();
+            }}
+            onCancel={onRenameCancel}
+          />
+        ) : (
+          <button
+            type="button"
+            className="side-tab-label"
+            onClick={() => onFocusTab(tab.tab_id)}
+            onDoubleClick={() =>
+              onRenameStart({
+                kind: "tab",
+                id: tab.tab_id,
+                label: tab.label ?? "",
+              })
+            }
+            title="double-click to rename"
+          >
+            <StatusDot status={tab.agent_status} />
+            <span>{tab.label ?? tab.tab_id}</span>
+          </button>
+        )}
         <button
           type="button"
           className="side-close"
@@ -111,6 +175,8 @@ export function Sidebar({
   onNewTab,
   onCloseWorkspace,
   onCloseTab,
+  onRenameWorkspace,
+  onRenameTab,
   onDiff,
   rollup,
 }: {
@@ -125,9 +191,12 @@ export function Sidebar({
   onNewTab: () => void;
   onCloseWorkspace: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onRenameWorkspace: (id: string, label: string) => void;
+  onRenameTab: (id: string, label: string) => void;
   onDiff: (ws: WorkspaceInfo) => void;
   rollup: (s: (AgentStatus | undefined)[]) => AgentStatus;
 }) {
+  const [renaming, setRenaming] = useState<RenameTarget | null>(null);
   const workspaces = snap?.workspaces ?? [];
   const tabs = snap?.tabs ?? [];
   const panes = snap?.panes ?? [];
@@ -146,15 +215,34 @@ export function Sidebar({
           return (
             <div key={w.workspace_id} className="side-ws">
               <div className={`side-ws-head ${focused ? "focused" : ""}`}>
-                <button
-                  type="button"
-                  className="side-ws-label"
-                  onClick={() => onFocusWorkspace(w.workspace_id)}
-                >
-                  <StatusDot status={paneStatus(w.workspace_id)} />
-                  <span>{w.label ?? w.workspace_id}</span>
-                  <span className="side-count">{w.pane_count ?? ""}</span>
-                </button>
+                {renaming?.kind === "ws" && renaming.id === w.workspace_id ? (
+                  <RenameInput
+                    initial={renaming.label}
+                    onCommit={(l) => {
+                      if (l) onRenameWorkspace(w.workspace_id, l);
+                      setRenaming(null);
+                    }}
+                    onCancel={() => setRenaming(null)}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="side-ws-label"
+                    onClick={() => onFocusWorkspace(w.workspace_id)}
+                    onDoubleClick={() =>
+                      setRenaming({
+                        kind: "ws",
+                        id: w.workspace_id,
+                        label: w.label ?? "",
+                      })
+                    }
+                    title="double-click to rename"
+                  >
+                    <StatusDot status={paneStatus(w.workspace_id)} />
+                    <span>{w.label ?? w.workspace_id}</span>
+                    <span className="side-count">{w.pane_count ?? ""}</span>
+                  </button>
+                )}
                 {w.worktree?.is_linked_worktree && (
                   <button
                     type="button"
@@ -183,9 +271,13 @@ export function Sidebar({
                       panes={panes.filter((p) => p.tab_id === t.tab_id)}
                       active={t.tab_id === activeTabId}
                       focusedPane={focusedPane}
+                      renaming={renaming}
                       onFocusTab={onFocusTab}
                       onFocusPane={onFocusPane}
                       onCloseTab={onCloseTab}
+                      onRenameTab={onRenameTab}
+                      onRenameStart={setRenaming}
+                      onRenameCancel={() => setRenaming(null)}
                     />
                   ))}
                   <button type="button" className="side-add" onClick={onNewTab}>

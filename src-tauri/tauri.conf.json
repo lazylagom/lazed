@@ -27,7 +27,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "icon": [],
+    "icon": ["icons/icon.png"],
     "category": "DeveloperTool",
     "shortDescription": "GUI client for the herdr agent runtime",
     "longDescription": "staylazy - a desktop GUI front-end for herdr terminal workspaces"

@@ -68,12 +68,14 @@ async function notify(title: string, body: string) {
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [focusedPane, setFocusedPane] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
   const [showFanout, setShowFanout] = useState(false);
   const [diffWsId, setDiffWsId] = useState<string | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
   const [showRemote, setShowRemote] = useState(false);
   const [remoteTarget, setRemoteTarget] = useState<string | null>(null);
   const refreshTimer = useRef<number | null>(null);
@@ -94,10 +96,12 @@ export function App() {
   }, [refresh]);
 
   useEffect(() => {
-    document.title = "staylazy mounted";
     herdr
       .bootstrap()
-      .then(() => refresh())
+      .then((res) => {
+        if (res.herdr_warning) setWarning(res.herdr_warning);
+        refresh();
+      })
       .catch((e) => setError(String(e)));
     subscribeEvents((ev: HerdrEvent) => {
       // herdr mixes namings: "pane_created" vs "pane.agent_status_changed"
@@ -111,6 +115,15 @@ export function App() {
         const paneId = d.pane_id as string | undefined;
         const status = d.agent_status as AgentStatus | undefined;
         if (paneId && status) {
+          // a pane that goes back to work re-earns its next inbox entry
+          if (status === "working" || status === "idle") {
+            setDismissed((prev) => {
+              if (!prev.has(paneId)) return prev;
+              const next = new Set(prev);
+              next.delete(paneId);
+              return next;
+            });
+          }
           if (status === "blocked" || status === "done") {
             const who =
               (d.display_agent as string) ?? (d.agent as string) ?? paneId;
@@ -293,8 +306,20 @@ export function App() {
         await new Promise((r) => setTimeout(r, 1500));
         await herdr.agentStart(paneId, kind);
         if (req.prompt) {
-          // let the agent's TUI come up before typing the prompt
-          await new Promise((r) => setTimeout(r, 3000));
+          // wait until herdr detects the agent (status leaves "unknown"),
+          // then a short settle for TUI paint. Bounded: a missed detection
+          // degrades to roughly the old fixed delay.
+          const deadline = Date.now() + 4000;
+          while (Date.now() < deadline) {
+            try {
+              const a = await herdr.agentGet(paneId);
+              if (a.agent_status && a.agent_status !== "unknown") break;
+            } catch {
+              // agent not registered yet
+            }
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          await new Promise((r) => setTimeout(r, 1000));
           await herdr.agentPrompt(paneId, req.prompt);
         }
       } catch (e) {
@@ -418,7 +443,11 @@ export function App() {
 
   const allPanes = [...panesById.values()];
   const inboxItems = allPanes
-    .filter((p) => p.agent_status === "blocked" || p.agent_status === "done")
+    .filter(
+      (p) =>
+        (p.agent_status === "blocked" || p.agent_status === "done") &&
+        !dismissed.has(p.pane_id),
+    )
     .sort((a, b) =>
       a.agent_status === b.agent_status
         ? 0
@@ -501,15 +530,24 @@ export function App() {
         <span className="status">
           {error
             ? `error: ${error}`
-            : snap
-              ? `${workspace?.label ?? focusedWsId ?? "?"} · ${layout?.panes.length ?? 0} pane(s)`
-              : "connecting…"}
+            : warning
+              ? `⚠ ${warning}`
+              : snap
+                ? `${workspace?.label ?? focusedWsId ?? "?"} · ${layout?.panes.length ?? 0} pane(s)`
+                : "connecting…"}
         </span>
       </div>
       {inboxOpen && (
         <InboxPanel
           items={inboxItems}
           onJump={jumpToPane}
+          onDismiss={(id) => setDismissed((prev) => new Set(prev).add(id))}
+          onDismissAll={() =>
+            setDismissed(
+              (prev) =>
+                new Set([...prev, ...inboxItems.map((i) => i.pane.pane_id)]),
+            )
+          }
           onClose={() => setInboxOpen(false)}
         />
       )}
@@ -539,6 +577,7 @@ export function App() {
       {showRemote && (
         <RemoteBar
           connected={remoteTarget ?? undefined}
+          focusedPane={effectiveFocusedPane}
           onConnect={doRemoteConnect}
           onDisconnect={doRemoteDisconnect}
           onClose={() => setShowRemote(false)}
@@ -578,6 +617,12 @@ export function App() {
           }
           onCloseTab={(id) =>
             herdr.tabClose(id).catch((e) => setError(String(e)))
+          }
+          onRenameWorkspace={(id, label) =>
+            herdr.workspaceRename(id, label).catch((e) => setError(String(e)))
+          }
+          onRenameTab={(id, label) =>
+            herdr.tabRename(id, label).catch((e) => setError(String(e)))
           }
           onDiff={(ws) => setDiffWsId(ws.workspace_id)}
           rollup={worst}
