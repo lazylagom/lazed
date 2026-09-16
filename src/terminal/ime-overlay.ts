@@ -112,8 +112,16 @@ export class IMEOverlay {
         // Hangul commit back through the jamo buffer so the fragments
         // recompose — the jamo stream keeps its order regardless of where
         // the composition boundaries fell.
-        this.queuePendingHangulReplacement(jamoText(committed));
-        this.flushCompletedPendingUnits();
+        //
+        // Steady state is different: a committed string of complete
+        // syllables is IME-final, so with nothing pending it can reach the
+        // PTY immediately instead of trailing one syllable behind.
+        if (!this.pendingHangulJamo && isCompleteSyllableText(committed)) {
+          this.writeToPty(committed);
+        } else {
+          this.queuePendingHangulReplacement(jamoText(committed));
+          this.flushCompletedPendingUnits();
+        }
         this.suppressedPostCompositionInput = committed;
       } else {
         const { text: pending, consumedByComposition } =
@@ -234,6 +242,10 @@ export class IMEOverlay {
           this.flushPendingHangulJamo();
           this.writeToPty(value);
         }
+        // completed units echo while the user keeps typing — only the
+        // trailing unit can still merge, so it stays buffered for the
+        // idle flush
+        this.flushCompletedPendingUnits();
         this.pendingHangulConsumedByComposition = true;
         return;
       }
@@ -255,6 +267,7 @@ export class IMEOverlay {
 
       if (containsOnlyHangulJamo(value)) {
         this.queuePendingHangulJamo(value);
+        this.flushCompletedPendingUnits();
         this.input.value = "";
         return;
       }
@@ -591,10 +604,10 @@ export class IMEOverlay {
 
   /**
    * Event-stream logging for IME regression diagnosis — enable from the
-   * webview console with `window.__staylazyImeDebug = true`.
+   * webview console with `window.__lazedImeDebug = true`.
    */
   private debugLog(...args: unknown[]): void {
-    if ((window as unknown as Record<string, unknown>).__staylazyImeDebug) {
+    if ((window as unknown as Record<string, unknown>).__lazedImeDebug) {
       console.log("[ime]", ...args);
     }
   }
@@ -788,6 +801,21 @@ function containsHangul(value: string): boolean {
     if (isHangulCharacter(char)) return true;
   }
   return false;
+}
+
+/**
+ * committed text made only of complete syllables (plus non-jamo chars like
+ * spaces) — a bare jamo anywhere means the commit may still be a fragment
+ * that a following keystroke could merge into
+ */
+function isCompleteSyllableText(value: string): boolean {
+  let sawSyllable = false;
+  for (const char of value) {
+    if (isHangulJamoCharacter(char)) return false;
+    const code = char.charCodeAt(0);
+    if (code >= 0xac00 && code <= 0xd7a3) sawSyllable = true;
+  }
+  return sawSyllable;
 }
 
 /**

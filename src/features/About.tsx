@@ -20,7 +20,7 @@ export function About({ onClose }: { onClose: () => void }) {
     <div className="modal-overlay" onMouseDown={onClose}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="about-head">
-          <span className="about-title">staylazy</span>
+          <span className="about-title">lazed</span>
           {version && <span className="about-ver">v{version}</span>}
         </div>
         <pre className="about-notice">{notice.trim()}</pre>

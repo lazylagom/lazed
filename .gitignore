@@ -4,3 +4,4 @@ src-tauri/target/
 src-tauri/bin/
 .DS_Store
 *.log
+daemon/target/

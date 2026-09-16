@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Measure the terminal frame-stream path under load (PLAN §7).
 
-Spins up a throwaway `herdr --session staylazy-perf` server, floods a pane
-with `seq 1 N`, and measures what staylazy's pipeline would see:
+Spins up a throwaway `herdr --session lazed-perf` server, floods a pane
+with `seq 1 N`, and measures what lazed's pipeline would see:
 
   - frames/sec and decoded MB/sec through `terminal session control`
   - wall time to drain the flood (seq + a queued echo marker)
   - seq discontinuities (dropped frames)
   - idle round-trip: terminal.input → marker observed in a frame
 
-Usage: python3 scripts/perf_stream.py [--lines 300000] [--session staylazy-perf]
+Usage: python3 scripts/perf_stream.py [--lines 300000] [--session lazed-perf]
 """
 
 import argparse
@@ -139,7 +139,7 @@ class ControlStream:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lines", type=int, default=300_000)
-    ap.add_argument("--session", default="staylazy-perf")
+    ap.add_argument("--session", default="lazed-perf")
     ap.add_argument("--cols", type=int, default=200)
     ap.add_argument("--rows", type=int, default=50)
     ap.add_argument("--timeout", type=int, default=120)

@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 /// Active remote attachment: an SSH unix-socket forward to a remote herdr
-/// server. When set, all CLI calls and streams route through `ssh <target>`.
+/// server. When set, socket-API calls and event streams go through the
+/// forwarded local socket; `terminal session control` and one-off probes
+/// (status/server start) route through `ssh <target>`.
 pub struct Remote {
     pub target: String,
     /// Remote herdr session name; `None` = the remote default session.
@@ -252,7 +254,9 @@ pub fn herdr_bin() -> Result<PathBuf, String> {
 }
 
 /// Run `herdr <args>` (locally, or `ssh <target> herdr <args>` when a remote
-/// machine is attached) and parse the single JSON response line.
+/// machine is attached) and parse the single JSON response line. Only for
+/// client-local commands — `status`, `machine`, server lifecycle. Control-plane
+/// calls use `api_call` (socket request/response) instead.
 pub fn run_cli(args: &[&str]) -> Result<Value, String> {
     if let Some((target, session)) = remote_ctx() {
         return ssh_run(&target, session.as_deref(), args).map_err(|e| e.to_string());
@@ -395,6 +399,131 @@ pub fn socket_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "herdr status did not report a socket path".to_string())
 }
 
+/// Request-id sequence — the server echoes it back on the response.
+static REQ_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Resolved socket path cached per context generation. Remote attach/detach
+/// bumps CONTEXT_GEN, so the next call re-resolves against the new target —
+/// local misses spawn `herdr status --json`, remote hits are a lock read.
+static SOCK_CACHE: Mutex<Option<(u64, PathBuf)>> = Mutex::new(None);
+
+fn api_socket_path() -> Result<PathBuf, String> {
+    let gen = CONTEXT_GEN.load(Ordering::SeqCst);
+    if let Ok(g) = SOCK_CACHE.lock() {
+        if let Some((g0, p)) = g.as_ref() {
+            if *g0 == gen {
+                return Ok(p.clone());
+            }
+        }
+    }
+    let p = socket_path()?;
+    if let Ok(mut g) = SOCK_CACHE.lock() {
+        *g = Some((gen, p.clone()));
+    }
+    Ok(p)
+}
+
+/// Why a socket call failed. `Transport` = connect/write/read failed — the
+/// cached path or the ssh forward may be stale, so a retry can succeed.
+/// `Remote` = the server answered with an error object; retrying won't help.
+#[derive(Debug)]
+enum ApiFail {
+    Transport(String),
+    Remote(String),
+}
+
+fn api_roundtrip_stream(sock: UnixStream, method: &str, params: &Value) -> Result<Value, ApiFail> {
+    // a wedged server must not park a UI command forever
+    let _ = sock.set_read_timeout(Some(Duration::from_secs(120)));
+    let _ = sock.set_write_timeout(Some(Duration::from_secs(15)));
+    let mut writer = sock
+        .try_clone()
+        .map_err(|e| ApiFail::Transport(format!("failed to clone api socket: {e}")))?;
+    let req = json!({
+        "id": format!("lazed-{}", REQ_SEQ.fetch_add(1, Ordering::Relaxed)),
+        "method": method,
+        "params": params,
+    });
+    let line = serde_json::to_string(&req).map_err(|e| ApiFail::Transport(e.to_string()))?;
+    writer
+        .write_all(line.as_bytes())
+        .and_then(|_| writer.write_all(b"\n"))
+        .and_then(|_| writer.flush())
+        .map_err(|e| ApiFail::Transport(format!("herdr {method} write failed: {e}")))?;
+
+    let mut reader = BufReader::new(sock);
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        match reader.read_line(&mut buf) {
+            Ok(0) => {
+                return Err(ApiFail::Transport(format!(
+                    "herdr {method}: socket closed before a response"
+                )))
+            }
+            Err(e) => {
+                return Err(ApiFail::Transport(format!(
+                    "herdr {method} read failed: {e}"
+                )))
+            }
+            Ok(_) => {
+                let t = buf.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                // one request per connection — the first JSON line back is
+                // our response regardless of its echoed id
+                let v: Value = serde_json::from_str(t).map_err(|e| {
+                    ApiFail::Remote(format!("bad JSON from herdr {method}: {e}"))
+                })?;
+                if let Some(err) = v.get("error") {
+                    let code = err.get("code").and_then(Value::as_str).unwrap_or("error");
+                    let msg = err
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error");
+                    return Err(ApiFail::Remote(format!("herdr {method} {code}: {msg}")));
+                }
+                return Ok(v);
+            }
+        }
+    }
+}
+
+fn api_roundtrip(path: &PathBuf, method: &str, params: &Value) -> Result<Value, ApiFail> {
+    let sock = UnixStream::connect(path).map_err(|e| {
+        ApiFail::Transport(format!("failed to connect {}: {e}", path.display()))
+    })?;
+    api_roundtrip_stream(sock, method, params)
+}
+
+/// Single request/response against the herdr socket API. The server answers
+/// one request per connection (only subscriptions stay open), so each call
+/// opens a short-lived connection — remote calls go through the forwarded
+/// socket instead of a per-call `ssh herdr`. Retries once on transport
+/// failure: the cached path can be stale after a server restart, and a dead
+/// ssh forward gets one respawn attempt via `ensure_remote_forward`.
+pub fn api_call(method: &str, params: Value) -> Result<Value, String> {
+    let mut last = String::new();
+    for _ in 0..2 {
+        let path = api_socket_path()?;
+        match api_roundtrip(&path, method, &params) {
+            Ok(v) => return Ok(v),
+            Err(ApiFail::Remote(m)) => return Err(m),
+            Err(ApiFail::Transport(m)) => {
+                last = m;
+                if let Ok(mut g) = SOCK_CACHE.lock() {
+                    *g = None;
+                }
+                if remote_ctx().is_some() {
+                    let _ = ensure_remote_forward();
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
 /// Uniquifier for the local end of forwarded sockets — a live attachment may
 /// still hold the path from its own connect attempt.
 static SOCK_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -436,7 +565,7 @@ pub fn remote_connect(target: &str, session: Option<&str>) -> Result<(), String>
 
     let seq = SOCK_SEQ.fetch_add(1, Ordering::Relaxed);
     let local_sock = std::env::temp_dir().join(format!(
-        "staylazy-herdr-{}-{}.sock",
+        "lazed-herdr-{}-{}.sock",
         std::process::id(),
         seq
     ));
@@ -561,8 +690,18 @@ pub fn machine_rename(id: &str, label: &str) -> Result<(), String> {
     )
 }
 
+/// Set optional string fields on a params object — mirrors omitting the CLI
+/// flag rather than sending null.
+fn opt_params(params: &mut Value, entries: &[(&str, Option<&str>)]) {
+    for (k, v) in entries {
+        if let Some(v) = v {
+            params[*k] = json!(v);
+        }
+    }
+}
+
 pub fn snapshot() -> Result<Value, String> {
-    let v = run_cli(&["api", "snapshot"])?;
+    let v = api_call("session.snapshot", json!({}))?;
     Ok(v
         .pointer("/result/snapshot")
         .cloned()
@@ -570,7 +709,7 @@ pub fn snapshot() -> Result<Value, String> {
 }
 
 pub fn list_panes() -> Result<Vec<Value>, String> {
-    let v = run_cli(&["pane", "list"])?;
+    let v = api_call("pane.list", json!({}))?;
     Ok(v
         .pointer("/result/panes")
         .and_then(Value::as_array)
@@ -579,7 +718,7 @@ pub fn list_panes() -> Result<Vec<Value>, String> {
 }
 
 pub fn ensure_workspace(cwd: Option<&str>) -> Result<Value, String> {
-    let v = run_cli(&["workspace", "list"])?;
+    let v = api_call("workspace.list", json!({}))?;
     let workspaces = v
         .pointer("/result/workspaces")
         .and_then(Value::as_array)
@@ -588,100 +727,195 @@ pub fn ensure_workspace(cwd: Option<&str>) -> Result<Value, String> {
     if let Some(ws) = workspaces.into_iter().next() {
         return Ok(ws);
     }
-    let mut args = vec!["workspace", "create"];
-    if let Some(c) = cwd {
-        args.extend(["--cwd", c]);
-    }
-    args.extend(["--label", "main"]);
-    let v = run_cli(&args)?;
+    let mut params = json!({"label": "main"});
+    opt_params(&mut params, &[("cwd", cwd)]);
+    let v = api_call("workspace.create", params)?;
     Ok(v.pointer("/result/workspace").cloned().unwrap_or(v))
 }
 
 pub fn split_pane(pane_id: &str, direction: &str) -> Result<Value, String> {
-    run_cli(&["pane", "split", pane_id, "--direction", direction])
+    api_call(
+        "pane.split",
+        json!({"target_pane_id": pane_id, "direction": direction, "focus": true}),
+    )
 }
 
+/// `pane run <pane> <cmd>` equivalent — text + Enter as one ordered input.
 pub fn run_in_pane(pane_id: &str, command: &str) -> Result<Value, String> {
-    run_cli(&["pane", "run", pane_id, command])
+    api_call(
+        "pane.send_input",
+        json!({"pane_id": pane_id, "text": command, "keys": ["enter"]}),
+    )
 }
 
 pub fn close_pane(pane_id: &str) -> Result<Value, String> {
-    run_cli(&["pane", "close", pane_id])
+    api_call("pane.close", json!({"pane_id": pane_id}))
 }
 
 pub fn resize_pane(pane_id: &str, direction: &str, amount: f64) -> Result<Value, String> {
-    run_cli(&[
-        "pane",
-        "resize",
-        "--pane",
-        pane_id,
-        "--direction",
-        direction,
-        "--amount",
-        &format!("{amount:.4}"),
-    ])
+    api_call(
+        "pane.resize",
+        json!({"pane_id": pane_id, "direction": direction, "amount": amount}),
+    )
 }
 
 pub fn workspace_create(cwd: Option<&str>, label: Option<&str>) -> Result<Value, String> {
-    let mut args = vec!["workspace", "create"];
-    if let Some(c) = cwd {
-        args.extend(["--cwd", c]);
-    }
-    if let Some(l) = label {
-        args.extend(["--label", l]);
-    }
-    run_cli(&args)
+    let mut params = json!({});
+    opt_params(&mut params, &[("cwd", cwd), ("label", label)]);
+    api_call("workspace.create", params)
 }
 
 pub fn workspace_focus(workspace_id: &str) -> Result<Value, String> {
-    run_cli(&["workspace", "focus", workspace_id])
+    api_call("workspace.focus", json!({"workspace_id": workspace_id}))
 }
 
 pub fn workspace_close(workspace_id: &str) -> Result<Value, String> {
-    run_cli(&["workspace", "close", workspace_id])
+    api_call("workspace.close", json!({"workspace_id": workspace_id}))
 }
 
 pub fn workspace_rename(workspace_id: &str, label: &str) -> Result<Value, String> {
-    run_cli(&["workspace", "rename", workspace_id, label])
+    api_call(
+        "workspace.rename",
+        json!({"workspace_id": workspace_id, "label": label}),
+    )
 }
 
 pub fn tab_create(workspace_id: &str, cwd: Option<&str>) -> Result<Value, String> {
-    let mut args = vec!["tab", "create", "--workspace", workspace_id];
-    if let Some(c) = cwd {
-        args.extend(["--cwd", c]);
-    }
-    run_cli(&args)
+    let mut params = json!({"workspace_id": workspace_id});
+    opt_params(&mut params, &[("cwd", cwd)]);
+    api_call("tab.create", params)
 }
 
 pub fn tab_focus(tab_id: &str) -> Result<Value, String> {
-    run_cli(&["tab", "focus", tab_id])
+    api_call("tab.focus", json!({"tab_id": tab_id}))
 }
 
 pub fn tab_close(tab_id: &str) -> Result<Value, String> {
-    run_cli(&["tab", "close", tab_id])
+    api_call("tab.close", json!({"tab_id": tab_id}))
 }
 
 pub fn tab_rename(tab_id: &str, label: &str) -> Result<Value, String> {
-    run_cli(&["tab", "rename", tab_id, label])
+    api_call("tab.rename", json!({"tab_id": tab_id, "label": label}))
 }
 
 pub fn agent_start(pane_id: &str, kind: &str, name: Option<&str>) -> Result<Value, String> {
-    let args = ["agent", "start", name.unwrap_or(kind), "--kind", kind, "--pane", pane_id];
-    run_cli(&args)
+    api_call(
+        "agent.start",
+        json!({"name": name.unwrap_or(kind), "kind": kind, "pane_id": pane_id}),
+    )
 }
 
+/// `agent.prompt` accepts a pane id as `target` (same resolution as the CLI).
 pub fn agent_prompt(pane_id: &str, text: &str) -> Result<Value, String> {
-    run_cli(&["agent", "prompt", pane_id, text])
+    api_call("agent.prompt", json!({"target": pane_id, "text": text}))
 }
 
-/// `herdr agent get <pane>` → the agent object (unwrapped from the envelope).
+/// `agent.get <pane>` → the agent object (unwrapped from the envelope).
 pub fn agent_get(pane_id: &str) -> Result<Value, String> {
-    let v = run_cli(&["agent", "get", pane_id])?;
+    let v = api_call("agent.get", json!({"target": pane_id}))?;
     Ok(v.pointer("/result/agent").cloned().unwrap_or(v))
 }
 
+/// Agent kinds `agent start --kind` accepts — the kind IS the canonical
+/// executable name, so it doubles as the detection probe. Keep in sync
+/// with `AGENT_KINDS` in src/shared/herdr.ts.
+pub const AGENT_KINDS: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "opencode",
+    "cursor",
+    "devin",
+    "pi",
+    "copilot",
+    "amp",
+    "grok",
+    "cline",
+    "agy",
+    "droid",
+    "kimi",
+    "kiro",
+    "omp",
+    "hermes",
+    "kilo",
+    "muse",
+    "qwen",
+    "qodercli",
+    "mastracode",
+    "maki",
+];
+
+/// Resolve an agent executable locally: PATH dirs first, then the same
+/// well-known install locations `herdr_bin` falls back to — a GUI app's
+/// PATH is sparser than a login shell's.
+fn detect_local(cmd: &str) -> Option<String> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    dirs.extend([
+        home.join(".local/share/mise/shims"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        home.join(".local/bin"),
+        home.join(".bun/bin"),
+    ]);
+    dirs.iter()
+        .map(|d| d.join(cmd))
+        .find(|c| c.is_file())
+        .map(|c| c.to_string_lossy().into_owned())
+}
+
+/// Remote probe: ONE ssh call whose shell loop prints "kind path" per
+/// resolved binary — spawning ssh per kind would cost a round-trip each.
+/// Non-absolute `command -v` output (aliases, builtins) is ignored.
+fn detect_remote(target: &str) -> Result<Vec<Option<String>>, String> {
+    let script = format!(
+        "for c in {}; do p=$(command -v \"$c\" 2>/dev/null); [ -n \"$p\" ] && printf '%s %s\\n' \"$c\" \"$p\"; done",
+        AGENT_KINDS.join(" ")
+    );
+    let out = ssh_shell(target, &script)?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let found: Vec<(String, String)> = stdout
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, p)| p.starts_with('/'))
+        .map(|(k, p)| (k.to_string(), p.to_string()))
+        .collect();
+    Ok(AGENT_KINDS
+        .iter()
+        .map(|k| {
+            found
+                .iter()
+                .find(|(fk, _)| fk == k)
+                .map(|(_, p)| p.clone())
+        })
+        .collect())
+}
+
+/// Detect which supported agent CLIs are installed in the ACTIVE context —
+/// local PATH scan, or a single ssh probe on the attached remote machine.
+pub fn agent_detect() -> Result<Value, String> {
+    let ctx = remote_ctx();
+    let paths = match &ctx {
+        Some((target, _)) => detect_remote(target)?,
+        None => AGENT_KINDS.iter().map(|k| detect_local(k)).collect(),
+    };
+    let agents: Vec<Value> = AGENT_KINDS
+        .iter()
+        .zip(paths)
+        .map(|(kind, path)| json!({"kind": kind, "path": path}))
+        .collect();
+    Ok(json!({
+        "context": ctx
+            .map(|(t, _)| format!("ssh {t}"))
+            .unwrap_or_else(|| "local".to_string()),
+        "agents": agents,
+    }))
+}
+
 pub fn pane_send_text(pane_id: &str, text: &str) -> Result<Value, String> {
-    run_cli(&["pane", "send-text", pane_id, text])
+    api_call("pane.send_text", json!({"pane_id": pane_id, "text": text}))
 }
 
 pub fn worktree_create(
@@ -691,36 +925,30 @@ pub fn worktree_create(
     label: Option<&str>,
     workspace: Option<&str>,
 ) -> Result<Value, String> {
-    let mut args = vec!["worktree", "create", "--cwd", cwd];
-    if let Some(b) = branch {
-        args.extend(["--branch", b]);
-    }
-    if let Some(b) = base {
-        args.extend(["--base", b]);
-    }
-    if let Some(l) = label {
-        args.extend(["--label", l]);
-    }
-    if let Some(w) = workspace {
-        args.extend(["--workspace", w]);
-    }
-    run_cli(&args)
+    let mut params = json!({"cwd": cwd});
+    opt_params(
+        &mut params,
+        &[
+            ("branch", branch),
+            ("base", base),
+            ("label", label),
+            ("workspace_id", workspace),
+        ],
+    );
+    api_call("worktree.create", params)
 }
 
 pub fn worktree_list(cwd: Option<&str>) -> Result<Value, String> {
-    let mut args = vec!["worktree", "list"];
-    if let Some(c) = cwd {
-        args.extend(["--cwd", c]);
-    }
-    run_cli(&args)
+    let mut params = json!({});
+    opt_params(&mut params, &[("cwd", cwd)]);
+    api_call("worktree.list", params)
 }
 
 pub fn worktree_remove(workspace_id: &str, force: bool) -> Result<Value, String> {
-    let mut args = vec!["worktree", "remove", "--workspace", workspace_id];
-    if force {
-        args.push("--force");
-    }
-    run_cli(&args)
+    api_call(
+        "worktree.remove",
+        json!({"workspace_id": workspace_id, "force": force}),
+    )
 }
 
 /// Subscription types that apply globally (no pane_id required).
@@ -745,15 +973,19 @@ const GLOBAL_SUBS: &[&str] = &[
 ];
 
 fn subscribe_request(subs: &Value) -> Value {
-    json!({"id": "staylazy", "method": "events.subscribe", "params": {"subscriptions": subs}})
+    json!({"id": "lazed", "method": "events.subscribe", "params": {"subscriptions": subs}})
 }
 
-/// Connect the event socket, subscribe to global + per-pane events for `pane_ids`,
-/// and call `on_line` for every subsequent JSON line until EOF/error.
-/// Returns the error that ended the connection.
+/// Connect the event socket and subscribe global + per-pane events for
+/// `pane_ids` in ONE `events.subscribe` request — the server answers exactly
+/// one request per connection (a second write gets the socket closed), so
+/// widening the sub set later means reconnecting: return `true` from
+/// `on_line` to end the stream and let the caller re-snapshot + resubscribe.
+/// `on_line` runs for every subsequent JSON line until EOF/error; returns
+/// the message that ended the stream.
 pub fn run_event_stream<F>(pane_ids: &[String], mut on_line: F) -> String
 where
-    F: FnMut(&Value, &mut dyn FnMut(&Value)),
+    F: FnMut(&Value) -> bool,
 {
     let result = (|| -> Result<(), String> {
         let gen0 = CONTEXT_GEN.load(Ordering::SeqCst);
@@ -785,12 +1017,6 @@ where
             .and_then(|_| writer.flush())
             .map_err(|e| format!("failed to write subscription: {e}"))?;
 
-        let mut add_sub = |v: &Value| {
-            let line = serde_json::to_string(v).unwrap_or_default() + "\n";
-            let _ = writer.write_all(line.as_bytes());
-            let _ = writer.flush();
-        };
-
         let mut line = String::new();
         loop {
             line.clear();
@@ -803,17 +1029,15 @@ where
                         continue;
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-                        on_line(&v, &mut add_sub);
+                        if on_line(&v) {
+                            return Err("resubscribe requested".to_string());
+                        }
                     }
                 }
             }
         }
     })();
     result.err().unwrap_or_else(|| "event stream ended".to_string())
-}
-
-pub fn status_sub_for_pane(pane_id: &str) -> Value {
-    subscribe_request(&json!([{"type": "pane.agent_status_changed", "pane_id": pane_id}]))
 }
 
 /// Spawn `herdr terminal session control <pane> --takeover` and return the child
@@ -889,6 +1113,22 @@ pub fn cmd_resize(cols: u32, rows: u32) -> Value {
     json!({"type": "terminal.resize", "cols": cols, "rows": rows})
 }
 
+/// `terminal.scroll` on the control stream. `direction` is "up"/"down";
+/// `source: "wheel"` lets the server route it — mouse-reporting apps get SGR
+/// wheel bytes (positioned at column/row), alt-screen apps get alternate
+/// scroll, plain shells scroll the host scrollback.
+pub fn cmd_scroll(direction: &str, lines: u16, column: u16, row: u16, modifiers: u8) -> Value {
+    json!({
+        "type": "terminal.scroll",
+        "direction": direction,
+        "lines": lines,
+        "source": "wheel",
+        "column": column,
+        "row": row,
+        "modifiers": modifiers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,10 +1157,77 @@ mod tests {
         assert_eq!(session_flag(Some("a b")), " --session 'a b'");
     }
 
+    /// Serve one canned socket response on the peer end; returns the parsed
+    /// request the client sent.
+    fn serve_once(peer: UnixStream, respond: impl Fn(&Value) -> String) -> Value {
+        let mut reader = BufReader::new(peer.try_clone().unwrap());
+        let mut writer = peer;
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let req: Value = serde_json::from_str(line.trim()).unwrap();
+        writer
+            .write_all(respond(&req).as_bytes())
+            .and_then(|_| writer.write_all(b"\n"))
+            .and_then(|_| writer.flush())
+            .unwrap();
+        req
+    }
+
+    #[test]
+    fn api_roundtrip_sends_method_and_returns_result() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let h = std::thread::spawn(move || {
+            serve_once(server, |req| {
+                assert_eq!(req["method"], "pane.list");
+                assert_eq!(req["params"], json!({}));
+                format!("{{\"id\":\"{}\",\"result\":{{\"panes\":[]}}}}", req["id"].as_str().unwrap())
+            })
+        });
+        let v = api_roundtrip_stream(client, "pane.list", &json!({})).unwrap();
+        assert_eq!(v.pointer("/result/panes"), Some(&json!([])));
+        let req = h.join().unwrap();
+        assert!(req["id"].as_str().unwrap().starts_with("lazed-"));
+    }
+
+    #[test]
+    fn api_roundtrip_maps_error_response() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let h = std::thread::spawn(move || {
+            serve_once(server, |req| {
+                format!(
+                    "{{\"id\":\"{}\",\"error\":{{\"code\":\"agent_blocked\",\"message\":\"waiting on approval\"}}}}",
+                    req["id"].as_str().unwrap()
+                )
+            })
+        });
+        let err = api_roundtrip_stream(
+            client,
+            "agent.prompt",
+            &json!({"target": "w1:p1", "text": "hi"}),
+        )
+        .unwrap_err();
+        match err {
+            ApiFail::Remote(m) => {
+                assert!(m.contains("agent_blocked"), "unexpected message: {m}")
+            }
+            ApiFail::Transport(m) => panic!("expected remote error, got transport: {m}"),
+        }
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn api_roundtrip_eof_is_transport_error() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let h = std::thread::spawn(move || drop(server));
+        let err = api_roundtrip_stream(client, "ping", &json!({})).unwrap_err();
+        assert!(matches!(err, ApiFail::Transport(_)));
+        h.join().unwrap();
+    }
+
     #[test]
     fn remote_connect_unreachable_host_errors_clean() {
         // bogus host → ssh transport failure → Err, and nothing stays attached
-        let res = remote_connect("staylazy-no-such-host.invalid", None);
+        let res = remote_connect("lazed-no-such-host.invalid", None);
         assert!(res.is_err());
         assert!(remote_target().is_none());
     }

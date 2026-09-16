@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_KINDS } from "../shared/herdr";
+import { AGENT_KINDS } from "../shared/lazed";
 
 export interface FanoutRequest {
   repo: string;

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Schema check: verify the herdr fields staylazy depends on still exist.
+"""Schema check: verify the herdr fields lazed depends on still exist.
 
 Run this before/after upgrading herdr. It exercises the exact JSON paths
-staylazy reads and fails loudly on drift, so a pre-1.0 schema change shows
+lazed reads and fails loudly on drift, so a pre-1.0 schema change shows
 up here instead of as a silent runtime break.
 
 Usage: python3 scripts/check_herdr_schema.py [herdr-args...]

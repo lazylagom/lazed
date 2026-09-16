@@ -1,7 +1,7 @@
-import { FolderImportIcon } from "@hugeicons/core-free-icons";
+import { FolderIcon, MultiplicationSignIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 
 function basename(p: string) {
   const parts = p.replace(/\/$/, "").split("/");
@@ -15,12 +15,7 @@ export function ImportProject({
   onImport: (cwd?: string, label?: string) => void;
   onClose: () => void;
 }) {
-  const [path, setPath] = useState("");
-  const [label, setLabel] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
   useEffect(() => {
-    inputRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
@@ -31,52 +26,39 @@ export function ImportProject({
   const browse = async () => {
     const dir = await open({
       directory: true,
-      title: "import project",
+      title: "add a project",
     }).catch(() => null);
-    if (typeof dir === "string") {
-      setPath(dir);
-      if (!label.trim()) setLabel(basename(dir));
-    }
-  };
-
-  const submit = () => {
-    const cwd = path.trim();
-    onImport(cwd || undefined, label.trim() || basename(cwd) || undefined);
+    if (typeof dir === "string") onImport(dir, basename(dir));
   };
 
   return (
     <div className="modal-overlay" onMouseDown={onClose}>
-      <div
-        className="modal"
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") submit();
-        }}
-      >
-        <div className="import-head">
-          <HugeiconsIcon icon={FolderImportIcon} size={14} strokeWidth={1.5} />
-          <span>import project</span>
-        </div>
-        <div className="import-row">
-          <input
-            ref={inputRef}
-            className="modal-input"
-            placeholder="/path/to/project"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-          />
-          <button type="button" onClick={browse}>
-            browse…
+      <div className="modal addproj" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="addproj-head">
+          <span className="addproj-title">Add a project</span>
+          <button
+            type="button"
+            className="addproj-x"
+            onClick={onClose}
+            aria-label="close"
+          >
+            <HugeiconsIcon
+              icon={MultiplicationSignIcon}
+              size={18}
+              strokeWidth={1.5}
+            />
           </button>
         </div>
-        <input
-          className="modal-input"
-          placeholder="label (defaults to folder name)"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-        />
-        <button type="button" className="fanout-go" onClick={submit}>
-          {path.trim() ? "import" : "new empty workspace"}
+        <button type="button" className="addproj-card" onClick={browse}>
+          <span className="addproj-card-ico">
+            <HugeiconsIcon icon={FolderIcon} size={22} strokeWidth={1.4} />
+          </span>
+          <span className="addproj-card-text">
+            <span className="addproj-card-title">Browse folder</span>
+            <span className="addproj-card-sub">
+              Local project, Git repo, or folder with many repos
+            </span>
+          </span>
         </button>
       </div>
     </div>

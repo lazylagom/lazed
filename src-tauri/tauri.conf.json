@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedouble/tauri-apps/main/tauri-conf-v2.schema.json",
-  "productName": "staylazy",
+  "productName": "lazed",
   "version": "0.0.1",
-  "identifier": "com.staylazy.app",
+  "identifier": "com.lazed.app",
   "build": {
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build",
@@ -13,14 +13,16 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "staylazy",
+        "title": "lazed",
         "width": 1280,
         "height": 840,
         "minWidth": 720,
         "minHeight": 480,
         "decorations": true,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 22 },
+        "theme": "Dark"
       }
     ]
   },
@@ -30,6 +32,6 @@
     "icon": ["icons/icon.png"],
     "category": "DeveloperTool",
     "shortDescription": "GUI client for the herdr agent runtime",
-    "longDescription": "staylazy - a desktop GUI front-end for herdr terminal workspaces"
+    "longDescription": "lazed - a desktop GUI front-end for herdr terminal workspaces"
   }
 }

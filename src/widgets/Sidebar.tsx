@@ -1,34 +1,31 @@
 import {
-  AppWindowIcon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   BotIcon,
+  Delete02Icon,
+  FolderAddIcon,
   FolderGitIcon,
-  FolderImportIcon,
-  FolderLibraryIcon,
   GitBranchIcon,
+  GroupItemsIcon,
+  MoreHorizontalIcon,
   PlusIcon,
   TerminalIcon,
   TowerControlIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import type {
   AgentStatus,
-  PaneInfo,
-  RepoRef,
+  GroupInfo,
+  ProjectInfo,
   Snapshot,
-  TabInfo,
-  WorkspaceInfo,
-} from "../shared/herdr";
+  TerminalInfo,
+} from "../shared/lazed";
+import { SIDEBAR_RESET_EVENT } from "../shared/settings";
 
-function StatusDot({ status }: { status?: AgentStatus }) {
-  return (
-    <span
-      className={`dot ${status ?? "unknown"}`}
-      title={status ?? "unknown"}
-    />
-  );
+function statusClass(s?: AgentStatus) {
+  return `st-${s ?? "unknown"}`;
 }
 
 function basename(p?: string) {
@@ -37,56 +34,36 @@ function basename(p?: string) {
   return parts[parts.length - 1] || p;
 }
 
-/** Deterministic project accent — Orca gives each repo a colored glyph. */
-function projectHue(key: string) {
-  let h = 0;
-  for (const c of key) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return h % 360;
+function confirmClose(title: string, message: string) {
+  return ask(message, {
+    title,
+    kind: "warning",
+    okLabel: "Close",
+    cancelLabel: "Cancel",
+  }).catch(() => false);
 }
 
-function Caret({ open }: { open: boolean }) {
-  return (
-    <HugeiconsIcon
-      icon={open ? ArrowDown01Icon : ArrowRight01Icon}
-      size={11}
-      strokeWidth={1.5}
-      className="side-caret"
-    />
-  );
+const SIDE_MIN = 180;
+const SIDE_MAX = 560;
+const SIDE_DEFAULT = 288;
+const SIDE_KEY = "sidebar-width";
+const COLLAPSED_KEY = "sidebar-collapsed-groups";
+
+function loadSideWidth() {
+  const v = Number(localStorage.getItem(SIDE_KEY));
+  if (!Number.isFinite(v) || v <= 0) return SIDE_DEFAULT;
+  return Math.min(SIDE_MAX, Math.max(SIDE_MIN, v));
 }
 
-function PaneRow({
-  pane,
-  focused,
-  onClick,
-}: {
-  pane: PaneInfo;
-  focused: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={`side-pane ${focused ? "focused" : ""}`}
-      onClick={onClick}
-      title={pane.cwd ?? pane.pane_id}
-    >
-      <StatusDot status={pane.agent_status} />
-      <HugeiconsIcon
-        icon={pane.agent ? BotIcon : TerminalIcon}
-        size={12}
-        strokeWidth={1.5}
-        className="side-ico"
-      />
-      <span className="side-pane-name">
-        {pane.display_agent ??
-          pane.agent ??
-          pane.title ??
-          basename(pane.cwd) ??
-          pane.pane_id}
-      </span>
-    </button>
-  );
+function loadCollapsed(): ReadonlySet<string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    return new Set(
+      Array.isArray(v) ? v.filter((x) => typeof x === "string") : [],
+    );
+  } catch {
+    return new Set();
+  }
 }
 
 function RenameInput({
@@ -119,400 +96,592 @@ function RenameInput({
   );
 }
 
-interface RenameTarget {
-  kind: "ws" | "tab";
-  id: string;
-  label: string;
-}
-
-function TabBlock({
-  tab,
-  panes,
-  active,
-  focusedPane,
-  renaming,
-  onFocusTab,
-  onFocusPane,
-  onCloseTab,
-  onRenameTab,
-  onRenameStart,
-  onRenameCancel,
-}: {
-  tab: TabInfo;
-  panes: PaneInfo[];
-  active: boolean;
-  focusedPane: string | null;
-  renaming: RenameTarget | null;
-  onFocusTab: (id: string) => void;
-  onFocusPane: (id: string) => void;
-  onCloseTab: (id: string) => void;
-  onRenameTab: (id: string, label: string) => void;
-  onRenameStart: (t: RenameTarget) => void;
-  onRenameCancel: () => void;
-}) {
-  return (
-    <div className="side-tab">
-      <div className={`side-tab-head ${active ? "active" : ""}`}>
-        {renaming?.kind === "tab" && renaming.id === tab.tab_id ? (
-          <RenameInput
-            initial={renaming.label}
-            onCommit={(l) => {
-              if (l) onRenameTab(tab.tab_id, l);
-              onRenameCancel();
-            }}
-            onCancel={onRenameCancel}
-          />
-        ) : (
-          <button
-            type="button"
-            className="side-tab-label"
-            onClick={() => onFocusTab(tab.tab_id)}
-            onDoubleClick={() =>
-              onRenameStart({
-                kind: "tab",
-                id: tab.tab_id,
-                label: tab.label ?? "",
-              })
-            }
-            title="double-click to rename"
-          >
-            <Caret open={active} />
-            <StatusDot status={tab.agent_status} />
-            <HugeiconsIcon
-              icon={AppWindowIcon}
-              size={12}
-              strokeWidth={1.5}
-              className="side-ico"
-            />
-            <span>{tab.label ?? tab.tab_id}</span>
-          </button>
-        )}
-        <button
-          type="button"
-          className="side-close"
-          title="close tab"
-          onClick={() => onCloseTab(tab.tab_id)}
-        >
-          ✕
-        </button>
-      </div>
-      {active &&
-        panes.map((p) => (
-          <PaneRow
-            key={p.pane_id}
-            pane={p}
-            focused={p.pane_id === focusedPane}
-            onClick={() => onFocusPane(p.pane_id)}
-          />
-        ))}
-    </div>
-  );
-}
-
-/** A workspace row + its tabs — used standalone and inside a project group. */
-function WorkspaceBlock({
-  w,
-  role,
+/** A terminal child row — a worktree or plain terminal inside a project. */
+function TermRow({
+  t,
+  num,
   focused,
-  wsTabs,
-  panes,
-  activeTabId,
-  focusedPane,
-  renaming,
-  onFocusWorkspace,
-  onFocusTab,
-  onFocusPane,
-  onCloseWorkspace,
-  onCloseTab,
-  onRenameWorkspace,
-  onRenameTab,
+  onFocus,
+  onClose,
   onDiff,
-  onRenameStart,
-  onRenameCancel,
-  status,
 }: {
-  w: WorkspaceInfo;
-  /** "tower" = the project's repo-root workspace; "worker" = linked worktree */
-  role?: "tower" | "worker";
+  t: TerminalInfo;
+  num?: number;
   focused: boolean;
-  wsTabs: TabInfo[];
-  panes: PaneInfo[];
-  activeTabId?: string;
-  focusedPane: string | null;
-  renaming: RenameTarget | null;
-  onFocusWorkspace: (id: string) => void;
-  onFocusTab: (id: string) => void;
-  onFocusPane: (id: string) => void;
-  onCloseWorkspace: (id: string) => void;
-  onCloseTab: (id: string) => void;
-  onRenameWorkspace: (id: string, label: string) => void;
-  onRenameTab: (id: string, label: string) => void;
-  onDiff: (ws: WorkspaceInfo) => void;
-  onRenameStart: (t: RenameTarget) => void;
-  onRenameCancel: () => void;
-  status: AgentStatus;
+  onFocus: () => void;
+  onClose: () => void;
+  onDiff?: () => void;
 }) {
+  const name =
+    t.label ?? t.branch ?? t.agent_kind ?? basename(t.cwd) ?? t.term_id;
+  const close = async () => {
+    const ok = await confirmClose(
+      t.kind === "worktree" ? "Remove Worktree" : "Close Terminal",
+      t.kind === "worktree"
+        ? `Remove worktree “${name}”? Its terminal will be killed and the checkout deleted.`
+        : `Close terminal “${name}”?`,
+    );
+    if (ok) onClose();
+  };
   return (
-    <div className="side-ws">
-      <div className={`side-ws-head ${focused ? "focused" : ""}`}>
-        {renaming?.kind === "ws" && renaming.id === w.workspace_id ? (
-          <RenameInput
-            initial={renaming.label}
-            onCommit={(l) => {
-              if (l) onRenameWorkspace(w.workspace_id, l);
-              onRenameCancel();
-            }}
-            onCancel={onRenameCancel}
-          />
-        ) : (
-          <button
-            type="button"
-            className="side-ws-label"
-            onClick={() => onFocusWorkspace(w.workspace_id)}
-            onDoubleClick={() =>
-              onRenameStart({
-                kind: "ws",
-                id: w.workspace_id,
-                label: w.label ?? "",
-              })
-            }
-            title="double-click to rename"
-          >
-            <Caret open={focused} />
-            <StatusDot status={status} />
-            <HugeiconsIcon
-              icon={role === "tower" ? FolderLibraryIcon : GitBranchIcon}
-              size={13}
-              strokeWidth={1.5}
-              className="side-ico"
-            />
-            <span className="side-ws-name">{w.label ?? w.workspace_id}</span>
-            {role === "tower" && <span className="side-pill">primary</span>}
-            <span className="side-count">{w.pane_count ?? ""}</span>
-          </button>
+    <div className={`side-ws-head ${focused ? "focused" : ""}`}>
+      <button
+        type="button"
+        className="side-ws-label"
+        onClick={onFocus}
+        title={t.cwd}
+      >
+        <span className={`dot ${t.agent_status ?? "unknown"}`} />
+        <HugeiconsIcon
+          icon={
+            t.agent_kind
+              ? BotIcon
+              : t.kind === "worktree"
+                ? GitBranchIcon
+                : TerminalIcon
+          }
+          size={12}
+          strokeWidth={1.5}
+          className="side-ico"
+        />
+        {num !== undefined && (
+          <span className="side-ws-num" title={`terminal ${num}`}>
+            {num}
+          </span>
         )}
-        {w.worktree?.is_linked_worktree && (
-          <button
-            type="button"
-            className="side-close"
-            title={`diff ${w.worktree.checkout_path}`}
-            onClick={() => onDiff(w)}
-          >
-            <HugeiconsIcon icon={GitBranchIcon} size={11} strokeWidth={1.5} />
-          </button>
-        )}
+        <span className={`side-ws-name ${statusClass(t.agent_status)}`}>
+          {name}
+        </span>
+      </button>
+      {t.kind === "worktree" && onDiff && (
         <button
           type="button"
           className="side-close"
-          title="close workspace"
-          onClick={() => onCloseWorkspace(w.workspace_id)}
+          title={`diff ${t.cwd}`}
+          onClick={onDiff}
         >
-          ✕
+          <HugeiconsIcon icon={GitBranchIcon} size={11} strokeWidth={1.5} />
         </button>
-      </div>
-      {focused && (
-        <div className="side-tabs">
-          {wsTabs.map((t) => (
-            <TabBlock
-              key={t.tab_id}
-              tab={t}
-              panes={panes.filter((p) => p.tab_id === t.tab_id)}
-              active={t.tab_id === activeTabId}
-              focusedPane={focusedPane}
-              renaming={renaming}
-              onFocusTab={onFocusTab}
-              onFocusPane={onFocusPane}
-              onCloseTab={onCloseTab}
-              onRenameTab={onRenameTab}
-              onRenameStart={onRenameStart}
-              onRenameCancel={onRenameCancel}
-            />
-          ))}
-        </div>
       )}
+      <button
+        type="button"
+        className="side-close"
+        title={t.kind === "worktree" ? "remove worktree" : "close terminal"}
+        onClick={close}
+      >
+        ✕
+      </button>
     </div>
   );
 }
 
 export function Sidebar({
   snap,
-  repoRefs,
-  focusedWsId,
-  activeTabId,
-  focusedPane,
-  onFocusWorkspace,
-  onFocusTab,
-  onFocusPane,
-  onNewWorkspace,
-  onCloseWorkspace,
-  onCloseTab,
-  onRenameWorkspace,
-  onRenameTab,
+  focusedTermId,
+  onFocusProject,
+  onJumpTerm,
+  onNewProject,
+  onNewGroup,
+  onCloseProject,
+  onRenameProject,
+  onRenameGroup,
+  onRemoveGroup,
+  onAssignProject,
+  onCloseTerm,
   onDiff,
-  onTower,
+  onOrchestrate,
   rollup,
 }: {
   snap: Snapshot | null;
-  repoRefs: Map<string, RepoRef>;
-  focusedWsId?: string;
-  activeTabId?: string;
-  focusedPane: string | null;
-  onFocusWorkspace: (id: string) => void;
-  onFocusTab: (id: string) => void;
-  onFocusPane: (id: string) => void;
-  onNewWorkspace: () => void;
-  onCloseWorkspace: (id: string) => void;
-  onCloseTab: (id: string) => void;
-  onRenameWorkspace: (id: string, label: string) => void;
-  onRenameTab: (id: string, label: string) => void;
-  onDiff: (ws: WorkspaceInfo) => void;
-  onTower: (repoKey: string) => void;
+  focusedTermId: string | null;
+  onFocusProject: (id: string) => void;
+  onJumpTerm: (termId: string, projectId: string) => void;
+  onNewProject: () => void;
+  /** creates a group — resolves to its id so the caller can enter rename */
+  onNewGroup: () => Promise<string | null>;
+  onCloseProject: (id: string) => void;
+  onRenameProject: (id: string, label: string) => void;
+  onRenameGroup: (id: string, label: string) => void;
+  onRemoveGroup: (id: string) => void;
+  /** groupId null = move back to ungrouped */
+  onAssignProject: (projectId: string, groupId: string | null) => void;
+  onCloseTerm: (t: TerminalInfo) => void;
+  onDiff: (t: TerminalInfo) => void;
+  onOrchestrate: (projectId: string) => void;
   rollup: (s: (AgentStatus | undefined)[]) => AgentStatus;
 }) {
-  const [renaming, setRenaming] = useState<RenameTarget | null>(null);
-  const workspaces = snap?.workspaces ?? [];
-  const tabs = snap?.tabs ?? [];
-  const panes = snap?.panes ?? [];
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
+  const [collapsed, setCollapsed] =
+    useState<ReadonlySet<string>>(loadCollapsed);
+  const [width, setWidth] = useState(loadSideWidth);
+  const [menu, setMenu] = useState<{
+    kind: "project" | "group";
+    key: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const sideRef = useRef<HTMLDivElement>(null);
+  const projects = snap?.projects ?? [];
+  const groups = snap?.groups ?? [];
+  const termsById = new Map((snap?.terminals ?? []).map((t) => [t.term_id, t]));
+  const projById = new Map(projects.map((p) => [p.project_id, p]));
+  const groupedIds = new Set(groups.flatMap((g) => g.projects));
+  const ungrouped = projects.filter((p) => !groupedIds.has(p.project_id));
 
-  const paneStatus = (wsId: string): AgentStatus =>
-    rollup(
-      panes.filter((p) => p.workspace_id === wsId).map((p) => p.agent_status),
-    );
+  const toggleGroup = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...next]));
+      return next;
+    });
 
-  const rootCwdOf = (wsId: string) => {
-    const p = panes.find((p) => p.workspace_id === wsId);
-    return p?.cwd ?? p?.foreground_cwd;
-  };
+  const renderProject = (p: ProjectInfo, idx: number) => {
+    const terms = p.terminals
+      .map((id) => termsById.get(id))
+      .filter((t): t is TerminalInfo => Boolean(t));
+    const root = terms.find((t) => t.kind !== "worktree") ?? terms[0];
+    const worktrees = terms.filter((t) => t.kind === "worktree");
+    const plains = terms.filter((t) => t.kind !== "worktree");
+    const name = p.label ?? basename(p.repo_root) ?? p.project_id;
+    const projStatus = rollup(terms.map((t) => t.agent_status));
 
-  // project grouping: workspaces sharing a repo_key belong to the same
-  // repo. repoRefs merges herdr's worktree stamp with our own resolution
-  // (fresh imports have no stamp until the first worktree op).
-  const groups = new Map<string, WorkspaceInfo[]>();
-  for (const w of workspaces) {
-    const key = repoRefs.get(w.workspace_id)?.repo_key;
-    if (!key) continue;
-    const arr = groups.get(key) ?? [];
-    arr.push(w);
-    groups.set(key, arr);
-  }
-
-  const blockProps = {
-    panes,
-    activeTabId,
-    focusedPane,
-    renaming,
-    onFocusWorkspace,
-    onFocusTab,
-    onFocusPane,
-    onCloseWorkspace,
-    onCloseTab,
-    onRenameWorkspace,
-    onRenameTab,
-    onDiff,
-    onRenameStart: setRenaming,
-    onRenameCancel: () => setRenaming(null),
-  };
-
-  const renderWs = (w: WorkspaceInfo, role?: "tower" | "worker") => (
-    <WorkspaceBlock
-      key={w.workspace_id}
-      w={w}
-      role={role}
-      focused={w.workspace_id === focusedWsId}
-      wsTabs={tabs.filter((t) => t.workspace_id === w.workspace_id)}
-      status={paneStatus(w.workspace_id)}
-      {...blockProps}
-    />
-  );
-
-  const rendered = new Set<string>();
-  const rows: React.ReactNode[] = [];
-
-  for (const w of workspaces) {
-    if (rendered.has(w.workspace_id)) continue;
-    const key = repoRefs.get(w.workspace_id)?.repo_key;
-    const members = key ? groups.get(key) : undefined;
-    if (!members) {
-      rendered.add(w.workspace_id);
-      rows.push(renderWs(w));
-      continue;
-    }
-    for (const m of members) rendered.add(m.workspace_id);
-    // tower = the repo's own checkout: herdr says is_linked_worktree=false;
-    // for un-stamped workspaces fall back to root cwd == repo_root
-    const ref = repoRefs.get(members[0].workspace_id);
-    const tower =
-      members.find((m) => m.worktree?.is_linked_worktree === false) ??
-      members.find((m) => rootCwdOf(m.workspace_id) === ref?.repo_root) ??
-      members[0];
-    const workers = members.filter((m) => m !== tower);
-    const name = ref?.name ?? basename(ref?.repo_root) ?? "project";
-    rows.push(
-      <div key={key} className="side-proj">
+    return (
+      <div
+        key={p.project_id}
+        className={`side-proj ${p.focused ? "focused" : ""}`}
+      >
         <div className="side-proj-head">
-          <button
-            type="button"
-            className="side-proj-label"
-            onClick={() => onFocusWorkspace(tower.workspace_id)}
-            title={ref?.repo_root ?? name}
-          >
-            <HugeiconsIcon
-              icon={FolderGitIcon}
-              size={13}
-              strokeWidth={1.5}
-              className="side-proj-ico"
-              color={`hsl(${projectHue(key ?? name)} 65% 62%)`}
+          {renaming === p.project_id ? (
+            <RenameInput
+              initial={p.label ?? ""}
+              onCommit={(l) => {
+                if (l) onRenameProject(p.project_id, l);
+                setRenaming(null);
+              }}
+              onCancel={() => setRenaming(null)}
             />
-            <span>{name}</span>
-            <span className="side-count">{members.length}</span>
-          </button>
-          {key && (
+          ) : (
             <button
               type="button"
-              className="side-close"
-              title="spawn control tower agent"
-              onClick={() => onTower(key)}
+              className="side-proj-label"
+              onClick={() =>
+                root
+                  ? onJumpTerm(root.term_id, p.project_id)
+                  : onFocusProject(p.project_id)
+              }
+              onDoubleClick={() => setRenaming(p.project_id)}
+              title={`${p.repo_root} — root terminal (double-click to rename)`}
             >
               <HugeiconsIcon
-                icon={TowerControlIcon}
-                size={12}
+                icon={FolderGitIcon}
+                size={13}
                 strokeWidth={1.5}
+                className="side-proj-ico"
               />
+              <span className="side-ws-num" title={`project ${idx + 1}`}>
+                {idx + 1}
+              </span>
+              <span className={statusClass(projStatus)}>{name}</span>
             </button>
           )}
+          <button
+            type="button"
+            className="side-close"
+            title="start orchestrator agent"
+            onClick={() => onOrchestrate(p.project_id)}
+          >
+            <HugeiconsIcon
+              icon={TowerControlIcon}
+              size={12}
+              strokeWidth={1.5}
+            />
+          </button>
+          <button
+            type="button"
+            className="side-close"
+            title="project settings"
+            onClick={(e) => {
+              e.stopPropagation();
+              const r = e.currentTarget.getBoundingClientRect();
+              setMenu({
+                kind: "project",
+                key: p.project_id,
+                x: r.left,
+                y: r.bottom + 4,
+              });
+            }}
+          >
+            <HugeiconsIcon
+              icon={MoreHorizontalIcon}
+              size={12}
+              strokeWidth={1.5}
+            />
+          </button>
         </div>
-        <div className="side-proj-children">
-          {renderWs(tower, "tower")}
-          {workers.map((m) => renderWs(m, "worker"))}
-        </div>
-      </div>,
+        {terms.length > 0 && (
+          <div className="side-proj-children">
+            {plains.length > 0 && (
+              <div className="side-tree-group">
+                <button
+                  type="button"
+                  className="side-tree-label side-primary-label"
+                  onClick={() => root && onJumpTerm(root.term_id, p.project_id)}
+                  title={root?.cwd}
+                >
+                  <span
+                    className={`dot ${rollup(plains.map((t) => t.agent_status))}`}
+                  />
+                  <span className="side-primary-name">
+                    {root?.branch ?? basename(p.repo_root)}
+                  </span>
+                  <span className="side-pill">primary</span>
+                  <span className="side-tree-count">{plains.length}</span>
+                </button>
+                <div className="side-tree-children">
+                  {plains.map((t) => (
+                    <TermRow
+                      key={t.term_id}
+                      t={t}
+                      focused={t.term_id === focusedTermId}
+                      onFocus={() => onJumpTerm(t.term_id, p.project_id)}
+                      onClose={() => onCloseTerm(t)}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {worktrees.map((t) => (
+              <TermRow
+                key={t.term_id}
+                t={t}
+                focused={t.term_id === focusedTermId}
+                onFocus={() => onJumpTerm(t.term_id, p.project_id)}
+                onClose={() => onCloseTerm(t)}
+                onDiff={() => onDiff(t)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     );
-  }
+  };
+
+  const renderGroup = (g: GroupInfo) => {
+    const members = g.projects
+      .map((id) => projById.get(id))
+      .filter((p): p is ProjectInfo => Boolean(p));
+    const gStatus = rollup(
+      members.flatMap((p) =>
+        p.terminals.map((id) => termsById.get(id)?.agent_status),
+      ),
+    );
+    const isCollapsed = collapsed.has(g.group_id);
+    const label = g.label ?? "Group";
+    return (
+      <div key={g.group_id} className="side-group">
+        <div className="side-group-head">
+          {renamingGroup === g.group_id ? (
+            <RenameInput
+              initial={g.label ?? ""}
+              onCommit={(l) => {
+                if (l) onRenameGroup(g.group_id, l);
+                setRenamingGroup(null);
+              }}
+              onCancel={() => setRenamingGroup(null)}
+            />
+          ) : (
+            <button
+              type="button"
+              className="side-group-label"
+              onClick={() => toggleGroup(g.group_id)}
+              onDoubleClick={() => setRenamingGroup(g.group_id)}
+              title={`${g.projects.length} project(s) — double-click to rename`}
+            >
+              <HugeiconsIcon
+                icon={isCollapsed ? ArrowRight01Icon : ArrowDown01Icon}
+                size={11}
+                strokeWidth={2}
+                className="side-caret"
+              />
+              <HugeiconsIcon
+                icon={GroupItemsIcon}
+                size={12}
+                strokeWidth={1.5}
+                className="side-ico"
+              />
+              <span className={`side-group-name ${statusClass(gStatus)}`}>
+                {label}
+              </span>
+              <span className="side-tree-count">{members.length}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="side-close"
+            title="group options"
+            onClick={(e) => {
+              e.stopPropagation();
+              const r = e.currentTarget.getBoundingClientRect();
+              setMenu({
+                kind: "group",
+                key: g.group_id,
+                x: r.left,
+                y: r.bottom + 4,
+              });
+            }}
+          >
+            <HugeiconsIcon
+              icon={MoreHorizontalIcon}
+              size={12}
+              strokeWidth={1.5}
+            />
+          </button>
+        </div>
+        {!isCollapsed && (
+          <div className="side-group-children">
+            {members.map((p) => renderProject(p, projects.indexOf(p)))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const rows: React.ReactNode[] = [];
+  for (const g of groups) rows.push(renderGroup(g));
+  for (const p of ungrouped) rows.push(renderProject(p, projects.indexOf(p)));
+
+  const onResizeDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideRef.current?.getBoundingClientRect().width ?? width;
+    const clamp = (v: number) => Math.min(SIDE_MAX, Math.max(SIDE_MIN, v));
+    const onMove = (ev: MouseEvent) =>
+      setWidth(clamp(startW + ev.clientX - startX));
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const w = Math.round(clamp(startW + ev.clientX - startX));
+      localStorage.setItem(SIDE_KEY, String(w));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const resetWidth = () => {
+    setWidth(SIDE_DEFAULT);
+    localStorage.setItem(SIDE_KEY, String(SIDE_DEFAULT));
+  };
+
+  useEffect(() => {
+    const onReset = () => {
+      setWidth(SIDE_DEFAULT);
+      localStorage.setItem(SIDE_KEY, String(SIDE_DEFAULT));
+    };
+    window.addEventListener(SIDEBAR_RESET_EVENT, onReset);
+    return () => window.removeEventListener(SIDEBAR_RESET_EVENT, onReset);
+  }, []);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu]);
+
+  const removeProject = async () => {
+    const m = menu;
+    setMenu(null);
+    if (!m || m.kind !== "project") return;
+    const p = projects.find((x) => x.project_id === m.key);
+    if (!p) return;
+    const name = p.label ?? basename(p.repo_root) ?? p.project_id;
+    const ok = await ask(
+      `Close project “${name}” and its ${p.terminals.length} terminal(s)?`,
+      {
+        title: "Remove Project",
+        kind: "warning",
+        okLabel: "Remove",
+        cancelLabel: "Cancel",
+      },
+    ).catch(() => false);
+    if (ok) onCloseProject(p.project_id);
+  };
+
+  const removeGroup = async () => {
+    const m = menu;
+    setMenu(null);
+    if (!m || m.kind !== "group") return;
+    const g = groups.find((x) => x.group_id === m.key);
+    if (!g) return;
+    const name = g.label ?? "Group";
+    const ok = await ask(
+      `Remove group “${name}”? Its ${g.projects.length} project(s) become ungrouped — nothing is closed.`,
+      {
+        title: "Remove Group",
+        kind: "warning",
+        okLabel: "Remove",
+        cancelLabel: "Cancel",
+      },
+    ).catch(() => false);
+    if (ok) onRemoveGroup(g.group_id);
+  };
+
+  const menuProject =
+    menu?.kind === "project"
+      ? projects.find((x) => x.project_id === menu.key)
+      : undefined;
+  const menuGroup =
+    menu?.kind === "group"
+      ? groups.find((x) => x.group_id === menu.key)
+      : undefined;
 
   return (
-    <div className="sidebar">
+    <div ref={sideRef} className="sidebar" style={{ width }}>
       <div className="side-head">
         <span className="side-head-label">Projects</span>
         <button
           type="button"
           className="side-head-btn"
-          title="import project"
-          onClick={onNewWorkspace}
+          title="new group"
+          onClick={async () => {
+            const id = await onNewGroup();
+            if (id) setRenamingGroup(id);
+          }}
+        >
+          <HugeiconsIcon icon={FolderAddIcon} size={13} strokeWidth={1.5} />
+        </button>
+        <button
+          type="button"
+          className="side-head-btn"
+          title="import project (⇧⌘N)"
+          onClick={onNewProject}
         >
           <HugeiconsIcon icon={PlusIcon} size={13} strokeWidth={1.5} />
         </button>
       </div>
       <div className="side-scroll">{rows}</div>
-      <div className="side-footer">
-        <button
-          type="button"
-          className="side-foot-btn"
-          title="import project"
-          onClick={onNewWorkspace}
-        >
-          <HugeiconsIcon icon={FolderImportIcon} size={14} strokeWidth={1.5} />
-        </button>
-      </div>
+      <div
+        className="divider x side-resize"
+        onMouseDown={onResizeDown}
+        onDoubleClick={resetWidth}
+        title="drag to resize · double-click to reset"
+      />
+      {menu && (
+        <div className="proj-menu-overlay" onMouseDown={() => setMenu(null)}>
+          <div
+            className="proj-menu"
+            style={{
+              left: Math.min(menu.x, window.innerWidth - 190),
+              top: menu.y,
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            {menu.kind === "project" && menuProject && (
+              <>
+                <div className="proj-menu-label">Move to group</div>
+                <button
+                  type="button"
+                  className="proj-menu-item"
+                  onClick={() => {
+                    if (menuProject.group_id) {
+                      onAssignProject(menuProject.project_id, null);
+                    }
+                    setMenu(null);
+                  }}
+                >
+                  <span className="proj-menu-check">
+                    {menuProject.group_id ? "" : "✓"}
+                  </span>
+                  No group
+                </button>
+                {groups.map((g) => (
+                  <button
+                    key={g.group_id}
+                    type="button"
+                    className="proj-menu-item"
+                    onClick={() => {
+                      if (menuProject.group_id !== g.group_id) {
+                        onAssignProject(menuProject.project_id, g.group_id);
+                      }
+                      setMenu(null);
+                    }}
+                  >
+                    <span className="proj-menu-check">
+                      {menuProject.group_id === g.group_id ? "✓" : ""}
+                    </span>
+                    {g.label ?? "Group"}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="proj-menu-item"
+                  onClick={async () => {
+                    const id = await onNewGroup();
+                    if (id) {
+                      onAssignProject(menuProject.project_id, id);
+                      setRenamingGroup(id);
+                    }
+                    setMenu(null);
+                  }}
+                >
+                  <span className="proj-menu-check" />
+                  New group…
+                </button>
+                <div className="proj-menu-sep" />
+                <button
+                  type="button"
+                  className="proj-menu-item danger"
+                  onClick={removeProject}
+                >
+                  <HugeiconsIcon
+                    icon={Delete02Icon}
+                    size={13}
+                    strokeWidth={1.5}
+                  />
+                  Remove Project
+                </button>
+              </>
+            )}
+            {menu.kind === "group" && menuGroup && (
+              <>
+                <button
+                  type="button"
+                  className="proj-menu-item"
+                  onClick={() => {
+                    setRenamingGroup(menuGroup.group_id);
+                    setMenu(null);
+                  }}
+                >
+                  <HugeiconsIcon
+                    icon={MoreHorizontalIcon}
+                    size={13}
+                    strokeWidth={1.5}
+                  />
+                  Rename Group
+                </button>
+                <div className="proj-menu-sep" />
+                <button
+                  type="button"
+                  className="proj-menu-item danger"
+                  onClick={removeGroup}
+                >
+                  <HugeiconsIcon
+                    icon={Delete02Icon}
+                    size={13}
+                    strokeWidth={1.5}
+                  />
+                  Remove Group
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

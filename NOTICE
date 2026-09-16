@@ -1,6 +1,6 @@
-staylazy bundles the herdr binary (https://github.com/safishamsi/herdr),
+lazed bundles the herdr binary (https://github.com/safishamsi/herdr),
 which is licensed under the Apache License, Version 2.0.
 
-herdr is distributed with this application as a runtime component; staylazy
+herdr is distributed with this application as a runtime component; lazed
 communicates with it over its socket API and CLI. See the herdr repository
 for its full license text and copyright notices.

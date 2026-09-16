@@ -3,26 +3,12 @@ use std::process::Command;
 use serde_json::{json, Value};
 
 fn git(dir: &str, args: &[&str]) -> Result<String, String> {
-    let out = if let Some(target) = crate::herdr::remote_target() {
-        // remote attach: worktree paths live on the remote host — never feed
-        // them to local git (a same-named local path would diff/merge the
-        // wrong repository)
-        let remote_cmd = ["git", "-C"]
-            .into_iter()
-            .map(str::to_string)
-            .chain(std::iter::once(crate::herdr::shell_quote(dir)))
-            .chain(args.iter().map(|a| crate::herdr::shell_quote(a)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        crate::herdr::ssh_shell(&target, &remote_cmd)?
-    } else {
-        Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .output()
-            .map_err(|e| format!("failed to run git {:?}: {e}", args))?
-    };
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run git {:?}: {e}", args))?;
     if !out.status.success() {
         return Err(format!(
             "git {:?} failed: {}",
@@ -103,18 +89,16 @@ pub fn worktree_diff(checkout: &str, base: Option<&str>) -> Result<Value, String
 /// Merge a worktree branch into the checkout at `repo` (no-ff so the result
 /// is attributable). Conflict surfaces as an error string for the UI.
 pub fn worktree_merge(repo: &str, branch: &str) -> Result<Value, String> {
-    match git(repo, &["merge", "--no-ff", "-m", &format!("staylazy: merge {branch}"), branch]) {
+    match git(repo, &["merge", "--no-ff", "-m", &format!("lazed: merge {branch}"), branch]) {
         Ok(out) => Ok(json!({"ok": true, "output": out})),
         Err(e) => Ok(json!({"ok": false, "output": e})),
     }
 }
 
 /// Resolve a directory's repo identity for project grouping/import dedupe.
-/// `repo_key` = the shared git dir — matches `workspace.worktree.repo_key`
-/// that herdr reports (for a linked worktree it resolves to the main repo's
-/// .git, so importing a worktree path maps to the same project). `repo_root`
-/// = the main checkout root. Ok(None) for non-repo paths; remote-aware
-/// through `git()` — an attached remote's paths resolve on that host.
+/// `repo_key` = the shared git dir (for a linked worktree it resolves to the
+/// main repo's .git, so importing a worktree path maps to the same project).
+/// `repo_root` = the main checkout root. Ok(None) for non-repo paths.
 pub fn resolve_repo(dir: &str) -> Result<Option<Value>, String> {
     let common = match git_ok(
         dir,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { type WorkspaceInfo, herdr } from "../shared/herdr";
+import { lazed } from "../shared/lazed";
 
 interface DiffLine {
   kind: "ctx" | "add" | "del" | "hunk" | "meta";
@@ -57,17 +57,22 @@ export function parseDiff(diff: string): DiffFile[] {
 }
 
 export function DiffView({
-  workspace,
-  agentPaneId,
+  checkout,
+  repoRoot,
+  label,
+  termId,
+  agentTermId,
   onClose,
   onJump,
 }: {
-  workspace: WorkspaceInfo;
-  agentPaneId?: string;
+  checkout: string;
+  repoRoot?: string;
+  label?: string;
+  termId: string;
+  agentTermId?: string;
   onClose: () => void;
   onJump: () => void;
 }) {
-  const wt = workspace.worktree;
   const [data, setData] = useState<{
     branch: string;
     base?: string;
@@ -91,13 +96,12 @@ export function DiffView({
   const [removeErr, setRemoveErr] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    if (!wt) return;
     setError(null);
-    herdr
-      .worktreeDiff(wt.checkout_path)
+    lazed
+      .worktreeDiff(checkout)
       .then(setData)
       .catch((e) => setError(String(e)));
-  }, [wt]);
+  }, [checkout]);
 
   useEffect(() => {
     load();
@@ -114,7 +118,7 @@ export function DiffView({
   };
 
   const sendReview = () => {
-    if (!agentPaneId || comments.length === 0 || !data) return;
+    if (!agentTermId || comments.length === 0 || !data) return;
     const body = [
       `Review comments on branch ${data.branch}:`,
       "",
@@ -122,14 +126,14 @@ export function DiffView({
       "",
       "Please address these and update the branch.",
     ].join("\n");
-    herdr.agentPrompt(agentPaneId, body).catch((e) => setError(String(e)));
+    lazed.agentPrompt(agentTermId, body).catch((e) => setError(String(e)));
     setComments([]);
   };
 
   const doMerge = () => {
-    if (!wt?.repo_root || !data) return;
-    herdr
-      .worktreeMerge(wt.repo_root, data.branch)
+    if (!repoRoot || !data) return;
+    lazed
+      .worktreeMerge(repoRoot, data.branch)
       .then(setMergeRes)
       .catch((e) => setMergeRes({ ok: false, output: String(e) }));
     setConfirmMerge(false);
@@ -137,8 +141,8 @@ export function DiffView({
 
   const doRemove = (force: boolean) => {
     setConfirmRemove(false);
-    herdr
-      .worktreeRemove(workspace.workspace_id, force)
+    lazed
+      .worktreeRemove(termId, force)
       .then(() => onClose())
       .catch((e) => setRemoveErr(String(e)));
   };
@@ -149,35 +153,33 @@ export function DiffView({
     <div className="diff-panel">
       <div className="diff-head">
         <span className="diff-title">
-          ⑂ {data?.branch ?? workspace.label}
+          ⑂ {data?.branch ?? label ?? checkout}
           {data?.base ? ` ← ${data.base}` : ""}
         </span>
         <button type="button" onClick={load} title="refresh diff">
           ↻
         </button>
-        <button type="button" onClick={onJump} title="jump to pane">
-          ⇢ pane
+        <button type="button" onClick={onJump} title="jump to terminal">
+          ⇢ term
         </button>
-        {wt?.repo_root && data?.branch && (
+        {repoRoot && data?.branch && (
           <button
             type="button"
             className="diff-merge"
             onClick={() => setConfirmMerge(true)}
-            title={`merge ${data.branch} into ${wt.repo_root}`}
+            title={`merge ${data.branch} into ${repoRoot}`}
           >
             merge
           </button>
         )}
-        {wt && (
-          <button
-            type="button"
-            className="diff-merge"
-            onClick={() => setConfirmRemove(true)}
-            title="remove this worktree and close its workspace"
-          >
-            remove
-          </button>
-        )}
+        <button
+          type="button"
+          className="diff-merge"
+          onClick={() => setConfirmRemove(true)}
+          title="remove this worktree and its terminal"
+        >
+          remove
+        </button>
         <button type="button" className="side-close" onClick={onClose}>
           ✕
         </button>
@@ -268,7 +270,7 @@ export function DiffView({
           <button
             type="button"
             className="fanout-go"
-            disabled={!agentPaneId}
+            disabled={!agentTermId}
             onClick={sendReview}
           >
             send {comments.length} comment{comments.length === 1 ? "" : "s"} to
@@ -278,7 +280,7 @@ export function DiffView({
       )}
       {confirmMerge && (
         <div className="diff-confirm">
-          merge <b>{data?.branch}</b> into {wt?.repo_root}?
+          merge <b>{data?.branch}</b> into {repoRoot}?
           <button type="button" onClick={doMerge}>
             yes, merge
           </button>
@@ -289,7 +291,7 @@ export function DiffView({
       )}
       {confirmRemove && (
         <div className="diff-confirm">
-          remove worktree <b>{wt?.checkout_path}</b> and close this workspace?
+          remove worktree <b>{checkout}</b> and its terminal?
           <button type="button" onClick={() => doRemove(false)}>
             yes, remove
           </button>

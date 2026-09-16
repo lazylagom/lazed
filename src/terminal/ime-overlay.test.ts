@@ -119,9 +119,27 @@ describe("IMEOverlay", () => {
       fireCompositionEvent(env.input, "compositionupdate", "한");
       fireCompositionEvent(env.input, "compositionend", "한");
 
-      vi.advanceTimersByTime(400);
+      // 완성 음절 커밋은 idle 플러시를 기다리지 않고 즉시 전송된다
       expect(env.writeToPty).toHaveBeenCalledWith("한");
+      vi.advanceTimersByTime(400);
+      expect(env.writeToPty).toHaveBeenCalledTimes(1);
       expect(env.input.value).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("정상 상태의 연속 음절 커밋은 각각 즉시 전송된다", () => {
+    vi.useFakeTimers();
+    try {
+      fireCompositionEvent(env.input, "compositionstart");
+      fireCompositionEvent(env.input, "compositionend", "한");
+      fireCompositionEvent(env.input, "compositionstart");
+      fireCompositionEvent(env.input, "compositionend", "글");
+
+      expect(env.writeToPty).toHaveBeenCalledTimes(2);
+      expect(env.writeToPty).toHaveBeenNthCalledWith(1, "한");
+      expect(env.writeToPty).toHaveBeenNthCalledWith(2, "글");
     } finally {
       vi.useRealTimers();
     }
@@ -213,14 +231,17 @@ describe("IMEOverlay", () => {
         data: "한",
       });
       fireInput(env.input, "ㄱ", { inputType: "insertText", data: "ㄱ" });
+      // 다음 음절이 시작되면 완료된 앞 음절은 즉시 전송된다
+      expect(env.writeToPty).toHaveBeenCalledWith("한");
       fireInput(env.input, "글", {
         inputType: "insertReplacementText",
         data: "글",
       });
 
       vi.advanceTimersByTime(400);
-      expect(env.writeToPty).toHaveBeenCalledTimes(1);
-      expect(env.writeToPty).toHaveBeenCalledWith("한글");
+      expect(env.writeToPty).toHaveBeenCalledTimes(2);
+      expect(env.writeToPty).toHaveBeenNthCalledWith(1, "한");
+      expect(env.writeToPty).toHaveBeenNthCalledWith(2, "글");
     } finally {
       vi.useRealTimers();
     }
@@ -281,9 +302,12 @@ describe("IMEOverlay", () => {
         isComposing: true,
       });
 
+      // "상"이 시작되며 "이"는 완료 — 즉시 전송되고 "상"은 타이머로
+      expect(env.writeToPty).toHaveBeenCalledWith("이");
       vi.advanceTimersByTime(400);
-      expect(env.writeToPty).toHaveBeenCalledTimes(1);
-      expect(env.writeToPty).toHaveBeenCalledWith("이상");
+      expect(env.writeToPty).toHaveBeenCalledTimes(2);
+      expect(env.writeToPty).toHaveBeenNthCalledWith(1, "이");
+      expect(env.writeToPty).toHaveBeenNthCalledWith(2, "상");
     } finally {
       vi.useRealTimers();
     }
@@ -326,9 +350,12 @@ describe("IMEOverlay", () => {
         isComposing: true,
       });
 
+      // "는"이 시작되며 "나"는 완료 — 즉시 전송
+      expect(env.writeToPty).toHaveBeenCalledWith("나");
       vi.advanceTimersByTime(400);
-      expect(env.writeToPty).toHaveBeenCalledTimes(1);
-      expect(env.writeToPty).toHaveBeenCalledWith("나는");
+      expect(env.writeToPty).toHaveBeenCalledTimes(2);
+      expect(env.writeToPty).toHaveBeenNthCalledWith(1, "나");
+      expect(env.writeToPty).toHaveBeenNthCalledWith(2, "는");
     } finally {
       vi.useRealTimers();
     }
@@ -346,9 +373,12 @@ describe("IMEOverlay", () => {
         data: "그",
       });
 
+      // 새 음절 "그"가 시작되며 "한"은 완료 — 즉시 전송
+      expect(env.writeToPty).toHaveBeenCalledWith("한");
       vi.advanceTimersByTime(400);
-      expect(env.writeToPty).toHaveBeenCalledTimes(1);
-      expect(env.writeToPty).toHaveBeenCalledWith("한그");
+      expect(env.writeToPty).toHaveBeenCalledTimes(2);
+      expect(env.writeToPty).toHaveBeenNthCalledWith(1, "한");
+      expect(env.writeToPty).toHaveBeenNthCalledWith(2, "그");
     } finally {
       vi.useRealTimers();
     }
@@ -371,9 +401,11 @@ describe("IMEOverlay", () => {
       fireKeydown(env.input, { key: "ㅇ", code: "KeyD" });
       fireInput(env.input, "ㅇ", { inputType: "insertText" });
 
+      // "안"은 다음 음절이 시작되며 즉시 전송, "녕"은 idle 플러시
       vi.advanceTimersByTime(400);
-      expect(env.writeToPty).toHaveBeenCalledTimes(1);
-      expect(env.writeToPty).toHaveBeenCalledWith("안녕");
+      expect(env.writeToPty).toHaveBeenCalledTimes(2);
+      expect(env.writeToPty).toHaveBeenNthCalledWith(1, "안");
+      expect(env.writeToPty).toHaveBeenNthCalledWith(2, "녕");
     } finally {
       vi.useRealTimers();
     }

@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 
 export type PromptTarget =
-  | { kind: "focused"; paneId: string }
+  | { kind: "focused"; termId: string }
   | { kind: "agents" }
   | { kind: "all" };
 
 export function PromptBar({
-  focusedPane,
+  focusedTerm,
   agentCount,
-  paneCount,
+  termCount,
   onSubmit,
   onClose,
 }: {
-  focusedPane: string | null;
+  focusedTerm: string | null;
   agentCount: number;
-  paneCount: number;
+  termCount: number;
   onSubmit: (text: string, target: PromptTarget) => void;
   onClose: () => void;
 }) {
@@ -29,8 +29,8 @@ export function PromptBar({
   const submit = () => {
     const t = text.trim();
     if (!t) return;
-    if (target === "focused" && focusedPane) {
-      onSubmit(t, { kind: "focused", paneId: focusedPane });
+    if (target === "focused" && focusedTerm) {
+      onSubmit(t, { kind: "focused", termId: focusedTerm });
     } else if (target === "agents") {
       onSubmit(t, { kind: "agents" });
     } else {
@@ -62,7 +62,7 @@ export function PromptBar({
             className={target === "focused" ? "sel" : ""}
             onClick={() => setTarget("focused")}
           >
-            focused pane {focusedPane ? `(${focusedPane})` : "(none)"}
+            focused term {focusedTerm ? `(${focusedTerm})` : "(none)"}
           </button>
           <button
             type="button"
@@ -76,7 +76,7 @@ export function PromptBar({
             className={target === "all" ? "sel" : ""}
             onClick={() => setTarget("all")}
           >
-            all panes ({paneCount})
+            all terms ({termCount})
           </button>
         </div>
       </div>

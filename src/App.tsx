@@ -1,62 +1,50 @@
-import {
-  AppWindowIcon,
-  BotIcon,
-  ColumnInsertIcon,
-  CommandLineIcon,
-  FolderImportIcon,
-  InformationCircleIcon,
-  InsertRowDownIcon,
-  ServerIcon,
-  WorkflowIcon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   requestPermission,
-  sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PaneGrid } from "./components/PaneGrid";
-import { About } from "./features/About";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { TermGrid } from "./components/TermGrid";
 import { AgentPicker } from "./features/AgentPicker";
+import { AutomationEditor } from "./features/AutomationEditor";
+import { Automations } from "./features/Automations";
 import { DiffView } from "./features/DiffView";
 import { Fanout, type FanoutRequest } from "./features/Fanout";
 import { ImportProject } from "./features/ImportProject";
 import { PromptBar, type PromptTarget } from "./features/PromptBar";
-import { RemoteBar } from "./features/RemoteBar";
+import { Session } from "./features/Session";
+import { Settings } from "./features/Settings";
+import {
+  type Automation,
+  type AutomationInput,
+  automations,
+} from "./shared/automations";
 import {
   type AgentStatus,
-  type HerdrEvent,
-  type PaneInfo,
-  type RepoRef,
+  type LazedEvent,
   type Snapshot,
-  type WorkspaceInfo,
-  herdr,
+  type TerminalInfo,
+  lazed,
   subscribeEvents,
-} from "./shared/herdr";
-import { InboxButton, InboxPanel } from "./widgets/Inbox";
+} from "./shared/lazed";
+import { notificationsEnabled } from "./shared/settings";
+import { InboxPanel } from "./widgets/Inbox";
+import { Rail, type RailView } from "./widgets/Rail";
 import { Sidebar } from "./widgets/Sidebar";
 
-// herdr event envelopes carry the event name in `event` with underscore naming
+// daemon event names that mean "the model changed — refetch the snapshot"
 const REFRESH_EVENTS = new Set([
-  "workspace_created",
-  "workspace_updated",
-  "workspace_renamed",
-  "workspace_closed",
-  "workspace_focused",
-  "tab_created",
-  "tab_closed",
-  "tab_focused",
-  "tab_renamed",
-  "tab_moved",
-  "pane_created",
-  "pane_closed",
-  "pane_updated",
-  "pane_exited",
-  "pane_agent_detected",
-  "layout_updated",
-  "events_reconnect",
+  "project.created",
+  "project.closed",
+  "project.focused",
+  "group.created",
+  "group.updated",
+  "group.removed",
+  "terminal.created",
+  "terminal.closed",
+  "events.reconnect",
 ]);
 
 function worst(statuses: (AgentStatus | undefined)[]): AgentStatus {
@@ -66,79 +54,95 @@ function worst(statuses: (AgentStatus | undefined)[]): AgentStatus {
   return "unknown";
 }
 
-function remoteLabel(r: { target?: string; session?: string }): string | null {
-  if (!r.target) return null;
-  return r.session ? `${r.target}·${r.session}` : r.target;
+interface NotifyOpts {
+  title: string;
+  body: string;
+  sound?: string;
+  termId: string;
+  projectId?: string;
+  /** don't alert when the user is already looking at this terminal */
+  skipIfFocused?: boolean;
 }
 
-async function notify(title: string, body: string) {
+/** macOS notification for an agent transition — the backend sends it via
+ * notify-rust so a body click can round-trip as a `notification.jump` event
+ * (the notification plugin's onAction is mobile-only). */
+async function notifyAgent(o: NotifyOpts) {
+  if (!notificationsEnabled()) return;
   try {
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";
-    if (granted) sendNotification({ title, body });
+    if (!granted) return;
+    if (o.skipIfFocused && (await getCurrentWindow().isFocused())) return;
+    await invoke("notify_agent", {
+      termId: o.termId,
+      projectId: o.projectId,
+      title: o.title,
+      body: o.body,
+      sound: o.sound,
+    });
   } catch {
     // notifications unavailable — ignore
   }
 }
 
-/** Root-pane cwd for a workspace — the directory it was created in. */
-function rootCwd(snap: Snapshot | null, wsId: string): string | undefined {
-  const p = snap?.panes.find((p) => p.workspace_id === wsId);
-  return p?.cwd ?? p?.foreground_cwd;
+function basename(p?: string) {
+  if (!p) return "";
+  const parts = p.replace(/\/$/, "").split("/");
+  return parts[parts.length - 1] || p;
 }
 
-/** Workspaces belonging to a repo_key — via herdr's worktree meta when
- * present, else by resolving each workspace's root-pane cwd (fresh imports
- * have no worktree stamp until the first worktree op). */
-async function projectMembers(
-  snap: Snapshot | null,
-  repoKey: string,
-): Promise<WorkspaceInfo[]> {
-  const out: WorkspaceInfo[] = [];
-  await Promise.all(
-    (snap?.workspaces ?? []).map(async (w) => {
-      let key = w.worktree?.repo_key;
-      if (!key) {
-        const cwd = rootCwd(snap, w.workspace_id);
-        if (!cwd) return;
-        const r = await herdr.resolveRepo(cwd).catch(() => null);
-        key = r?.repo_key;
-      }
-      if (key === repoKey) out.push(w);
-    }),
-  );
-  return out;
-}
-
-/** First prompt for a project's control-tower agent — self-bootstraps via
- * `herdr --skill`, then coordinates work in linked worktrees. */
-function towerPreamble(repoRoot: string): string {
+/** First prompt for a project's orchestrator agent — points at the lazed
+ * skill and describes the fan-out loop over worktree terminals. */
+function orchestratorPreamble(projectId: string, repoRoot: string): string {
   return [
-    "You are the control tower for this project. First run `herdr --skill` and read it — you are inside a herdr pane and orchestrate other panes through the herdr CLI.",
-    `Repo root: ${repoRoot}. Do all implementation work in worktrees — use this pane only to coordinate (status, merge, report).`,
-    "For each task: `herdr worktree create --cwd <repo> --branch <slug>` → `herdr agent start claude --pane <root_pane>` → `herdr agent prompt <pane> <task>` → `herdr agent wait <pane> --until done` → verify via `herdr pane read <pane>` and report branch + commit.",
-    "If a spawned agent sits on a workspace trust dialog, approve it with `herdr pane send-keys <pane> Down` then `herdr pane send-keys <pane> Enter`.",
+    "You orchestrate this project. The `lazed` skill describes how to orchestrate other terminals — read it if it is not already loaded.",
+    `Repo root: ${repoRoot}. Project id: ${projectId}. Your own terminal id is in $LAZED_TERM.`,
+    "Do all implementation work in worktree terminals — use this terminal only to coordinate (status, merge, report).",
+    `For each task: \`lazed api worktree.create '{"project_id":"${projectId}","branch":"<slug>"}'\` → \`lazed api agent.start '{"term_id":"<t>","kind":"claude"}'\` → \`lazed api agent.prompt '{"term_id":"<t>","text":"<task>"}'\` → \`lazed api agent.wait '{"term_id":"<t>","until":["idle","blocked"]}'\` → verify via \`lazed api terminal.read '{"term_id":"<t>","lines":50}'\` and report branch + commits.`,
+    "If a spawned agent sits on a trust/permission dialog, `terminal.read` it and send the exact key it asks for via `terminal.input`.",
   ].join("\n");
 }
 
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
-  const [focusedPane, setFocusedPane] = useState<string | null>(null);
+  const [focusedTermId, setFocusedTermId] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
   const [showFanout, setShowFanout] = useState(false);
-  const [diffWsId, setDiffWsId] = useState<string | null>(null);
+  const [diffTerm, setDiffTerm] = useState<TerminalInfo | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
-  const [showRemote, setShowRemote] = useState(false);
-  const [showAbout, setShowAbout] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showSession, setShowSession] = useState(false);
+  const [showAutos, setShowAutos] = useState(false);
   const [showImport, setShowImport] = useState(false);
-  const [remoteTarget, setRemoteTarget] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // left-rail space switch — projects is currently the only panel view;
+  // automations and session are full-screen overlays
+  const [railView, setRailView] = useState<RailView>("projects");
+  const [autos, setAutos] = useState<Automation[]>([]);
+  const [autoEditor, setAutoEditor] = useState<{
+    auto?: Automation;
+  } | null>(null);
   const refreshTimer = useRef<number | null>(null);
   const noticeTimer = useRef<number | null>(null);
+  // event callbacks run outside render — mirror the bits they need
+  const snapRef = useRef<Snapshot | null>(null);
+  const focusRef = useRef<string | null>(null);
+
+  const selectRail = useCallback((v: RailView) => {
+    setRailView(v);
+    localStorage.setItem("lazed-rail", v);
+  }, []);
+
+  const loadAutos = useCallback(() => {
+    automations
+      .list()
+      .then(setAutos)
+      .catch(() => {});
+  }, []);
 
   const flash = useCallback((msg: string) => {
     setNotice(msg);
@@ -147,7 +151,7 @@ export function App() {
   }, []);
 
   const refresh = useCallback(() => {
-    herdr
+    lazed
       .snapshot()
       .then(setSnap)
       .catch((e) => setError(String(e)));
@@ -161,109 +165,71 @@ export function App() {
     }, 40);
   }, [refresh]);
 
-  // Project identity: herdr only stamps `worktree.repo_key` on workspaces
-  // after a worktree op, so a freshly imported repo workspace reports none.
-  // We derive the same key ourselves by resolving each workspace's root-pane
-  // cwd (cached by path — a workspace's root cwd doesn't change).
-  const [repoCache, setRepoCache] = useState<Map<string, RepoRef | null>>(
-    new Map(),
-  );
   useEffect(() => {
-    if (!snap) return;
-    const missing = new Set<string>();
-    for (const w of snap.workspaces) {
-      if (w.worktree?.repo_key) continue;
-      const cwd = rootCwd(snap, w.workspace_id);
-      if (cwd && !repoCache.has(cwd)) missing.add(cwd);
-    }
-    if (!missing.size) return;
-    let alive = true;
-    Promise.all(
-      [...missing].map(async (cwd) => {
-        const r = await herdr.resolveRepo(cwd).catch(() => null);
-        return [cwd, r] as const;
-      }),
-    ).then((entries) => {
-      if (!alive) return;
-      setRepoCache((prev) => {
-        const next = new Map(prev);
-        for (const [cwd, r] of entries) next.set(cwd, r);
-        return next;
-      });
-    });
-    return () => {
-      alive = false;
-    };
-  }, [snap, repoCache]);
-
-  const repoRefs = useMemo(() => {
-    const m = new Map<string, RepoRef>();
-    for (const w of snap?.workspaces ?? []) {
-      const wt = w.worktree;
-      if (wt?.repo_key) {
-        m.set(w.workspace_id, {
-          repo_key: wt.repo_key,
-          repo_root: wt.repo_root,
-          name: wt.repo_name,
-        });
-        continue;
-      }
-      const cwd = rootCwd(snap, w.workspace_id);
-      const r = cwd ? repoCache.get(cwd) : undefined;
-      if (r) m.set(w.workspace_id, r);
-    }
-    return m;
-  }, [snap, repoCache]);
-
-  useEffect(() => {
-    herdr
+    lazed
       .bootstrap()
       .then((res) => {
-        if (res.herdr_warning) setWarning(res.herdr_warning);
-        refresh();
+        if (res.snapshot) setSnap(res.snapshot);
+        else refresh();
       })
       .catch((e) => setError(String(e)));
-    subscribeEvents((ev: HerdrEvent) => {
-      // herdr mixes namings: "pane_created" vs "pane.agent_status_changed"
-      const name = (ev.event ?? (ev.data?.type as string) ?? "").replace(
-        /\./g,
-        "_",
-      );
+    loadAutos();
+    subscribeEvents((ev: LazedEvent) => {
+      const name = ev.event ?? ev.type ?? "";
       if (!name) return;
-      if (name === "pane_agent_status_changed") {
+      if (name === "automation.updated") {
+        loadAutos();
+        return;
+      }
+      if (name === "agent.status") {
         const d = ev.data ?? {};
-        const paneId = d.pane_id as string | undefined;
+        const termId = d.term_id as string | undefined;
         const status = d.agent_status as AgentStatus | undefined;
-        if (paneId && status) {
-          // a pane that goes back to work re-earns its next inbox entry
+        if (termId && status) {
+          // a terminal that goes back to work re-earns its next inbox entry
           if (status === "working" || status === "idle") {
             setDismissed((prev) => {
-              if (!prev.has(paneId)) return prev;
+              if (!prev.has(termId)) return prev;
               const next = new Set(prev);
-              next.delete(paneId);
+              next.delete(termId);
               return next;
             });
           }
           if (status === "blocked" || status === "done") {
-            const who =
-              (d.display_agent as string) ?? (d.agent as string) ?? paneId;
-            notify(`${who} is ${status}`, (d.title as string) ?? paneId);
+            const cur = snapRef.current;
+            const term = cur?.terminals.find((x) => x.term_id === termId);
+            const proj = cur?.projects.find((p) =>
+              p.terminals.includes(termId),
+            );
+            const who = (d.agent as string) ?? term?.agent_kind ?? termId;
+            const where = [
+              proj?.label ?? basename(proj?.repo_root),
+              term?.label ?? (term?.cwd ? basename(term.cwd) : undefined),
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            notifyAgent({
+              title:
+                status === "done" ? `${who} finished` : `${who} needs input`,
+              body: where || termId,
+              sound: status === "done" ? "Glass" : "Ping",
+              termId,
+              projectId: proj?.project_id,
+              skipIfFocused: focusRef.current === termId,
+            });
           }
           setSnap((prev) =>
             prev
               ? {
                   ...prev,
-                  panes: prev.panes.map((p) =>
-                    p.pane_id === paneId
+                  terminals: prev.terminals.map((t) =>
+                    t.term_id === termId
                       ? {
-                          ...p,
+                          ...t,
                           agent_status: status,
-                          agent: (d.agent as string) ?? p.agent,
-                          display_agent:
-                            (d.display_agent as string) ?? p.display_agent,
-                          title: (d.title as string) ?? p.title,
+                          agent_kind: (d.agent as string) ?? t.agent_kind,
                         }
-                      : p,
+                      : t,
                   ),
                 }
               : prev,
@@ -273,160 +239,169 @@ export function App() {
       }
       if (REFRESH_EVENTS.has(name)) scheduleRefresh();
     }).catch((e) => setError(String(e)));
-  }, [refresh, scheduleRefresh]);
+  }, [refresh, scheduleRefresh, loadAutos]);
 
-  const focusedWsId =
-    snap?.focused_workspace_id ?? snap?.workspaces?.[0]?.workspace_id;
-  const workspace = snap?.workspaces?.find(
-    (w) => w.workspace_id === focusedWsId,
-  );
-  const activeTabId = workspace?.active_tab_id ?? snap?.focused_tab_id;
-  const layout = snap?.layouts?.find((l) => l.tab_id === activeTabId);
-  const agentsByPane = new Map((snap?.agents ?? []).map((a) => [a.pane_id, a]));
-  const panesById = new Map(
-    (snap?.panes ?? []).map((p) => {
-      const a = agentsByPane.get(p.pane_id);
-      return [
-        p.pane_id,
-        a
-          ? {
-              ...p,
-              agent: a.agent,
-              display_agent: a.name ?? a.agent,
-              agent_status: a.agent_status ?? p.agent_status,
-              title: a.title ?? a.terminal_title ?? p.title,
-            }
-          : p,
-      ];
-    }),
-  );
-
-  const effectiveFocusedPane =
-    focusedPane && panesById.has(focusedPane)
-      ? focusedPane
-      : (layout?.focused_pane_id ?? layout?.panes[0]?.pane_id ?? null);
-
-  const focusWorkspace = useCallback((id: string) => {
-    herdr.workspaceFocus(id).catch((e) => setError(String(e)));
-  }, []);
-
-  const focusTab = useCallback((id: string) => {
-    herdr.tabFocus(id).catch(() => {});
-    setFocusedPane(null);
-  }, []);
-
-  const split = useCallback(
-    (direction: "right" | "down") => {
-      const target = effectiveFocusedPane;
-      if (!target) return;
-      herdr.splitPane(target, direction).catch((e) => setError(String(e)));
+  const saveAutomation = useCallback(
+    (input: AutomationInput) => {
+      automations
+        .save(input)
+        .then(() => {
+          setAutoEditor(null);
+          loadAutos();
+        })
+        .catch((e) => setError(String(e)));
     },
-    [effectiveFocusedPane],
+    [loadAutos],
   );
 
-  const closePane = useCallback((paneId: string) => {
-    setFocusedPane((cur) => (cur === paneId ? null : cur));
-    herdr.closePane(paneId).catch((e) => setError(String(e)));
+  const projects = snap?.projects ?? [];
+  const termsById = new Map((snap?.terminals ?? []).map((t) => [t.term_id, t]));
+
+  const focusedProjectId = snap?.focused_project_id ?? projects[0]?.project_id;
+  const focusedProject = projects.find(
+    (p) => p.project_id === focusedProjectId,
+  );
+  /** The focused project's terminals in display order — the root-checkout
+   * terminals first, then worktrees (project.terminals order). */
+  const projectTerms = (focusedProject?.terminals ?? [])
+    .map((id) => termsById.get(id))
+    .filter((t): t is TerminalInfo => Boolean(t));
+
+  const effectiveFocusedTerm =
+    focusedTermId && termsById.has(focusedTermId)
+      ? focusedTermId
+      : (projectTerms[0]?.term_id ?? null);
+
+  // keep the event-callback mirrors current
+  useEffect(() => {
+    snapRef.current = snap;
+  }, [snap]);
+  useEffect(() => {
+    focusRef.current = effectiveFocusedTerm;
+  }, [effectiveFocusedTerm]);
+
+  const focusProject = useCallback((id: string) => {
+    lazed.projectFocus(id).catch((e) => setError(String(e)));
+    setFocusedTermId(null);
   }, []);
 
-  const newTab = useCallback(() => {
-    if (!focusedWsId) return;
-    herdr
-      .tabCreate(focusedWsId)
-      .then((res) => {
-        const tabId =
-          (res as { result?: { tab?: { tab_id?: string } } })?.result?.tab
-            ?.tab_id ?? (res as { tab?: { tab_id?: string } })?.tab?.tab_id;
-        if (tabId) return herdr.tabFocus(tabId);
-      })
-      .catch((e) => setError(String(e)));
-  }, [focusedWsId]);
+  const jumpToTerm = useCallback((termId: string, projectId: string) => {
+    lazed.projectFocus(projectId).catch(() => {});
+    setFocusedTermId(termId);
+    setInboxOpen(false);
+  }, []);
 
-  const newWorkspace = useCallback(
+  // notification click → raise the window and jump to that terminal
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    listen<{ term_id?: string; project_id?: string }>(
+      "notification.jump",
+      (e) => {
+        const termId = e.payload.term_id;
+        if (!termId) return;
+        const projectId =
+          e.payload.project_id ??
+          snapRef.current?.projects.find((p) => p.terminals.includes(termId))
+            ?.project_id;
+        const win = getCurrentWindow();
+        win
+          .show()
+          .then(() => win.unminimize())
+          .then(() => win.setFocus())
+          .catch(() => {});
+        if (projectId) jumpToTerm(termId, projectId);
+        else setFocusedTermId(termId);
+      },
+    )
+      .then((unlisten) => {
+        off = unlisten;
+      })
+      .catch(() => {});
+    return () => off?.();
+  }, [jumpToTerm]);
+
+  const closeTerm = useCallback((t: TerminalInfo) => {
+    setFocusedTermId((cur) => (cur === t.term_id ? null : cur));
+    if (t.kind === "worktree") {
+      lazed.worktreeRemove(t.term_id, false).catch((e) => setError(String(e)));
+    } else {
+      lazed.termClose(t.term_id).catch((e) => setError(String(e)));
+    }
+  }, []);
+
+  const newTerminal = useCallback(() => {
+    if (!focusedProjectId) return;
+    lazed
+      .termCreate(focusedProjectId)
+      .then((t) => setFocusedTermId(t.term_id))
+      .catch((e) => setError(String(e)));
+  }, [focusedProjectId]);
+
+  const newProject = useCallback(
     async (cwd?: string, label?: string) => {
       setShowImport(false);
       try {
-        // one workspace per project: if this path resolves to a repo that
-        // already has a workspace in the session, just focus it
         if (cwd) {
-          const repo = await herdr.resolveRepo(cwd).catch(() => null);
+          // one project per repo: focus instead of duplicating
+          const repo = await lazed.resolveRepo(cwd).catch(() => null);
           if (repo?.repo_key) {
-            const live = await herdr.snapshot().catch(() => null);
-            const members = await projectMembers(live, repo.repo_key);
-            const existing =
-              members.find((w) => w.worktree?.is_linked_worktree === false) ??
-              members.find(
-                (w) =>
-                  repoRefs.get(w.workspace_id)?.repo_root ===
-                  rootCwd(live, w.workspace_id),
-              ) ??
-              members[0];
+            const live = await lazed.snapshot().catch(() => null);
+            const existing = live?.projects.find(
+              (p) => p.repo_key === repo.repo_key,
+            );
             if (existing) {
-              focusWorkspace(existing.workspace_id);
+              focusProject(existing.project_id);
               flash(
-                `already imported — focused ${existing.label ?? existing.workspace_id}`,
+                `already imported — focused ${existing.label ?? existing.project_id}`,
               );
               return;
             }
           }
         }
-        const res = await herdr.workspaceCreate(cwd, label);
-        const wsId =
-          (res as { result?: { workspace?: { workspace_id?: string } } })
-            ?.result?.workspace?.workspace_id ??
-          (res as { workspace?: { workspace_id?: string } })?.workspace
-            ?.workspace_id;
-        if (wsId) await herdr.workspaceFocus(wsId);
+        const res = await lazed.projectCreate(cwd ?? "", label);
+        const pid = res.project?.project_id;
+        if (pid) await lazed.projectFocus(pid);
+        const tid = res.terminal?.term_id;
+        if (tid) setFocusedTermId(tid);
       } catch (e) {
         setError(String(e));
       }
     },
-    [focusWorkspace, flash, repoRefs],
+    [focusProject, flash],
   );
 
-  const spawnTower = useCallback(
-    async (repoKey: string) => {
-      const live = await herdr.snapshot().catch(() => null);
-      const members = await projectMembers(live, repoKey);
-      const towerWs =
-        members.find((w) => w.worktree?.is_linked_worktree === false) ??
-        members.find(
-          (w) =>
-            repoRefs.get(w.workspace_id)?.repo_root ===
-            rootCwd(live, w.workspace_id),
-        ) ??
-        members[0];
-      if (!towerWs) return;
-      const pane = (live?.panes ?? []).find(
-        (p) => p.workspace_id === towerWs.workspace_id,
+  const spawnOrchestrator = useCallback(
+    async (projectId: string) => {
+      const live = await lazed.snapshot().catch(() => null);
+      const p = live?.projects.find((x) => x.project_id === projectId);
+      if (!p) return;
+      const terms = (live?.terminals ?? []).filter((t) =>
+        p.terminals.includes(t.term_id),
       );
-      if (!pane) {
-        setError("tower: workspace has no pane");
+      const root = terms.find((t) => t.kind !== "worktree") ?? terms[0];
+      if (!root) {
+        setError("orchestrator: project has no terminal");
         return;
       }
-      focusWorkspace(towerWs.workspace_id);
-      // agentStart errors when the pane already runs an agent — fine, the
-      // readiness poll below just re-arms the preamble on the live one
-      await herdr.agentStart(pane.pane_id, "claude", "tower").catch(() => {});
+      lazed.projectFocus(projectId).catch(() => {});
+      setFocusedTermId(root.term_id);
+      // agent_start errors when the terminal already runs an agent — fine,
+      // the readiness poll below just re-arms the preamble on the live one
+      await lazed.agentStart(root.term_id, "claude").catch(() => {});
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
-        const a = await herdr.agentGet(pane.pane_id).catch(() => null);
+        const a = await lazed.agentGet(root.term_id).catch(() => null);
         if (
-          a?.interactive_ready ||
           a?.agent_status === "idle" ||
           a?.agent_status === "working" ||
           a?.agent_status === "done"
         ) {
-          await herdr
+          await lazed
             .agentPrompt(
-              pane.pane_id,
-              towerPreamble(
-                towerWs.worktree?.repo_root ??
-                  repoRefs.get(towerWs.workspace_id)?.repo_root ??
-                  "",
-              ),
+              root.term_id,
+              orchestratorPreamble(projectId, p.repo_root),
             )
-            .then(() => flash("control tower started"))
+            .then(() => flash("orchestrator started"))
             .catch((e) => setError(String(e)));
           return;
         }
@@ -435,235 +410,229 @@ export function App() {
         await new Promise((r) => setTimeout(r, 600));
       }
       setError(
-        "tower: agent not ready — approve the dialog in the pane, then retry",
+        "orchestrator: agent not ready — approve the dialog in the terminal, then retry",
       );
     },
-    [focusWorkspace, flash, repoRefs],
-  );
-
-  const jumpToPane = useCallback(
-    (pane: PaneInfo) => {
-      if (pane.workspace_id && pane.workspace_id !== focusedWsId) {
-        herdr.workspaceFocus(pane.workspace_id).catch(() => {});
-      }
-      if (pane.tab_id && pane.tab_id !== activeTabId) {
-        herdr.tabFocus(pane.tab_id).catch(() => {});
-      }
-      setFocusedPane(pane.pane_id);
-      setInboxOpen(false);
-    },
-    [focusedWsId, activeTabId],
+    [flash],
   );
 
   const startAgent = useCallback(
     (kind: string) => {
-      const target = effectiveFocusedPane;
+      const target = effectiveFocusedTerm;
       setShowPicker(false);
       if (!target) return;
-      herdr.agentStart(target, kind).catch((e) => setError(String(e)));
+      lazed.agentStart(target, kind).catch((e) => setError(String(e)));
     },
-    [effectiveFocusedPane],
+    [effectiveFocusedTerm],
   );
 
   const submitPrompt = useCallback(
     (text: string, target: PromptTarget) => {
-      const wsPanes = [...panesById.values()].filter(
-        (p) => p.workspace_id === focusedWsId,
-      );
-      const agentPanes = wsPanes.filter((p) => p.agent);
-      const run = (p: PaneInfo) =>
-        (p.agent
-          ? herdr.agentPrompt(p.pane_id, text)
-          : herdr.paneSendText(p.pane_id, `${text}\n`)
+      const agentTerms = projectTerms.filter((t) => t.agent_kind);
+      const run = (t: TerminalInfo) =>
+        (t.agent_kind
+          ? lazed.agentPrompt(t.term_id, text)
+          : lazed.termSend(t.term_id, `${text}\n`)
         ).catch((e) => setError(String(e)));
       if (target.kind === "focused") {
-        const p = panesById.get(target.paneId);
-        if (p) run(p);
+        const t = termsById.get(target.termId);
+        if (t) run(t);
       } else if (target.kind === "agents") {
-        for (const p of agentPanes) run(p);
+        for (const t of agentTerms) run(t);
       } else {
-        for (const p of wsPanes) run(p);
+        for (const t of projectTerms) run(t);
       }
     },
-    [panesById, focusedWsId],
+    [projectTerms, termsById],
   );
 
-  const doFanout = useCallback(async (req: FanoutRequest) => {
-    setShowFanout(false);
-    if (!req.repo.trim()) {
-      setError("fan-out: repo path is required");
-      return;
-    }
-    for (const kind of req.kinds) {
-      const branch = `${req.prefix}-${kind}`;
-      try {
-        const res = await herdr.worktreeCreate(
-          req.repo,
-          branch,
-          req.base,
-          branch,
-        );
-        const paneId = (
-          res as { result?: { root_pane?: { pane_id?: string } } }
-        )?.result?.root_pane?.pane_id;
-        if (!paneId) continue;
-        // let the fresh shell pane initialize before launching the agent
-        await new Promise((r) => setTimeout(r, 1500));
-        await herdr.agentStart(paneId, kind);
-        if (req.prompt) {
-          // wait until herdr detects the agent (status leaves "unknown"),
-          // then a short settle for TUI paint. Bounded: a missed detection
-          // degrades to roughly the old fixed delay.
-          const deadline = Date.now() + 4000;
-          while (Date.now() < deadline) {
-            try {
-              const a = await herdr.agentGet(paneId);
-              if (a.agent_status && a.agent_status !== "unknown") break;
-            } catch {
-              // agent not registered yet
+  const doFanout = useCallback(
+    async (req: FanoutRequest) => {
+      setShowFanout(false);
+      const repo = req.repo.trim() || focusedProject?.repo_root || "";
+      if (!repo) {
+        setError("fan-out: repo path is required");
+        return;
+      }
+      for (const kind of req.kinds) {
+        const branch = `${req.prefix}-${kind}`;
+        try {
+          const res = await lazed.worktreeCreate(
+            focusedProjectId ?? "",
+            branch,
+            req.base,
+            branch,
+          );
+          const termId = res.terminal?.term_id;
+          if (!termId) continue;
+          // let the fresh shell initialize before launching the agent
+          await new Promise((r) => setTimeout(r, 1500));
+          await lazed.agentStart(termId, kind);
+          if (req.prompt) {
+            // wait until detection leaves "unknown", then a short settle
+            // for TUI paint. Bounded: a missed detection degrades to the
+            // old fixed delay.
+            const deadline = Date.now() + 4000;
+            while (Date.now() < deadline) {
+              try {
+                const a = await lazed.agentGet(termId);
+                if (a.agent_status && a.agent_status !== "unknown") break;
+              } catch {
+                // agent not detected yet
+              }
+              await new Promise((r) => setTimeout(r, 250));
             }
-            await new Promise((r) => setTimeout(r, 250));
+            await new Promise((r) => setTimeout(r, 1000));
+            await lazed.agentPrompt(termId, req.prompt);
           }
-          await new Promise((r) => setTimeout(r, 1000));
-          await herdr.agentPrompt(paneId, req.prompt);
-        }
-      } catch (e) {
-        setError(String(e));
-      }
-    }
-  }, []);
-
-  const doRemoteConnect = useCallback(
-    (target: string, session?: string) => {
-      herdr
-        .remoteConnect(target, session)
-        .then(() => {
-          setRemoteTarget(remoteLabel({ target, session }));
-          setShowRemote(false);
-          setFocusedPane(null);
-          refresh();
-          // the warning tracks whichever server is now active
-          herdr
-            .compatWarning()
-            .then(setWarning)
-            .catch(() => {});
-        })
-        .catch((e) => {
+        } catch (e) {
           setError(String(e));
-          setShowRemote(false);
-          // a failed connect may still have detached a previous attachment
-          herdr
-            .remoteStatus()
-            .then((r) => setRemoteTarget(remoteLabel(r)))
-            .catch(() => {});
-          herdr
-            .compatWarning()
-            .then(setWarning)
-            .catch(() => {});
-        });
+        }
+      }
+      void repo;
     },
-    [refresh],
+    [focusedProjectId, focusedProject],
   );
 
-  const doRemoteDisconnect = useCallback(() => {
-    herdr
-      .remoteDisconnect()
-      .then(() => {
-        setRemoteTarget(null);
-        setShowRemote(false);
-        setFocusedPane(null);
-        refresh();
-        herdr
-          .compatWarning()
-          .then(setWarning)
-          .catch(() => {});
-      })
-      .catch((e) => setError(String(e)));
-  }, [refresh]);
-
-  useEffect(() => {
-    herdr
-      .remoteStatus()
-      .then((r) => setRemoteTarget(remoteLabel(r)))
-      .catch(() => {});
-  }, []);
-
-  // app-level shortcuts
+  // app-level shortcuts — registered in the capture phase so chords that
+  // the terminal would otherwise consume are intercepted before the IME
+  // overlay input sees them
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const wsIds = snap?.workspaces.map((w) => w.workspace_id) ?? [];
-      const tabIds =
-        snap?.tabs
-          .filter((t) => t.workspace_id === focusedWsId)
-          .map((t) => t.tab_id) ?? [];
+      if (!(e.metaKey || e.ctrlKey || e.altKey)) return;
+      if (showSettings) return;
+      const projectIds = projects.map((p) => p.project_id);
+      const termIds = projectTerms.map((t) => t.term_id);
       const step = (list: string[], cur: string | undefined, d: number) => {
         const i = Math.max(0, list.indexOf(cur ?? ""));
         return list[(i + d + list.length) % list.length];
       };
+      // physical digit position — Option transforms e.key (⌥1 → "¡")
+      const digit = /^Digit([1-9])$/.exec(e.code)?.[1];
+      // full-screen overlays swallow all chords; their own digit toggles off
+      if (showSession || showAutos) {
+        const close =
+          (showAutos && digit === "2") || (showSession && digit === "3");
+        if (e.metaKey && e.shiftKey && close) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (showAutos) setShowAutos(false);
+          else setShowSession(false);
+        }
+        return;
+      }
       if (e.metaKey && !e.shiftKey && e.key === "d") {
         e.preventDefault();
-        split("right");
+        e.stopPropagation();
+        newTerminal();
       } else if (e.metaKey && e.shiftKey && (e.key === "d" || e.key === "D")) {
         e.preventDefault();
-        split("down");
+        e.stopPropagation();
+        newTerminal();
       } else if (e.metaKey && !e.shiftKey && e.key === "w") {
         e.preventDefault();
-        if (effectiveFocusedPane) closePane(effectiveFocusedPane);
+        e.stopPropagation();
+        const t = effectiveFocusedTerm
+          ? termsById.get(effectiveFocusedTerm)
+          : undefined;
+        if (t) closeTerm(t);
       } else if (e.metaKey && !e.shiftKey && e.key === "t") {
         e.preventDefault();
-        newTab();
+        e.stopPropagation();
+        newTerminal();
       } else if (e.metaKey && e.shiftKey && (e.key === "n" || e.key === "N")) {
         e.preventDefault();
+        e.stopPropagation();
         setShowImport(true);
       } else if (e.metaKey && e.shiftKey && e.key === "]") {
         e.preventDefault();
-        const next = step(wsIds, focusedWsId, 1);
-        if (next) focusWorkspace(next);
+        e.stopPropagation();
+        const next = step(projectIds, focusedProjectId, 1);
+        if (next) focusProject(next);
       } else if (e.metaKey && e.shiftKey && e.key === "[") {
         e.preventDefault();
-        const prev = step(wsIds, focusedWsId, -1);
-        if (prev) focusWorkspace(prev);
+        e.stopPropagation();
+        const prev = step(projectIds, focusedProjectId, -1);
+        if (prev) focusProject(prev);
+      } else if (e.metaKey && !e.shiftKey && e.key === "]") {
+        e.preventDefault();
+        e.stopPropagation();
+        const next = step(termIds, effectiveFocusedTerm ?? undefined, 1);
+        if (next) setFocusedTermId(next);
+      } else if (e.metaKey && !e.shiftKey && e.key === "[") {
+        e.preventDefault();
+        e.stopPropagation();
+        const prev = step(termIds, effectiveFocusedTerm ?? undefined, -1);
+        if (prev) setFocusedTermId(prev);
       } else if (e.metaKey && !e.shiftKey && e.key === "k") {
         e.preventDefault();
+        e.stopPropagation();
         setShowPrompt(true);
       } else if (e.metaKey && e.shiftKey && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
+        e.stopPropagation();
         setShowPicker(true);
       } else if (e.metaKey && e.shiftKey && (e.key === "i" || e.key === "I")) {
         e.preventDefault();
+        e.stopPropagation();
         setInboxOpen((o) => !o);
       } else if (e.metaKey && e.shiftKey && (e.key === "f" || e.key === "F")) {
         e.preventDefault();
+        e.stopPropagation();
         setShowFanout(true);
-      } else if (e.metaKey && e.shiftKey && (e.key === "r" || e.key === "R")) {
+      } else if (e.metaKey && !e.shiftKey && e.key === ",") {
         e.preventDefault();
-        setShowRemote(true);
-      } else if (e.metaKey && /^[1-9]$/.test(e.key)) {
+        e.stopPropagation();
+        setShowSettings(true);
+      } else if (e.metaKey && e.shiftKey && digit === "1") {
         e.preventDefault();
-        const tab = tabIds[Number(e.key) - 1];
-        if (tab) focusTab(tab);
+        e.stopPropagation();
+        selectRail("projects");
+      } else if (e.metaKey && e.shiftKey && digit === "2") {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowAutos(true);
+      } else if (e.metaKey && e.shiftKey && digit === "3") {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowSession(true);
+      } else if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && digit) {
+        // ⌘1-9 — focus project by index
+        e.preventDefault();
+        e.stopPropagation();
+        const p = projects[Number(digit) - 1];
+        if (p) focusProject(p.project_id);
+      } else if (!e.metaKey && !e.ctrlKey && e.altKey && !e.shiftKey && digit) {
+        // ⌥1-9 — focus terminal N within the focused project
+        e.preventDefault();
+        e.stopPropagation();
+        const tid = termIds[Number(digit) - 1];
+        if (tid) setFocusedTermId(tid);
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [
-    snap,
-    focusedWsId,
-    effectiveFocusedPane,
-    split,
-    closePane,
-    newTab,
-    focusWorkspace,
-    focusTab,
+    projects,
+    projectTerms,
+    termsById,
+    focusedProjectId,
+    effectiveFocusedTerm,
+    showSettings,
+    showSession,
+    showAutos,
+    newTerminal,
+    closeTerm,
+    focusProject,
+    selectRail,
   ]);
 
-  const allPanes = [...panesById.values()];
-  const inboxItems = allPanes
+  const allTerms = [...termsById.values()];
+  const inboxItems = allTerms
     .filter(
-      (p) =>
-        (p.agent_status === "blocked" || p.agent_status === "done") &&
-        !dismissed.has(p.pane_id),
+      (t) =>
+        (t.agent_status === "blocked" || t.agent_status === "done") &&
+        !dismissed.has(t.term_id),
     )
     .sort((a, b) =>
       a.agent_status === b.agent_status
@@ -672,17 +641,22 @@ export function App() {
           ? -1
           : 1,
     )
-    .map((pane) => ({
-      pane,
-      workspace: snap?.workspaces?.find(
-        (w) => w.workspace_id === pane.workspace_id,
-      )?.label,
-      tab: snap?.tabs?.find((t) => t.tab_id === pane.tab_id)?.label,
+    .map((term) => ({
+      term,
+      project:
+        projects.find((p) => p.terminals.includes(term.term_id))?.label ??
+        basename(
+          projects.find((p) => p.terminals.includes(term.term_id))?.repo_root,
+        ),
     }));
-  const blockedCount = inboxItems.filter(
-    (i) => i.pane.agent_status === "blocked",
-  ).length;
-  const agentCount = allPanes.filter((p) => p.agent).length;
+  const agentCount = projectTerms.filter((t) => t.agent_kind).length;
+
+  // dock badge = undismissed attention count (blocked + finished agents)
+  useEffect(() => {
+    getCurrentWindow()
+      .setBadgeCount(inboxItems.length || undefined)
+      .catch(() => {});
+  }, [inboxItems.length]);
 
   return (
     <div className="app">
@@ -697,97 +671,29 @@ export function App() {
           }
         }}
       >
-        <span className="title">STAY LAZY</span>
-        <button type="button" onClick={() => split("right")} title="⌘D">
-          <HugeiconsIcon icon={ColumnInsertIcon} size={13} strokeWidth={1.5} />
-          split →
-        </button>
-        <button type="button" onClick={() => split("down")} title="⇧⌘D">
-          <HugeiconsIcon icon={InsertRowDownIcon} size={13} strokeWidth={1.5} />
-          split ↓
-        </button>
-        <button type="button" onClick={newTab} title="⌘T">
-          <HugeiconsIcon icon={AppWindowIcon} size={13} strokeWidth={1.5} />
-          tab
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowImport(true)}
-          title="⇧⌘N — import a project directory as a workspace"
-        >
-          <HugeiconsIcon icon={FolderImportIcon} size={13} strokeWidth={1.5} />
-          import
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowPicker(true)}
-          title="⇧⌘A — start agent in focused pane"
-        >
-          <HugeiconsIcon icon={BotIcon} size={13} strokeWidth={1.5} />
-          agent
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowPrompt(true)}
-          title="⌘K — prompt"
-        >
-          <HugeiconsIcon icon={CommandLineIcon} size={13} strokeWidth={1.5} />
-          prompt
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowFanout(true)}
-          title="⇧⌘F — fan out worktrees × agents"
-        >
-          <HugeiconsIcon icon={WorkflowIcon} size={13} strokeWidth={1.5} />
-          fan-out
-        </button>
-        <button
-          type="button"
-          className={remoteTarget ? "remote-on" : ""}
-          onClick={() => setShowRemote(true)}
-          title="⇧⌘R — attach remote herdr over SSH"
-        >
-          <HugeiconsIcon icon={ServerIcon} size={13} strokeWidth={1.5} />
-          {remoteTarget ? remoteTarget : "remote"}
-        </button>
-        <InboxButton
-          blocked={blockedCount}
-          done={inboxItems.length - blockedCount}
-          onToggle={() => setInboxOpen((o) => !o)}
-        />
-        <button
-          type="button"
-          onClick={() => setShowAbout(true)}
-          title="about / licenses"
-        >
-          <HugeiconsIcon
-            icon={InformationCircleIcon}
-            size={13}
-            strokeWidth={1.5}
-          />
-        </button>
+        <span className="title">LAZED</span>
         <span className="status">
           {error
             ? `error: ${error}`
             : notice
               ? notice
-              : warning
-                ? `⚠ ${warning}`
-                : snap
-                  ? `${remoteTarget ? `⇄ ${remoteTarget} · ` : ""}${workspace?.label ?? focusedWsId ?? "?"} · ${layout?.panes.length ?? 0} pane(s)`
-                  : "connecting…"}
+              : snap
+                ? ""
+                : "connecting…"}
         </span>
       </div>
       {inboxOpen && (
         <InboxPanel
           items={inboxItems}
-          onJump={jumpToPane}
+          onJump={(t) => {
+            const p = projects.find((x) => x.terminals.includes(t.term_id));
+            if (p) jumpToTerm(t.term_id, p.project_id);
+          }}
           onDismiss={(id) => setDismissed((prev) => new Set(prev).add(id))}
           onDismissAll={() =>
             setDismissed(
               (prev) =>
-                new Set([...prev, ...inboxItems.map((i) => i.pane.pane_id)]),
+                new Set([...prev, ...inboxItems.map((i) => i.term.term_id)]),
             )
           }
           onClose={() => setInboxOpen(false)}
@@ -798,104 +704,143 @@ export function App() {
       )}
       {showPrompt && (
         <PromptBar
-          focusedPane={effectiveFocusedPane}
+          focusedTerm={effectiveFocusedTerm}
           agentCount={agentCount}
-          paneCount={allPanes.length}
+          termCount={projectTerms.length}
           onSubmit={submitPrompt}
           onClose={() => setShowPrompt(false)}
         />
       )}
       {showFanout && (
         <Fanout
-          defaultRepo={
-            workspace?.worktree?.repo_root ??
-            panesById.get(effectiveFocusedPane ?? "")?.cwd ??
-            ""
-          }
+          defaultRepo={focusedProject?.repo_root ?? ""}
           onSubmit={doFanout}
           onClose={() => setShowFanout(false)}
         />
       )}
-      {showAbout && <About onClose={() => setShowAbout(false)} />}
+      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+      {showSession && (
+        <Session
+          snap={snap}
+          focusedTermId={effectiveFocusedTerm}
+          onJumpTerm={jumpToTerm}
+          onFocusProject={focusProject}
+          onClose={() => setShowSession(false)}
+        />
+      )}
+      {showAutos && (
+        <Automations
+          autos={autos}
+          onNew={() => setAutoEditor({})}
+          onEdit={(a) => setAutoEditor({ auto: a })}
+          onChanged={loadAutos}
+          editorOpen={autoEditor != null}
+          onClose={() => setShowAutos(false)}
+        />
+      )}
       {showImport && (
         <ImportProject
-          onImport={newWorkspace}
+          onImport={newProject}
           onClose={() => setShowImport(false)}
         />
       )}
-      {showRemote && (
-        <RemoteBar
-          connected={remoteTarget ?? undefined}
-          focusedPane={effectiveFocusedPane}
-          onConnect={doRemoteConnect}
-          onDisconnect={doRemoteDisconnect}
-          onClose={() => setShowRemote(false)}
+      {autoEditor && (
+        <AutomationEditor
+          initial={autoEditor.auto}
+          projects={projects}
+          onSave={saveAutomation}
+          onDeleteSeen={(id) =>
+            automations
+              .resetSeen(id)
+              .then(loadAutos)
+              .catch((e) => setError(String(e)))
+          }
+          onClose={() => setAutoEditor(null)}
         />
       )}
-      {diffWsId &&
+      {diffTerm &&
         (() => {
-          const ws = snap?.workspaces.find((w) => w.workspace_id === diffWsId);
-          if (!ws) return null;
-          const agentPane = allPanes.find(
-            (p) => p.workspace_id === diffWsId && p.agent,
+          const p = projects.find((x) =>
+            x.terminals.includes(diffTerm.term_id),
           );
           return (
             <DiffView
-              workspace={ws}
-              agentPaneId={agentPane?.pane_id}
-              onClose={() => setDiffWsId(null)}
-              onJump={() => {
-                if (agentPane) jumpToPane(agentPane);
-              }}
+              checkout={diffTerm.cwd}
+              repoRoot={p?.repo_root}
+              label={diffTerm.label}
+              termId={diffTerm.term_id}
+              agentTermId={diffTerm.agent_kind ? diffTerm.term_id : undefined}
+              onClose={() => setDiffTerm(null)}
+              onJump={() =>
+                p ? jumpToTerm(diffTerm.term_id, p.project_id) : undefined
+              }
             />
           );
         })()}
       <div className="body">
+        <Rail
+          active={railView}
+          onSelect={selectRail}
+          onAutomations={() => setShowAutos(true)}
+          onSession={() => setShowSession(true)}
+          onSettings={() => setShowSettings(true)}
+          automationAlert={autos.some((a) => a.last_error)}
+        />
         <Sidebar
           snap={snap}
-          repoRefs={repoRefs}
-          focusedWsId={focusedWsId}
-          activeTabId={activeTabId}
-          focusedPane={effectiveFocusedPane}
-          onFocusWorkspace={focusWorkspace}
-          onFocusTab={focusTab}
-          onFocusPane={setFocusedPane}
-          onNewWorkspace={() => setShowImport(true)}
-          onCloseWorkspace={(id) =>
-            herdr.workspaceClose(id).catch((e) => setError(String(e)))
+          focusedTermId={effectiveFocusedTerm}
+          onFocusProject={focusProject}
+          onJumpTerm={jumpToTerm}
+          onNewProject={() => setShowImport(true)}
+          onNewGroup={() =>
+            lazed
+              .groupCreate()
+              .then((g) => g?.group_id ?? null)
+              .catch((e) => {
+                setError(String(e));
+                return null;
+              })
           }
-          onCloseTab={(id) =>
-            herdr.tabClose(id).catch((e) => setError(String(e)))
+          onCloseProject={(id) =>
+            lazed.projectClose(id).catch((e) => setError(String(e)))
           }
-          onRenameWorkspace={(id, label) =>
-            herdr.workspaceRename(id, label).catch((e) => setError(String(e)))
+          onRenameProject={(id, label) =>
+            lazed.projectRename(id, label).catch((e) => setError(String(e)))
           }
-          onRenameTab={(id, label) =>
-            herdr.tabRename(id, label).catch((e) => setError(String(e)))
+          onRenameGroup={(id, label) =>
+            lazed.groupRename(id, label).catch((e) => setError(String(e)))
           }
-          onDiff={(ws) => setDiffWsId(ws.workspace_id)}
-          onTower={spawnTower}
+          onRemoveGroup={(id) =>
+            lazed.groupRemove(id).catch((e) => setError(String(e)))
+          }
+          onAssignProject={(pid, gid) =>
+            lazed.groupAssign(pid, gid).catch((e) => setError(String(e)))
+          }
+          onCloseTerm={closeTerm}
+          onDiff={setDiffTerm}
+          onOrchestrate={spawnOrchestrator}
           rollup={worst}
         />
         <div className="main">
-          {layout && layout.panes.length > 0 ? (
-            <PaneGrid
-              layout={layout}
-              panesById={panesById}
-              focusedPane={effectiveFocusedPane}
-              onFocusPane={setFocusedPane}
-              onClosePane={closePane}
-              onResize={(paneId, dir, amt) =>
-                herdr.resizePane(paneId, dir, amt).catch(() => {})
-              }
+          {projectTerms.length > 0 ? (
+            <TermGrid
+              terms={projectTerms}
+              focusedTerm={effectiveFocusedTerm}
+              onFocusTerm={setFocusedTermId}
+              onCloseTerm={(id) => {
+                const t = termsById.get(id);
+                if (t) closeTerm(t);
+              }}
             />
           ) : (
             <div className="empty">
               {error
                 ? `failed: ${error}`
                 : snap
-                  ? "no panes in this tab — ⌘D to split"
-                  : "connecting to herdr…"}
+                  ? projects.length === 0
+                    ? "import a project to begin — ⇧⌘N"
+                    : "no terminals in this project — ⌘D to add one"
+                  : "connecting to lazed…"}
             </div>
           )}
         </div>

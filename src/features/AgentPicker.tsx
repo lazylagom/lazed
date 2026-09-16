@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_KINDS } from "../shared/herdr";
+import { AGENT_KINDS } from "../shared/lazed";
 
 export function AgentPicker({
   onPick,
@@ -43,7 +43,7 @@ export function AgentPicker({
         <input
           ref={inputRef}
           className="modal-input"
-          placeholder="start agent in focused pane…"
+          placeholder="start agent in focused term…"
           value={filter}
           onChange={(e) => {
             setFilter(e.target.value);

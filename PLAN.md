@@ -1,4 +1,4 @@
-# StayLazy — Product & Architecture Plan (v2)
+# Lazed — Product & Architecture Plan (v2)
 
 > herdr(런타임·도메인 모델 그대로 사용) + Tauri GUI(Orca UX 패턴)
 > 작성일: 2026-09-14 / 상태: draft v2.1 — **Phase 0-4 완료 + §7 백로그 대부분 처리**
@@ -12,7 +12,7 @@
 ## 1. 제품 정의
 
 herdr 서버를 런타임으로 쓰는 **GUI 에이전트 멀티플렉서**. Tauri v2 + React + xterm.js.
-herdr TUI는 사용하지 않는다 — staylazy가 유일한 UI 클라이언트.
+herdr TUI는 사용하지 않는다 — lazed가 유일한 UI 클라이언트.
 (단, 멀티 클라이언트 특성상 원하면 별도 터미널에서 `herdr` TUI로 같은 세션에 attach 가능)
 
 사용자가 겪는 것: Orca 수준의 GUI — 사이드바 에이전트 상태 배지, 마우스 네이티브 분할,
@@ -34,7 +34,7 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 
 ```
 ┌──────────────────────────────────────────────┐
-│ staylazy (Tauri v2 — React + xterm.js)       │
+│ lazed (Tauri v2 — React + xterm.js)       │
 │  - herdr workspace/tab/pane를 GUI로 렌더링   │
 │  - 상태 배지, 알림, fan-out, diff 리뷰       │
 │  - RuntimeClient 어댑터 뒤에서만 herdr 접촉  │
@@ -45,7 +45,7 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 ┌──────────────▼───────────────────────────────┐
 │ herdr server (headless daemon, 번들/스폰)    │
 │  - PTY 소유, 세션 영속화·복원, 상태 감지     │
-│  - staylazy가 spawn하거나 실행 중이면 attach │
+│  - lazed가 spawn하거나 실행 중이면 attach │
 └──────────────┬───────────────────────────────┘
                │ PTY
         claude / codex / shell …
@@ -53,12 +53,12 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 
 **핵심 결정:**
 
-- **어댑터 경계(`RuntimeClient`)**: staylazy 코드는 herdr CLI/socket을 직접 부르지 않고 trait 인터페이스 뒤에서 접근. 두 가지 채널:
+- **어댑터 경계(`RuntimeClient`)**: lazed 코드는 herdr CLI/socket을 직접 부르지 않고 trait 인터페이스 뒤에서 접근. 두 가지 채널:
   - 제어面: socket API (`workspace.create`, `pane.split`, `agent.prompt`, `event.subscribe` …)
   - 데이터面: pane당 `herdr terminal session control <id> --cols --rows` 프로세스 → stdout의 `terminal.frame`(base64 ANSI)을 xterm.js로, stdin으로 `terminal.input`/`resize`/`scroll` 전송
-- **도메인 모델 = herdr 것 그대로**: workspace/tab/pane + agent 상태(blocked/working/done/idle/unknown). staylazy 자체 store는 UI 설정, fan-out 그룹핑 메타 등 최소한만.
+- **도메인 모델 = herdr 것 그대로**: workspace/tab/pane + agent 상태(blocked/working/done/idle/unknown). lazed 자체 store는 UI 설정, fan-out 그룹핑 메타 등 최소한만.
 - **데몬 생명주기**: herdr의 auto-detect-launch 패턴 — 앱 부팅 시 실행 중인 서버에 attach, 없으면 spawn. 앱 종료 = detach (에이전트 생존).
-- **진화 옵션 유지**: herdr 한계에 닿으면 `RuntimeClient` 구현체만 자체 데몬(v1 계획의 staylazyd)으로 교체 가능하도록 경계 유지. v1 문서의 Phase 1-3이 그 설계 초안.
+- **진화 옵션 유지**: herdr 한계에 닿으면 `RuntimeClient` 구현체만 자체 데몬(v1 계획의 lazedd)으로 교체 가능하도록 경계 유지. v1 문서의 Phase 1-3이 그 설계 초안.
 
 ---
 
@@ -86,7 +86,7 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - agent start/prompt/wait를 UI로 노출 (새 에이전트 스폰 모달, 프롬프트 브로드캐스트)
 - blocked 인박스: 승인 필요 에이전트를 한 목록에 → 클릭 시 해당 pane으로 점프
 - macOS 알림 (done/blocked 전이 시)
-- `skills/staylazy/SKILL.md`: pane 안 에이전트가 herdr CLI로 다른 pane 조작 가능하게
+- `skills/lazed/SKILL.md`: pane 안 에이전트가 herdr CLI로 다른 pane 조작 가능하게
 
 구현 노트:
 - `⇧⌘A` AgentPicker (23종 manifest 카탈로그 필터링) → focused pane에 `agent start`
@@ -133,8 +133,8 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 | 배포 | 앱 번들에 herdr 바이너리 포함 vs 미설치 시 `brew`/install.sh 유도 | 번들이 UX상 안전. 라이선스 Apache-2.0 — 재배포 OK, NOTICE/attribution 필요 |
 | 프레임 스트림 | `terminal session control` NDJSON | 대량 출력 시 지연/배칭 성능을 Phase 0에서 계측 |
 | pane ID 안정성 | Phase 0에서 검증 | 재시작 후 w1:p1 유지 안 되면 매핑 테이블 필요 |
-| 도메인 모델 | herdr 것 그대로 | staylazy 전용 개념 필요 시 adapter 뒤에서 확장, UI 모델 오염 금지 |
-| 멀티 클라이언트 | 초기엔 staylazy 1개 가정, herdr의 per-client seen 상태 활용 | 같은 tab을 두 클라이언트가 볼 때 리사이즈 소유권 규칙 있음(문서 확인됨) |
+| 도메인 모델 | herdr 것 그대로 | lazed 전용 개념 필요 시 adapter 뒤에서 확장, UI 모델 오염 금지 |
+| 멀티 클라이언트 | 초기엔 lazed 1개 가정, herdr의 per-client seen 상태 활용 | 같은 tab을 두 클라이언트가 볼 때 리사이즈 소유권 규칙 있음(문서 확인됨) |
 | 플랫폼 | macOS 우선, Linux 지원. Windows는 herdr beta 성숙 후 | |
 | UI 스택 | React 전면 (laze의 imperative DOM 혼합은 가져오지 않음) | xterm.js만 canvas 렌더 |
 
@@ -144,7 +144,7 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 
 ### 프롬프트 1 — 스캐폴딩 + 스파이크
 ```
-StayLazy는 Tauri v2 + Rust + React(xterm.js) 데스크탑 앱으로, herdr 서버(헤드리스 데몬)의
+Lazed는 Tauri v2 + Rust + React(xterm.js) 데스크탑 앱으로, herdr 서버(헤드리스 데몬)의
 GUI 클라이언트입니다. 도메인 모델은 herdr의 workspace/tab/pane을 그대로 사용합니다.
 
 1. Tauri v2 + React 19 + xterm.js(@xterm/addon-webgl) + Vite + Biome 프로젝트를 스캐폴딩해줘.
@@ -172,7 +172,7 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 1. 새 에이전트 모달: kind 선택(claude/codex/…), workspace/tab 지정 → pane.split + pane.run
 2. agent 상태 전이 감지 시 사이드바 배지 + blocked 인박스 뷰 + macOS 알림
 3. 프롬프트 브로드캐스트: 선택한 여러 pane에 같은 텍스트 전송
-4. skills/staylazy/SKILL.md 작성: pane 안 에이전트가 herdr CLI로 다른 pane/agent를 조작하는 가이드
+4. skills/lazed/SKILL.md 작성: pane 안 에이전트가 herdr CLI로 다른 pane/agent를 조작하는 가이드
 ```
 
 ### 프롬프트 4 — fan-out + 리뷰 루프
@@ -190,26 +190,29 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 ### 검증
 
 - [ ] **실기 SSH e2e** — `herdr machine add <host>`로 원격 준비 → `⇧⌘R` attach → pane 조작/이벤트 스트림/git diff·merge 라우팅/원격 서버 재기동 확인. 실패 경로·셸 quoting·컨텍스트 전환은 단위 테스트로만 확인된 상태. (localhost SSH·등록 머신 없어 아직 미검증)
-- [x] **프레임 스트림 고부하 성능 계측** — `scripts/perf_stream.py` (throwaway `--session staylazy-perf`). 측정 결과 (200x50 pane): `seq 1 300000` flood → 246 frames/0.13MB/0.33s (herdr가 viewport diff로 coalesce — 스크롤 flood는 클라이언트에 안 닿음). 지속 전면 repaint → ~54 frames/s, ~26KB/s, 평균 프레임 ~480B. idle round-trip(input→echo frame) 15-55ms. 결론: `Channel.send`/`atob`/`term.write` 병목 없음 — 프레임 배칭 불필요. 주의: 마커 검출 시 타이핑된 명령행 echo와 ANSI diff 분할에 유의(스크립트에 split-marker + `clear` 패턴으로 처리).
+- [x] **프레임 스트림 고부하 성능 계측** — `scripts/perf_stream.py` (throwaway `--session lazed-perf`). 측정 결과 (200x50 pane): `seq 1 300000` flood → 246 frames/0.13MB/0.33s (herdr가 viewport diff로 coalesce — 스크롤 flood는 클라이언트에 안 닿음). 지속 전면 repaint → ~54 frames/s, ~26KB/s, 평균 프레임 ~480B. idle round-trip(input→echo frame) 15-55ms. 결론: `Channel.send`/`atob`/`term.write` 병목 없음 — 프레임 배칭 불필요. 주의: 마커 검출 시 타이핑된 명령행 echo와 ANSI diff 분할에 유의(스크립트에 split-marker + `clear` 패턴으로 처리).
 
 ### 기능 (Phase 4 후속)
 
 - [x] **머신 관리 UI** — `⇧⌘R` 모달에서 목록/attach + rename(✎ 인라인)/remove(✕ 확인) + add는 focused pane에 `pane run 'herdr machine add …'`로 실행해 pane에서 승인. `machine_remove`/`machine_rename`은 로컬 전용 실행(`run_local` — attach 중에도 remote 라우팅 안 함).
+- [x] **프로젝트 그룹 (Orca 패턴)** — `session > group(gN) > project > terminal`. 그룹 = 프로젝트의 이름 있는 순서 컬렉션(최대 1개 소속, 미소속은 ungrouped로 플랫 렌더). `group.create/list/rename/remove/assign` + `project.create`의 `group_id` 파라미터. session.json 영속화(`#[serde(default)]`로 구 파일 호환), `group.created/updated/removed` 이벤트 → 스냅샷 리프레시. 사이드바: 접이식 그룹 섹션(헤더에 멤버 수 + 상태 롤업, 클릭 접기/더블클릭 rename, localStorage에 collapse 상태), ⋯ 메뉴로 rename/remove, 프로젝트 ⋯ 메뉴의 "Move to group"으로 배정/해제/새 그룹 생성.
 - [ ] **동시 멀티 원격** — 현재 단일 `REMOTE` static(`remote_ctx()` 경계). 멀티화하려면 target별 context map + 이벤트/control 스트림을 context별로 라우팅 + pane id 네임스페이스 처리 필요 (서로 다른 서버가 같은 `w1:p1`을 가질 수 있음 — UI에서 서버 프리픽스 필요, herdr 스킬 문서도 동일 경고)
 - [ ] **모바일 read-only 뷰** — Orca 모니터링 패턴 참고
 
 ### 배포/운영
 
-- [x] **herdr 바이너리 번들** — `bun run dist` = `scripts/fetch-herdr`(→`src-tauri/bin/herdr`, gitignore·shim 거부·PATH shim이면 known dirs까지 계속 탐색) + `tauri build --config src-tauri/tauri.bundle.json`(resources merge — base conf에 두면 bin 없을 때 `cargo test`가 깨져서 분리). `setup()`이 `resource_dir()/bin/herdr` 존재 시 `BUNDLED_HERDR`에 등록 → `herdr_bin()` 해석 순서: `HERDR_BIN`(명시적 override 최우선) → 번들 → PATH → known dirs. `NOTICE`에 herdr(Apache-2.0) 표기. 검증: `staylazy.app/Contents/Resources/bin/herdr` 확인됨.
+- [x] **herdr 바이너리 번들** — `bun run dist` = `scripts/fetch-herdr`(→`src-tauri/bin/herdr`, gitignore·shim 거부·PATH shim이면 known dirs까지 계속 탐색) + `tauri build --config src-tauri/tauri.bundle.json`(resources merge — base conf에 두면 bin 없을 때 `cargo test`가 깨져서 분리). `setup()`이 `resource_dir()/bin/herdr` 존재 시 `BUNDLED_HERDR`에 등록 → `herdr_bin()` 해석 순서: `HERDR_BIN`(명시적 override 최우선) → 번들 → PATH → known dirs. `NOTICE`에 herdr(Apache-2.0) 표기. 검증: `lazed.app/Contents/Resources/bin/herdr` 확인됨.
 - [x] **herdr 업그레이드 정책** — bootstrap + remote attach/detach 시 `compat_warning()` 재검사 → 타이틀바 `⚠` 표시 (`compatible`/`endpoint_compatible` false 또는 server 버전 ≠ pinned `EXPECTED_HERDR_VERSION` = 0.9.0). 스키마 diff 체크 = `scripts/check_herdr_schema.py` (status/snapshot/machine-list의 의존 필드 존재 검증, herdr 버전업 때 실행).
 - [x] pane/session ID 재시작 후 안정성 — Phase 0 검증 완료: 스냅샷 복원 시 동일 ID/cwd 유지.
 - [x] **브랜딩/attribution** — `NOTICE` 추가 + 앱 내 표기 완료: 타이틀바 `about` 버튼 → About 모달 (이름/`getVersion()` 버전/NOTICE 전문, `NOTICE?raw` 임포트로 단일 소스 유지).
 
 ### 코드 정리 (v2.1)
 
+- **제어面 socket API 전환** — 모든 workspace/tab/pane/agent/worktree/snapshot 호출이 호출당 `herdr` 프로세스 spawn(`run_cli`)에서 unix socket request/response(`api_call` → `{"id","method","params"}`)로 이전. 서버는 연결당 요청 1개 처리(구독 연결만 장기 유지)라 호출마다 단기 연결. 소켓 경로는 CONTEXT_GEN 키 캐시 — remote attach/detach 시 자동 무효화, 원격 호출은 포워드된 로컬 소켓 경유(호출당 `ssh herdr` 제거). transport 실패 시 캐시 재해석+포워드 respawn 후 1회 재시도, 서버 error 응답(`code`/`message`)은 즉시 반환. CLI로 남은 것: `status --json`(소켓 경로/버전 발견), `machine *`(로컬 클라이언트 상태), `server` spawn, `terminal session control`(socket에 스트림 메서드 없음). `pane run`은 `pane.send_input {text, keys:["enter"]}`로 대체(live 세션 검증). 이벤트 스트림은 연결당 요청 1개 제약으로 snapshot → 단일 `events.subscribe`(global+per-pane 통합) 유지 — 신규 pane의 `pane_created` 수신 시 스트림 재시작으로 sub set 갱신(기존 `add_sub` 인-스트림 추가 구독은 서버가 연결을 닫아 실제로는 매번 재접속이었던 것을 명시적으로 정정).
 - `DiffView`에 `remove`(worktree 정리) 버튼 + 머지 성공 후 "remove worktree?" 제안 — `worktree_remove` 연결. `parseDiff` 버그 수정: `---`/`+++` 헤더가 del/add로 잘못 분류되던 것 → meta 라인은 파일의 첫 `@@` 이전에만 적용(in-hunk `+++i`/`---x` 콘텐츠 라인은 유지), `\ No newline` 주석은 라인 번호 미소비 (vitest 커버).
 - Inbox: 항목별 dismiss ✕ + clear all — working/idle 전이 시 dismiss 자동 해제.
 - Sidebar: workspace/tab 라벨 더블클릭 → 인라인 rename (`workspace rename`/`tab rename` 연결).
 - Fanout: 고정 3s sleep → `agent get` 폴링(최대 4s, status != unknown 감지) + 1s settle.
 - vitest 도입 (`bun run test`) — parseDiff/shQuote 단위 테스트.
 - 미사용 `base64` 크레이트 제거, `document.title` 디버그 잔재 제거.
+- **완료 알림 (Orca 패턴)** — 데몬이 `working→idle` 전이를 `done`으로 승격(동일 kind가 idle 유지되는 동안 sticky, 다음 전이에서 해제) → `agent.status` 이벤트 → macOS 알림(`notify-rust` 직접 사용: plugin `onAction`은 모바일 전용이라 데스크탑 클릭이 안 옴). 클릭 시 `notification.jump` 이벤트 → 창 raise + 해당 터미널로 점프. 이미 보고 있는 터미널이면 억제(`isFocused` + focused term). Dock 뱃지 = 미해소 inbox 수(blocked+done). `agent.wait`은 `idle` 조건이 `done`도 만족시키며, 폴링 중 세션 락을 잡지 않게 수정(기존엔 until 미충족 wait가 session mutex를 영구 점유해 데몬 전체가 행됐음). `agent.start`는 `agent.status` 이벤트 즉시 브로드캐스트.

@@ -35,7 +35,7 @@ build: ## frontend production build (dist/)
 dist: ## full app bundle (fetch-herdr + tauri build)
 	$(BUN) run dist
 
-schema-check: ## verify herdr schema fields staylazy depends on
+schema-check: ## verify herdr schema fields lazed depends on
 	python3 scripts/check_herdr_schema.py
 
 perf: ## frame-stream perf measurement (throwaway herdr session)
