@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { Modal } from "../components/Modal";
 import { AGENT_KINDS } from "../shared/lazed";
 
 export function AgentPicker({
@@ -16,10 +17,6 @@ export function AgentPicker({
     k.toLowerCase().includes(filter.toLowerCase()),
   );
 
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") onClose();
     else if (e.key === "ArrowDown") {
@@ -34,37 +31,31 @@ export function AgentPicker({
   };
 
   return (
-    <div className="modal-overlay" onMouseDown={onClose}>
-      <div
-        className="modal"
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={onKey}
-      >
-        <input
-          ref={inputRef}
-          className="modal-input"
-          placeholder="start agent in focused term…"
-          value={filter}
-          onChange={(e) => {
-            setFilter(e.target.value);
-            setIndex(0);
-          }}
-        />
-        <div className="modal-list">
-          {kinds.map((k, i) => (
-            <button
-              key={k}
-              type="button"
-              className={`modal-item ${i === index ? "sel" : ""}`}
-              onMouseEnter={() => setIndex(i)}
-              onClick={() => onPick(k)}
-            >
-              {k}
-            </button>
-          ))}
-          {kinds.length === 0 && <div className="modal-empty">no match</div>}
-        </div>
+    <Modal onClose={onClose} onKeyDown={onKey} initialFocusRef={inputRef}>
+      <input
+        ref={inputRef}
+        className="modal-input"
+        placeholder="start agent in focused term…"
+        value={filter}
+        onChange={(e) => {
+          setFilter(e.target.value);
+          setIndex(0);
+        }}
+      />
+      <div className="modal-list">
+        {kinds.map((k, i) => (
+          <button
+            key={k}
+            type="button"
+            className={`modal-item ${i === index ? "sel" : ""}`}
+            onMouseEnter={() => setIndex(i)}
+            onClick={() => onPick(k)}
+          >
+            {k}
+          </button>
+        ))}
+        {kinds.length === 0 && <div className="modal-empty">no match</div>}
       </div>
-    </div>
+    </Modal>
   );
 }

@@ -2,6 +2,7 @@ import { FolderIcon, MultiplicationSignIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect } from "react";
+import { Modal } from "../components/Modal";
 
 function basename(p: string) {
   const parts = p.replace(/\/$/, "").split("/");
@@ -32,35 +33,33 @@ export function ImportProject({
   };
 
   return (
-    <div className="modal-overlay" onMouseDown={onClose}>
-      <div className="modal addproj" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="addproj-head">
-          <span className="addproj-title">Add a project</span>
-          <button
-            type="button"
-            className="addproj-x"
-            onClick={onClose}
-            aria-label="close"
-          >
-            <HugeiconsIcon
-              icon={MultiplicationSignIcon}
-              size={18}
-              strokeWidth={1.5}
-            />
-          </button>
-        </div>
-        <button type="button" className="addproj-card" onClick={browse}>
-          <span className="addproj-card-ico">
-            <HugeiconsIcon icon={FolderIcon} size={22} strokeWidth={1.4} />
-          </span>
-          <span className="addproj-card-text">
-            <span className="addproj-card-title">Browse folder</span>
-            <span className="addproj-card-sub">
-              Local project, Git repo, or folder with many repos
-            </span>
-          </span>
+    <Modal onClose={onClose} className="addproj">
+      <div className="addproj-head">
+        <span className="addproj-title">Add a project</span>
+        <button
+          type="button"
+          className="addproj-x"
+          onClick={onClose}
+          aria-label="close"
+        >
+          <HugeiconsIcon
+            icon={MultiplicationSignIcon}
+            size={18}
+            strokeWidth={1.5}
+          />
         </button>
       </div>
-    </div>
+      <button type="button" className="addproj-card" onClick={browse}>
+        <span className="addproj-card-ico">
+          <HugeiconsIcon icon={FolderIcon} size={22} strokeWidth={1.4} />
+        </span>
+        <span className="addproj-card-text">
+          <span className="addproj-card-title">Browse folder</span>
+          <span className="addproj-card-sub">
+            Local project, Git repo, or folder with many repos
+          </span>
+        </span>
+      </button>
+    </Modal>
   );
 }
