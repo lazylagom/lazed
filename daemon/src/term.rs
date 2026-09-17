@@ -1,6 +1,7 @@
 //! One terminal = one PTY + one alacritty screen model + scrollback.
 use alacritty_terminal::vte::ansi::Processor;
-use alacritty_terminal::event::VoidListener;
+#[path = "terminal_protocol.rs"]
+mod protocol;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::cell::Flags;
@@ -81,7 +82,8 @@ pub struct PtyTerm {
     /// Behind its own mutex so PTY writes happen WITHOUT holding the term
     /// lock — a child that stops draining input stalls the writer only.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    term: AlTerm<VoidListener>,
+    term: AlTerm<protocol::Listener>,
+    replies: protocol::Replies,
     proc: Processor,
     size: Sz,
     tail: Vec<u8>,
@@ -148,16 +150,16 @@ impl PtyTerm {
             cmd.arg(a);
         }
         cmd.cwd(cwd);
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        protocol::configure_environment(&mut cmd);
         cmd.env("LAZED_TERM", id);
         let child = pair.slave.spawn_command(cmd)?;
         let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
+        let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
+        let (listener, replies) = protocol::connect(writer.clone());
 
         let mut term_cfg = Config::default();
         term_cfg.scrolling_history = 100_000;
-        let term = AlTerm::new(term_cfg, &size, VoidListener);
+        let term = AlTerm::new(term_cfg, &size, listener);
 
         let term = PtyTerm {
             id: id.to_string(),
@@ -168,8 +170,9 @@ impl PtyTerm {
             branch: detect_branch(cwd),
             child,
             master: pair.master,
-            writer: Arc::new(Mutex::new(writer)),
+            writer,
             term,
+            replies,
             proc: Processor::new(),
             size,
             tail: Vec::new(),
@@ -195,6 +198,7 @@ impl PtyTerm {
         for &b in bytes {
             self.proc.advance(&mut self.term, b);
         }
+        self.replies.flush(&self.term);
         self.tail.extend_from_slice(bytes);
         if self.tail.len() > TAIL_CAP {
             let cut = self.tail.len() - TAIL_CAP;
@@ -513,6 +517,8 @@ impl PtyTerm {
         for &b in bytes {
             self.proc.advance(&mut self.term, b);
         }
+        // Historical queries belong to the old process, not the new shell.
+        self.replies.discard();
     }
 
     pub fn subscribe(&mut self, id: u64, out: Sender<Value>) {
