@@ -10,6 +10,7 @@
     "check": "tsc --noEmit && biome check .",
     "test": "vitest run",
     "format": "biome format --write .",
+    "icon": "sh scripts/generate-icons.sh",
     "fetch-herdr": "sh scripts/fetch-herdr",
     "stage-lazed": "sh scripts/stage-lazed",
     "dist": "bun run stage-lazed && tauri build --config src-tauri/tauri.bundle.json"

@@ -1,7 +1,7 @@
 BUN ?= bun
 CARGO ?= cargo
 
-.PHONY: help deps install uninstall dev web fetch-herdr check test format build dist schema-check perf clean
+.PHONY: help deps install uninstall dev web icon fetch-herdr check test format build dist schema-check perf clean
 
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-14s %s\n", $$1, $$2}'
@@ -22,6 +22,9 @@ dev: ## run the app (tauri dev — starts vite + native shell)
 
 web: ## frontend only (vite dev server on :1420)
 	$(BUN) run dev
+
+icon: ## regenerate desktop/app icons from the SVG source
+	$(BUN) run icon
 
 fetch-herdr: ## stage the herdr binary into src-tauri/bin
 	$(BUN) run fetch-herdr
