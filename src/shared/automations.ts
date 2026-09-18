@@ -206,20 +206,26 @@ def excerpt(body):
     raw = body if isinstance(body, str) else " ".join(flatten(body, []))
     return " ".join(raw.replace(marker, handle).split())[:180] or "(no text)"
 
-jql = '(comment ~ "{m}" OR description ~ "{m}") AND updated >= -14d ORDER BY updated DESC'.format(m=marker)
-query = urllib.parse.urlencode({"jql": jql, "fields": "summary,comment,description", "maxResults": 25})
+# JQL only narrows candidates — the per-comment scan below is exact.
+# Cloud indexes the mention's accountId in comment/description text; the
+# "[~accountid:…]" marker exists only in self-hosted wiki markup.
+needle = account if api == "3" else marker
+jql = '(comment ~ "{n}" OR description ~ "{n}") AND updated >= -14d ORDER BY updated DESC'.format(n=needle)
+query = urllib.parse.urlencode({"jql": jql, "fields": "summary,comment,description", "maxResults": 50})
 search = "/rest/api/3/search/jql?" if api == "3" else "/rest/api/2/search?"
 for issue in get(search + query).get("issues") or []:
     key = issue.get("key") or ""
     fields = issue.get("fields") or {}
     summary = fields.get("summary") or ""
     link = "%s/browse/%s" % (base, key)
-    comments = ((fields.get("comment") or {}).get("comments")) or []
-    if not comments:
+    cfield = fields.get("comment") or {}
+    comments = cfield.get("comments") or []
+    total = cfield.get("total") or len(comments)
+    if len(comments) < total:
         try:
-            comments = get("/rest/api/%s/issue/%s/comment?maxResults=50" % (api, key)).get("comments") or []
+            comments = get("/rest/api/%s/issue/%s/comment?maxResults=100&startAt=%d" % (api, key, max(0, total - 100))).get("comments") or comments
         except Exception:
-            comments = []
+            pass
     for c in comments:
         body = c.get("body")
         if not mentions_me(body):

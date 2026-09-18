@@ -13,7 +13,7 @@ export function DiffView({
   checkout,
   repoRoot,
   label,
-  termId,
+  workspaceId,
   agentTermId,
   onClose,
   onJump,
@@ -21,7 +21,7 @@ export function DiffView({
   checkout: string;
   repoRoot?: string;
   label?: string;
-  termId: string;
+  workspaceId: string;
   agentTermId?: string;
   onClose: () => void;
   onJump: () => void;
@@ -95,7 +95,7 @@ export function DiffView({
   const doRemove = (force: boolean) => {
     setConfirmRemove(false);
     lazed
-      .worktreeRemove(termId, force)
+      .workspaceRemove(workspaceId, force)
       .then(() => onClose())
       .catch((e) => setRemoveErr(String(e)));
   };

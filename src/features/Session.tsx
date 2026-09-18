@@ -44,7 +44,7 @@ export function Session({
 }: {
   snap: Snapshot | null;
   focusedTermId: string | null;
-  onJumpTerm: (termId: string, projectId: string) => void;
+  onJumpTerm: (termId: string) => void;
   onFocusProject: (id: string) => void;
   onClose: () => void;
 }) {
@@ -77,6 +77,10 @@ export function Session({
 
   const projects = snap?.projects ?? [];
   const termsById = new Map((snap?.terminals ?? []).map((t) => [t.term_id, t]));
+  const wsById = new Map(
+    (snap?.workspaces ?? []).map((w) => [w.workspace_id, w]),
+  );
+  const tabById = new Map((snap?.tabs ?? []).map((t) => [t.tab_id, t]));
   const allTerms = snap?.terminals ?? [];
 
   const counts = new Map<AgentStatus, number>();
@@ -92,8 +96,8 @@ export function Session({
   const termName = (t: TerminalInfo) =>
     t.label ?? t.agent_kind ?? basename(t.cwd) ?? t.term_id;
 
-  const jump = (t: TerminalInfo, projectId: string) => {
-    onJumpTerm(t.term_id, projectId);
+  const jump = (t: TerminalInfo) => {
+    onJumpTerm(t.term_id);
     onClose();
   };
 
@@ -191,9 +195,9 @@ export function Session({
               <div className="sess-none">no projects in this session</div>
             )}
             {projects.map((p) => {
-              const terms = p.terminals
-                .map((id) => termsById.get(id))
-                .filter((t): t is TerminalInfo => Boolean(t));
+              const workspaces = p.workspaces
+                .map((id) => wsById.get(id))
+                .filter((w): w is NonNullable<typeof w> => Boolean(w));
               const name = p.label ?? basename(p.repo_root) ?? p.project_id;
               return (
                 <div key={p.project_id} className="set-card sess-proj">
@@ -218,55 +222,83 @@ export function Session({
                       {p.focused ? " · focused" : ""}
                     </span>
                   </button>
-                  {terms.length === 0 && (
-                    <div className="sess-none">no terminals</div>
+                  {workspaces.length === 0 && (
+                    <div className="sess-none">no workspaces</div>
                   )}
-                  {terms.map((t) => {
-                    const st = t.agent_status ?? "unknown";
-                    const meta = [
-                      t.term_id,
-                      t.kind === "worktree" ? (t.branch ?? "worktree") : t.kind,
-                      t.agent_kind,
-                      t.cols && t.rows ? `${t.cols}×${t.rows}` : null,
-                      t.dead ? "dead" : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ");
+                  {workspaces.map((ws) => {
+                    const wsName =
+                      ws.label ??
+                      ws.branch ??
+                      basename(ws.path) ??
+                      ws.workspace_id;
+                    const panes = ws.tabs
+                      .flatMap((tid) => tabById.get(tid)?.panes ?? [])
+                      .map((pid) => termsById.get(pid))
+                      .filter((t): t is TerminalInfo => Boolean(t));
                     return (
-                      <button
-                        key={t.term_id}
-                        type="button"
-                        className={`sess-term ${
-                          t.term_id === focusedTermId ? "focused" : ""
-                        }`}
-                        title={`${t.cwd}\n${t.command ?? ""}${
-                          t.scroll
-                            ? `\nscroll ${t.scroll.offset_from_bottom}/${t.scroll.max_offset_from_bottom}`
-                            : ""
-                        }`}
-                        onClick={() => jump(t, p.project_id)}
-                      >
-                        <span className={`dot ${st}`} />
-                        <HugeiconsIcon
-                          icon={
-                            t.agent_kind
-                              ? BotIcon
-                              : t.kind === "worktree"
-                                ? GitBranchIcon
-                                : TerminalIcon
-                          }
-                          size={12}
-                          strokeWidth={1.5}
-                          className="set-row-ico"
-                        />
-                        <span className="sess-term-main">
-                          <span className={`sess-term-name st-${st}`}>
-                            {termName(t)}
+                      <div key={ws.workspace_id} className="sess-ws">
+                        <div className="sess-ws-head" title={ws.path}>
+                          <HugeiconsIcon
+                            icon={GitBranchIcon}
+                            size={11}
+                            strokeWidth={1.5}
+                            className="set-row-ico"
+                          />
+                          <span className="sess-ws-name">{wsName}</span>
+                          <span className="sess-dim">
+                            {ws.is_main ? "main" : "worktree"} ·{" "}
+                            {ws.workspace_id}
                           </span>
-                          <span className="sess-term-sub">{t.cwd}</span>
-                        </span>
-                        <span className="sess-dim">{meta}</span>
-                      </button>
+                        </div>
+                        {panes.length === 0 && (
+                          <div className="sess-none">no panes</div>
+                        )}
+                        {panes.map((t) => {
+                          const st = t.agent_status ?? "unknown";
+                          const tabLabel = t.tab_id
+                            ? (tabById.get(t.tab_id)?.label ?? t.tab_id)
+                            : null;
+                          const meta = [
+                            t.term_id,
+                            tabLabel,
+                            t.agent_kind,
+                            t.cols && t.rows ? `${t.cols}×${t.rows}` : null,
+                            t.dead ? "dead" : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ");
+                          return (
+                            <button
+                              key={t.term_id}
+                              type="button"
+                              className={`sess-term ${
+                                t.term_id === focusedTermId ? "focused" : ""
+                              }`}
+                              title={`${t.cwd}\n${t.command ?? ""}${
+                                t.scroll
+                                  ? `\nscroll ${t.scroll.offset_from_bottom}/${t.scroll.max_offset_from_bottom}`
+                                  : ""
+                              }`}
+                              onClick={() => jump(t)}
+                            >
+                              <span className={`dot ${st}`} />
+                              <HugeiconsIcon
+                                icon={t.agent_kind ? BotIcon : TerminalIcon}
+                                size={12}
+                                strokeWidth={1.5}
+                                className="set-row-ico"
+                              />
+                              <span className="sess-term-main">
+                                <span className={`sess-term-name st-${st}`}>
+                                  {termName(t)}
+                                </span>
+                                <span className="sess-term-sub">{t.cwd}</span>
+                              </span>
+                              <span className="sess-dim">{meta}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
                     );
                   })}
                 </div>

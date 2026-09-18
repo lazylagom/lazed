@@ -11,7 +11,8 @@
     "test": "vitest run",
     "format": "biome format --write .",
     "fetch-herdr": "sh scripts/fetch-herdr",
-    "dist": "bun run fetch-herdr && tauri build --config src-tauri/tauri.bundle.json"
+    "stage-lazed": "sh scripts/stage-lazed",
+    "dist": "bun run stage-lazed && tauri build --config src-tauri/tauri.bundle.json"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.3.3",

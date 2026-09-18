@@ -52,3 +52,21 @@ pub fn worktrees_dir() -> PathBuf {
 pub fn ensure_dir() -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir())
 }
+
+/// Commit a complete private state file without truncating the previous copy.
+pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path.parent().ok_or_else(|| std::io::Error::other("missing parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(".state-{}.tmp", crate::control::id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(tmp); }
+    result
+}

@@ -29,9 +29,9 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "icon": ["icons/icon.png"],
+    "icon": ["icons/icon.icns", "icons/icon.png"],
     "category": "DeveloperTool",
-    "shortDescription": "GUI client for the herdr agent runtime",
-    "longDescription": "lazed - a desktop GUI front-end for herdr terminal workspaces"
+    "shortDescription": "GUI client for the lazed workspace daemon",
+    "longDescription": "lazed - a desktop GUI front-end for lazed terminal workspaces"
   }
 }

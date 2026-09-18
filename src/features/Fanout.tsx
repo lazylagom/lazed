@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { AGENT_KINDS } from "../shared/lazed";
 
 export interface FanoutRequest {
   repo: string;
@@ -7,9 +6,10 @@ export interface FanoutRequest {
   prefix: string;
   kinds: string[];
   prompt: string;
+  allowDirty: boolean;
 }
 
-const POPULAR = ["claude", "codex", "gemini", "opencode", "devin"];
+const MANAGED_KINDS = ["claude", "codex", "devin", "pi"];
 
 export function Fanout({
   defaultRepo,
@@ -25,6 +25,7 @@ export function Fanout({
   const [prefix, setPrefix] = useState("fanout");
   const [kinds, setKinds] = useState<string[]>(["claude"]);
   const [prompt, setPrompt] = useState("");
+  const [allowDirty, setAllowDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const repoRef = useRef<HTMLInputElement>(null);
 
@@ -37,7 +38,7 @@ export function Fanout({
     setKinds((ks) => (ks.includes(k) ? ks.filter((x) => x !== k) : [...ks, k]));
 
   const submit = () => {
-    if (!repo.trim() || kinds.length === 0 || busy) return;
+    if (!repo.trim() || !prompt.trim() || kinds.length === 0 || busy) return;
     setBusy(true);
     onSubmit({
       repo: repo.trim(),
@@ -45,13 +46,9 @@ export function Fanout({
       prefix: prefix.trim() || "fanout",
       kinds,
       prompt: prompt.trim(),
+      allowDirty,
     });
   };
-
-  const ordered = [
-    ...POPULAR,
-    ...AGENT_KINDS.filter((k) => !POPULAR.includes(k)),
-  ];
 
   return (
     <div className="modal-overlay" onMouseDown={onClose}>
@@ -84,7 +81,7 @@ export function Fanout({
           />
         </div>
         <div className="fanout-kinds">
-          {ordered.map((k) => (
+          {MANAGED_KINDS.map((k) => (
             <button
               key={k}
               type="button"
@@ -105,13 +102,23 @@ export function Fanout({
         <button
           type="button"
           className="fanout-go"
-          disabled={busy || !repo.trim() || kinds.length === 0}
+          disabled={
+            busy || !repo.trim() || !prompt.trim() || kinds.length === 0
+          }
           onClick={submit}
         >
           {busy
             ? "creating…"
             : `fan out → ${kinds.length} worktree${kinds.length === 1 ? "" : "s"}`}
         </button>
+        <label>
+          <input
+            type="checkbox"
+            checked={allowDirty}
+            onChange={(e) => setAllowDirty(e.target.checked)}
+          />
+          Allow a dirty source checkout (uncommitted changes will NOT be copied)
+        </label>
       </div>
     </div>
   );

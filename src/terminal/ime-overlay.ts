@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Terminal } from "@xterm/xterm";
+import { safeUnlisten } from "../shared/unlisten";
 import { translateKeyEvent } from "./keymap";
 
 /**
@@ -283,6 +284,18 @@ export class IMEOverlay {
    * copies the xterm selection when one exists.
    */
   private handleMetaKey(e: KeyboardEvent): void {
+    if (
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.shiftKey &&
+      (e.key === "ArrowLeft" || e.key === "ArrowRight")
+    ) {
+      e.preventDefault();
+      // Readline and agent prompt editors use Ctrl+A/E for line boundaries.
+      this.writeToPty(e.key === "ArrowLeft" ? "\x01" : "\x05");
+      this.input.value = "";
+      return;
+    }
     if (e.key === "c") {
       const selection = this.terminal.getSelection();
       if (selection) {
@@ -324,11 +337,11 @@ export class IMEOverlay {
 
     void getCurrentWindow()
       .onDragDropEvent((event) => {
-        if (event.payload.type !== "drop") {
+        if (this.isDisposed || event.payload.type !== "drop") {
           return;
         }
         if (
-          !this.containsPhysicalPosition(
+          !this.containsDropPosition(
             event.payload.position.x,
             event.payload.position.y,
           )
@@ -338,11 +351,14 @@ export class IMEOverlay {
         this.writeDroppedPaths(event.payload.paths);
       })
       .then((unlisten) => {
+        // safeUnlisten defers past the registration eval — calling
+        // unlisten() right after listen() resolves races and leaks the
+        // backend listener (tauri-apps/tauri#15799)
         if (this.isDisposed) {
-          unlisten();
+          safeUnlisten(unlisten);
           return;
         }
-        this.disposables.push(unlisten);
+        this.disposables.push(() => safeUnlisten(unlisten));
       })
       .catch(() => {
         // no file-drop bridge in browser tests / non-Tauri environments
@@ -651,19 +667,22 @@ export class IMEOverlay {
     this.input.focus();
   }
 
-  private containsPhysicalPosition(
-    physicalX: number,
-    physicalY: number,
-  ): boolean {
-    const scale = getDevicePixelRatio();
-    const cssX = physicalX / scale;
-    const cssY = physicalY / scale;
+  private containsDropPosition(x: number, y: number): boolean {
+    // wry 0.55.1 forwards AppKit logical points on macOS, even though
+    // Tauri labels them PhysicalPosition. Dividing by Retina's DPR again
+    // shifts a drop into the pane to its left. Keep physical-pixel
+    // conversion for the other platforms.
+    const scale = /Macintosh|Mac OS X/.test(navigator.userAgent)
+      ? 1
+      : getDevicePixelRatio();
+    const cssX = x / scale;
+    const cssY = y / scale;
     const rect = this.container.getBoundingClientRect();
     return (
       cssX >= rect.left &&
-      cssX <= rect.right &&
+      cssX < rect.right &&
       cssY >= rect.top &&
-      cssY <= rect.bottom
+      cssY < rect.bottom
     );
   }
 

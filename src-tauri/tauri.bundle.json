@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedouble/tauri-apps/main/tauri-conf-v2.schema.json",
   "bundle": {
-    "resources": ["bin/herdr"]
+    "resources": ["bin/lazed", "skills/lazed"]
   }
 }

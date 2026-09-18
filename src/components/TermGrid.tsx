@@ -1,8 +1,7 @@
 import type { TerminalInfo } from "../shared/lazed";
 import { TermView } from "./TermView";
 
-/** Equal-width flex row of a project's terminals. Commander first, then
- *  worktrees, then plain terminals (order matches project.terminals). */
+/** Equal-width flex row of a tab's panes (order matches tab.panes). */
 export function TermGrid({
   terms,
   focusedTerm,
@@ -21,7 +20,7 @@ export function TermGrid({
           <TermView
             term={t}
             focused={t.term_id === focusedTerm}
-            onFocus={() => onFocusTerm(t.term_id)}
+            onFocus={onFocusTerm}
             onClose={onCloseTerm}
           />
         </div>

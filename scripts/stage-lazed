@@ -1,0 +1,18 @@
+#!/bin/sh
+# Stage the lazed daemon binary + agent skill into src-tauri/ so
+# `tauri build` can bundle them via bundle.resources:
+#   src-tauri/bin/lazed    → Contents/Resources/bin/lazed (daemon + CLI)
+#   src-tauri/skills/lazed → Contents/Resources/skills/lazed (skill source
+#                            `lazed install` links into ~/.agents & ~/.claude)
+set -eu
+cd "$(dirname "$0")/.."
+
+cargo build --release --manifest-path daemon/Cargo.toml
+
+mkdir -p src-tauri/bin src-tauri/skills
+cp daemon/target/release/lazed src-tauri/bin/lazed
+chmod +x src-tauri/bin/lazed
+rm -rf src-tauri/skills/lazed
+cp -R skills/lazed src-tauri/skills/lazed
+
+echo "stage-lazed: bundled daemon + skills/lazed"

@@ -2,15 +2,17 @@ import {
   ArrowDown01Icon,
   ArrowRight01Icon,
   BotIcon,
-  Delete02Icon,
-  FolderAddIcon,
-  FolderGitIcon,
+  Delete01Icon,
+  Folder01Icon,
+  FolderPlusIcon,
   GitBranchIcon,
-  GroupItemsIcon,
+  GitCompareIcon,
+  GroupLayersIcon,
   MoreHorizontalIcon,
+  PencilEdit01Icon,
   PlusIcon,
+  SparklesIcon,
   TerminalIcon,
-  TowerControlIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -21,8 +23,9 @@ import type {
   ProjectInfo,
   Snapshot,
   TerminalInfo,
+  WorkspaceInfo,
 } from "../shared/lazed";
-import { SIDEBAR_RESET_EVENT } from "../shared/settings";
+import { useSidebarWidth } from "./sidebar-width";
 
 function statusClass(s?: AgentStatus) {
   return `st-${s ?? "unknown"}`;
@@ -43,17 +46,7 @@ function confirmClose(title: string, message: string) {
   }).catch(() => false);
 }
 
-const SIDE_MIN = 180;
-const SIDE_MAX = 560;
-const SIDE_DEFAULT = 288;
-const SIDE_KEY = "sidebar-width";
 const COLLAPSED_KEY = "sidebar-collapsed-groups";
-
-function loadSideWidth() {
-  const v = Number(localStorage.getItem(SIDE_KEY));
-  if (!Number.isFinite(v) || v <= 0) return SIDE_DEFAULT;
-  return Math.min(SIDE_MAX, Math.max(SIDE_MIN, v));
-}
 
 function loadCollapsed(): ReadonlySet<string> {
   try {
@@ -96,30 +89,24 @@ function RenameInput({
   );
 }
 
-/** A terminal child row — a worktree or plain terminal inside a project. */
-function TermRow({
+/** A pane row — one terminal inside a workspace's tab row. */
+function PaneRow({
   t,
-  num,
   focused,
   onFocus,
   onClose,
-  onDiff,
 }: {
   t: TerminalInfo;
-  num?: number;
   focused: boolean;
   onFocus: () => void;
   onClose: () => void;
-  onDiff?: () => void;
 }) {
   const name =
-    t.label ?? t.branch ?? t.agent_kind ?? basename(t.cwd) ?? t.term_id;
+    t.label ?? t.agent_kind ?? t.branch ?? basename(t.cwd) ?? t.term_id;
   const close = async () => {
     const ok = await confirmClose(
-      t.kind === "worktree" ? "Remove Worktree" : "Close Terminal",
-      t.kind === "worktree"
-        ? `Remove worktree “${name}”? Its terminal will be killed and the checkout deleted.`
-        : `Close terminal “${name}”?`,
+      "Close Pane",
+      `Close pane “${name}”? Its shell will be killed.`,
     );
     if (ok) onClose();
   };
@@ -133,40 +120,19 @@ function TermRow({
       >
         <span className={`dot ${t.agent_status ?? "unknown"}`} />
         <HugeiconsIcon
-          icon={
-            t.agent_kind
-              ? BotIcon
-              : t.kind === "worktree"
-                ? GitBranchIcon
-                : TerminalIcon
-          }
+          icon={t.agent_kind ? BotIcon : TerminalIcon}
           size={12}
           strokeWidth={1.5}
           className="side-ico"
         />
-        {num !== undefined && (
-          <span className="side-ws-num" title={`terminal ${num}`}>
-            {num}
-          </span>
-        )}
         <span className={`side-ws-name ${statusClass(t.agent_status)}`}>
           {name}
         </span>
       </button>
-      {t.kind === "worktree" && onDiff && (
-        <button
-          type="button"
-          className="side-close"
-          title={`diff ${t.cwd}`}
-          onClick={onDiff}
-        >
-          <HugeiconsIcon icon={GitBranchIcon} size={11} strokeWidth={1.5} />
-        </button>
-      )}
       <button
         type="button"
         className="side-close"
-        title={t.kind === "worktree" ? "remove worktree" : "close terminal"}
+        title="close pane"
         onClick={close}
       >
         ✕
@@ -175,10 +141,101 @@ function TermRow({
   );
 }
 
+/** A workspace card under a project — one checkout with its tabs' panes. */
+function WorkspaceRow({
+  ws,
+  panes,
+  focusedWs,
+  focusedTermId,
+  onFocusWorkspace,
+  onJumpTerm,
+  onCloseTerm,
+  onRemoveWorkspace,
+  onDiff,
+}: {
+  ws: WorkspaceInfo;
+  panes: TerminalInfo[];
+  focusedWs: boolean;
+  focusedTermId: string | null;
+  onFocusWorkspace: (wsId: string) => void;
+  onJumpTerm: (termId: string) => void;
+  onCloseTerm: (t: TerminalInfo) => void;
+  onRemoveWorkspace: (ws: WorkspaceInfo) => void;
+  onDiff: (ws: WorkspaceInfo) => void;
+}) {
+  const name = ws.label ?? ws.branch ?? basename(ws.path) ?? ws.workspace_id;
+  const remove = async () => {
+    const ok = await confirmClose(
+      "Remove Workspace",
+      `Remove workspace “${name}”? Its ${panes.length} pane(s) will be killed and the worktree checkout deleted.`,
+    );
+    if (ok) onRemoveWorkspace(ws);
+  };
+  return (
+    <div className="side-tree-group">
+      <div className={`side-ws-head ${focusedWs ? "focused" : ""}`}>
+        <button
+          type="button"
+          className="side-ws-label side-primary-label"
+          onClick={() => onFocusWorkspace(ws.workspace_id)}
+          title={ws.path}
+        >
+          <HugeiconsIcon
+            icon={GitBranchIcon}
+            size={12}
+            strokeWidth={1.5}
+            className="side-ico"
+          />
+          <span className="side-ws-name">{name}</span>
+          {ws.is_main && <span className="side-pill">main</span>}
+          {panes.length > 0 && (
+            <span className="side-tree-count">{panes.length}</span>
+          )}
+        </button>
+        {!ws.is_main && (
+          <button
+            type="button"
+            className="side-close"
+            title={`diff ${ws.path}`}
+            onClick={() => onDiff(ws)}
+          >
+            <HugeiconsIcon icon={GitCompareIcon} size={11} strokeWidth={1.5} />
+          </button>
+        )}
+        {!ws.is_main && (
+          <button
+            type="button"
+            className="side-close"
+            title="remove workspace (worktree)"
+            onClick={remove}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      {panes.length > 0 && (
+        <div className="side-tree-children">
+          {panes.map((t) => (
+            <PaneRow
+              key={t.term_id}
+              t={t}
+              focused={t.term_id === focusedTermId}
+              onFocus={() => onJumpTerm(t.term_id)}
+              onClose={() => onCloseTerm(t)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Sidebar({
   snap,
+  focusedWorkspaceId,
   focusedTermId,
   onFocusProject,
+  onFocusWorkspace,
   onJumpTerm,
   onNewProject,
   onNewGroup,
@@ -188,14 +245,16 @@ export function Sidebar({
   onRemoveGroup,
   onAssignProject,
   onCloseTerm,
+  onRemoveWorkspace,
   onDiff,
   onOrchestrate,
-  rollup,
 }: {
   snap: Snapshot | null;
+  focusedWorkspaceId: string | null;
   focusedTermId: string | null;
   onFocusProject: (id: string) => void;
-  onJumpTerm: (termId: string, projectId: string) => void;
+  onFocusWorkspace: (wsId: string) => void;
+  onJumpTerm: (termId: string) => void;
   onNewProject: () => void;
   /** creates a group — resolves to its id so the caller can enter rename */
   onNewGroup: () => Promise<string | null>;
@@ -206,28 +265,38 @@ export function Sidebar({
   /** groupId null = move back to ungrouped */
   onAssignProject: (projectId: string, groupId: string | null) => void;
   onCloseTerm: (t: TerminalInfo) => void;
-  onDiff: (t: TerminalInfo) => void;
+  onRemoveWorkspace: (ws: WorkspaceInfo) => void;
+  onDiff: (ws: WorkspaceInfo) => void;
   onOrchestrate: (projectId: string) => void;
-  rollup: (s: (AgentStatus | undefined)[]) => AgentStatus;
 }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
   const [collapsed, setCollapsed] =
     useState<ReadonlySet<string>>(loadCollapsed);
-  const [width, setWidth] = useState(loadSideWidth);
+  const { width, sideRef, onResizeDown, resetWidth } = useSidebarWidth();
   const [menu, setMenu] = useState<{
     kind: "project" | "group";
     key: string;
     x: number;
     y: number;
   } | null>(null);
-  const sideRef = useRef<HTMLDivElement>(null);
   const projects = snap?.projects ?? [];
   const groups = snap?.groups ?? [];
   const termsById = new Map((snap?.terminals ?? []).map((t) => [t.term_id, t]));
+  const wsById = new Map(
+    (snap?.workspaces ?? []).map((w) => [w.workspace_id, w]),
+  );
+  const tabById = new Map((snap?.tabs ?? []).map((t) => [t.tab_id, t]));
   const projById = new Map(projects.map((p) => [p.project_id, p]));
   const groupedIds = new Set(groups.flatMap((g) => g.projects));
   const ungrouped = projects.filter((p) => !groupedIds.has(p.project_id));
+
+  /** a workspace's panes in display order — tab order, then pane order */
+  const wsPanes = (ws: WorkspaceInfo): TerminalInfo[] =>
+    ws.tabs
+      .flatMap((tid) => tabById.get(tid)?.panes ?? [])
+      .map((pid) => termsById.get(pid))
+      .filter((t): t is TerminalInfo => Boolean(t));
 
   const toggleGroup = (id: string) =>
     setCollapsed((prev) => {
@@ -238,20 +307,19 @@ export function Sidebar({
       return next;
     });
 
-  const renderProject = (p: ProjectInfo, idx: number) => {
-    const terms = p.terminals
-      .map((id) => termsById.get(id))
-      .filter((t): t is TerminalInfo => Boolean(t));
-    const root = terms.find((t) => t.kind !== "worktree") ?? terms[0];
-    const worktrees = terms.filter((t) => t.kind === "worktree");
-    const plains = terms.filter((t) => t.kind !== "worktree");
+  const renderProject = (p: ProjectInfo) => {
+    const workspaces = p.workspaces
+      .map((id) => wsById.get(id))
+      .filter((w): w is WorkspaceInfo => Boolean(w));
     const name = p.label ?? basename(p.repo_root) ?? p.project_id;
-    const projStatus = rollup(terms.map((t) => t.agent_status));
+    const projFocused = workspaces.some(
+      (w) => w.workspace_id === focusedWorkspaceId,
+    );
 
     return (
       <div
         key={p.project_id}
-        className={`side-proj ${p.focused ? "focused" : ""}`}
+        className={`side-proj ${projFocused ? "focused" : ""}`}
       >
         <div className="side-proj-head">
           {renaming === p.project_id ? (
@@ -267,24 +335,17 @@ export function Sidebar({
             <button
               type="button"
               className="side-proj-label"
-              onClick={() =>
-                root
-                  ? onJumpTerm(root.term_id, p.project_id)
-                  : onFocusProject(p.project_id)
-              }
+              onClick={() => onFocusProject(p.project_id)}
               onDoubleClick={() => setRenaming(p.project_id)}
-              title={`${p.repo_root} — root terminal (double-click to rename)`}
+              title={`${p.repo_root} (double-click to rename)`}
             >
               <HugeiconsIcon
-                icon={FolderGitIcon}
+                icon={Folder01Icon}
                 size={13}
                 strokeWidth={1.5}
                 className="side-proj-ico"
               />
-              <span className="side-ws-num" title={`project ${idx + 1}`}>
-                {idx + 1}
-              </span>
-              <span className={statusClass(projStatus)}>{name}</span>
+              <span>{name}</span>
             </button>
           )}
           <button
@@ -293,11 +354,7 @@ export function Sidebar({
             title="start orchestrator agent"
             onClick={() => onOrchestrate(p.project_id)}
           >
-            <HugeiconsIcon
-              icon={TowerControlIcon}
-              size={12}
-              strokeWidth={1.5}
-            />
+            <HugeiconsIcon icon={SparklesIcon} size={12} strokeWidth={1.5} />
           </button>
           <button
             type="button"
@@ -321,46 +378,20 @@ export function Sidebar({
             />
           </button>
         </div>
-        {terms.length > 0 && (
+        {workspaces.length > 0 && (
           <div className="side-proj-children">
-            {plains.length > 0 && (
-              <div className="side-tree-group">
-                <button
-                  type="button"
-                  className="side-tree-label side-primary-label"
-                  onClick={() => root && onJumpTerm(root.term_id, p.project_id)}
-                  title={root?.cwd}
-                >
-                  <span
-                    className={`dot ${rollup(plains.map((t) => t.agent_status))}`}
-                  />
-                  <span className="side-primary-name">
-                    {root?.branch ?? basename(p.repo_root)}
-                  </span>
-                  <span className="side-pill">primary</span>
-                  <span className="side-tree-count">{plains.length}</span>
-                </button>
-                <div className="side-tree-children">
-                  {plains.map((t) => (
-                    <TermRow
-                      key={t.term_id}
-                      t={t}
-                      focused={t.term_id === focusedTermId}
-                      onFocus={() => onJumpTerm(t.term_id, p.project_id)}
-                      onClose={() => onCloseTerm(t)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-            {worktrees.map((t) => (
-              <TermRow
-                key={t.term_id}
-                t={t}
-                focused={t.term_id === focusedTermId}
-                onFocus={() => onJumpTerm(t.term_id, p.project_id)}
-                onClose={() => onCloseTerm(t)}
-                onDiff={() => onDiff(t)}
+            {workspaces.map((ws) => (
+              <WorkspaceRow
+                key={ws.workspace_id}
+                ws={ws}
+                panes={wsPanes(ws)}
+                focusedWs={ws.workspace_id === focusedWorkspaceId}
+                focusedTermId={focusedTermId}
+                onFocusWorkspace={onFocusWorkspace}
+                onJumpTerm={onJumpTerm}
+                onCloseTerm={onCloseTerm}
+                onRemoveWorkspace={onRemoveWorkspace}
+                onDiff={onDiff}
               />
             ))}
           </div>
@@ -373,11 +404,6 @@ export function Sidebar({
     const members = g.projects
       .map((id) => projById.get(id))
       .filter((p): p is ProjectInfo => Boolean(p));
-    const gStatus = rollup(
-      members.flatMap((p) =>
-        p.terminals.map((id) => termsById.get(id)?.agent_status),
-      ),
-    );
     const isCollapsed = collapsed.has(g.group_id);
     const label = g.label ?? "Group";
     return (
@@ -407,14 +433,12 @@ export function Sidebar({
                 className="side-caret"
               />
               <HugeiconsIcon
-                icon={GroupItemsIcon}
+                icon={GroupLayersIcon}
                 size={12}
                 strokeWidth={1.5}
                 className="side-ico"
               />
-              <span className={`side-group-name ${statusClass(gStatus)}`}>
-                {label}
-              </span>
+              <span className="side-group-name">{label}</span>
               <span className="side-tree-count">{members.length}</span>
             </button>
           )}
@@ -442,7 +466,7 @@ export function Sidebar({
         </div>
         {!isCollapsed && (
           <div className="side-group-children">
-            {members.map((p) => renderProject(p, projects.indexOf(p)))}
+            {members.map((p) => renderProject(p))}
           </div>
         )}
       </div>
@@ -451,38 +475,7 @@ export function Sidebar({
 
   const rows: React.ReactNode[] = [];
   for (const g of groups) rows.push(renderGroup(g));
-  for (const p of ungrouped) rows.push(renderProject(p, projects.indexOf(p)));
-
-  const onResizeDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideRef.current?.getBoundingClientRect().width ?? width;
-    const clamp = (v: number) => Math.min(SIDE_MAX, Math.max(SIDE_MIN, v));
-    const onMove = (ev: MouseEvent) =>
-      setWidth(clamp(startW + ev.clientX - startX));
-    const onUp = (ev: MouseEvent) => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      const w = Math.round(clamp(startW + ev.clientX - startX));
-      localStorage.setItem(SIDE_KEY, String(w));
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
-  const resetWidth = () => {
-    setWidth(SIDE_DEFAULT);
-    localStorage.setItem(SIDE_KEY, String(SIDE_DEFAULT));
-  };
-
-  useEffect(() => {
-    const onReset = () => {
-      setWidth(SIDE_DEFAULT);
-      localStorage.setItem(SIDE_KEY, String(SIDE_DEFAULT));
-    };
-    window.addEventListener(SIDEBAR_RESET_EVENT, onReset);
-    return () => window.removeEventListener(SIDEBAR_RESET_EVENT, onReset);
-  }, []);
+  for (const p of ungrouped) rows.push(renderProject(p));
 
   useEffect(() => {
     if (!menu) return;
@@ -500,15 +493,13 @@ export function Sidebar({
     const p = projects.find((x) => x.project_id === m.key);
     if (!p) return;
     const name = p.label ?? basename(p.repo_root) ?? p.project_id;
-    const ok = await ask(
-      `Close project “${name}” and its ${p.terminals.length} terminal(s)?`,
-      {
-        title: "Remove Project",
-        kind: "warning",
-        okLabel: "Remove",
-        cancelLabel: "Cancel",
-      },
-    ).catch(() => false);
+    const n = p.workspaces.length;
+    const ok = await ask(`Close project “${name}” and its ${n} workspace(s)?`, {
+      title: "Remove Project",
+      kind: "warning",
+      okLabel: "Remove",
+      cancelLabel: "Cancel",
+    }).catch(() => false);
     if (ok) onCloseProject(p.project_id);
   };
 
@@ -543,7 +534,7 @@ export function Sidebar({
   return (
     <div ref={sideRef} className="sidebar" style={{ width }}>
       <div className="side-head">
-        <span className="side-head-label">Projects</span>
+        <span className="side-head-label">PROJECTS</span>
         <button
           type="button"
           className="side-head-btn"
@@ -553,7 +544,7 @@ export function Sidebar({
             if (id) setRenamingGroup(id);
           }}
         >
-          <HugeiconsIcon icon={FolderAddIcon} size={13} strokeWidth={1.5} />
+          <HugeiconsIcon icon={FolderPlusIcon} size={22} strokeWidth={1.5} />
         </button>
         <button
           type="button"
@@ -561,7 +552,7 @@ export function Sidebar({
           title="import project (⇧⌘N)"
           onClick={onNewProject}
         >
-          <HugeiconsIcon icon={PlusIcon} size={13} strokeWidth={1.5} />
+          <HugeiconsIcon icon={PlusIcon} size={22} strokeWidth={1.5} />
         </button>
       </div>
       <div className="side-scroll">{rows}</div>
@@ -639,7 +630,7 @@ export function Sidebar({
                   onClick={removeProject}
                 >
                   <HugeiconsIcon
-                    icon={Delete02Icon}
+                    icon={Delete01Icon}
                     size={13}
                     strokeWidth={1.5}
                   />
@@ -658,7 +649,7 @@ export function Sidebar({
                   }}
                 >
                   <HugeiconsIcon
-                    icon={MoreHorizontalIcon}
+                    icon={PencilEdit01Icon}
                     size={13}
                     strokeWidth={1.5}
                   />
@@ -671,7 +662,7 @@ export function Sidebar({
                   onClick={removeGroup}
                 >
                   <HugeiconsIcon
-                    icon={Delete02Icon}
+                    icon={Delete01Icon}
                     size={13}
                     strokeWidth={1.5}
                   />

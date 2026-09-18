@@ -173,8 +173,41 @@ pub fn row_ansi<I: Iterator<Item = (char, Style)>>(cells: I) -> String {
     out
 }
 
+/// Cursor-position escape + serialized content for one viewport row.
+pub fn write_row(out: &mut Vec<u8>, row_idx: usize, row: &str) {
+    // \x1b[K erases the row first — without it a shorter rewrite leaves
+    // the previous row's tail on screen (ghost text)
+    out.extend_from_slice(format!("\x1b[{};1H\x1b[K", row_idx + 1).as_bytes());
+    out.extend_from_slice(row.as_bytes());
+}
+
+/// Clear everything at and below `from` — used when the rowset shrinks.
+pub fn write_clear_below(out: &mut Vec<u8>, from: usize) {
+    out.extend_from_slice(format!("\x1b[{};1H\x1b[0J", from + 1).as_bytes());
+}
+
+/// Position/shape/visibility trailer for the application cursor. Row
+/// painting moves the client cursor, so this restores it after a repaint
+/// and also delivers cursor-only changes.
+pub fn write_cursor(out: &mut Vec<u8>, cursor: Cursor) {
+    out.extend_from_slice(
+        format!(
+            "\x1b[{};{}H\x1b[{} q\x1b[?25{}",
+            cursor.row,
+            cursor.col,
+            cursor.style,
+            if cursor.visible { 'h' } else { 'l' }
+        )
+        .as_bytes(),
+    );
+}
+
 /// Diff two serialized rowsets; returns ANSI bytes and the new rows.
 /// `full` forces a complete repaint.
+///
+/// Test-only reference implementation — the live emitter (`term::emit_frame`)
+/// shares the `write_*` helpers but skips serializing undamaged rows.
+#[cfg(test)]
 pub fn diff_frame(
     prev: &mut Vec<String>,
     next: Vec<String>,
@@ -187,29 +220,15 @@ pub fn diff_frame(
         if !full && prev.get(i) == Some(row) {
             continue;
         }
-        // \x1b[K erases the row first — without it a shorter rewrite leaves
-        // the previous row's tail on screen (ghost text)
-        out.extend_from_slice(format!("\x1b[{};1H\x1b[K", i + 1).as_bytes());
-        out.extend_from_slice(row.as_bytes());
+        write_row(&mut out, i, row);
     }
     // shrink/grow mismatch: clear leftover region
     if prev.len() > next.len() {
-        out.extend_from_slice(format!("\x1b[{};1H\x1b[0J", next.len() + 1).as_bytes());
+        write_clear_below(&mut out, next.len());
     }
     *prev = next;
-    // Row painting moves the client cursor. Restore the application's cursor
-    // after every repaint, and emit cursor-only changes even without new text.
     if !out.is_empty() || full || *prev_cursor != Some(cursor) {
-        out.extend_from_slice(
-            format!(
-                "\x1b[{};{}H\x1b[{} q\x1b[?25{}",
-                cursor.row,
-                cursor.col,
-                cursor.style,
-                if cursor.visible { 'h' } else { 'l' }
-            )
-            .as_bytes(),
-        );
+        write_cursor(&mut out, cursor);
     }
     *prev_cursor = Some(cursor);
     out

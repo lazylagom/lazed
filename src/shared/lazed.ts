@@ -10,7 +10,10 @@ export interface GroupInfo {
   projects: string[];
 }
 
-/** A project = one git repo. `terminals[0]` is the first terminal (root checkout). */
+/**
+ * A project = one git repo. Owns workspaces; `workspaces` is ordered —
+ * the first entry is the main-checkout workspace.
+ */
 export interface ProjectInfo {
   project_id: string;
   label?: string;
@@ -18,24 +21,53 @@ export interface ProjectInfo {
   repo_key: string;
   /** id of the group this project belongs to, if any */
   group_id?: string | null;
-  terminals: string[];
+  /** ordered workspace ids — index 0 is the main checkout */
+  workspaces: string[];
   focused?: boolean;
 }
 
-/** One terminal = one PTY owned by the daemon. */
+/** One workspace = one checkout (the main checkout or a linked worktree). */
+export interface WorkspaceInfo {
+  workspace_id: string;
+  project_id: string;
+  label?: string;
+  /** checkout path (repo_root for the main workspace) */
+  path: string;
+  /** branch at spawn — the sidebar card's display name */
+  branch?: string;
+  is_main: boolean;
+  /** ordered tab ids */
+  tabs: string[];
+}
+
+/** A tab inside a workspace — an ordered row of panes. */
+export interface TabInfo {
+  tab_id: string;
+  workspace_id: string;
+  label?: string;
+  /** ordered pane (terminal) ids */
+  panes: string[];
+}
+
+/** One terminal = one pane = one PTY owned by the daemon. */
 export interface TerminalInfo {
   term_id: string;
+  /** owning tab / workspace / project ids */
+  tab_id?: string;
+  workspace_id?: string;
+  project_id?: string;
   cwd: string;
   command?: string;
   label?: string;
-  /** "worktree" | "plain" */
+  /** "worktree" | "plain" — display tag derived from the workspace */
   kind?: string;
-  /** git branch of the checkout at spawn — the tab's display name */
+  /** git branch of the checkout at spawn */
   branch?: string;
   cols?: number;
   rows?: number;
   dead?: boolean;
   agent_kind?: string;
+  agent_name?: string | null;
   agent_status?: AgentStatus;
   scroll?: {
     offset_from_bottom: number;
@@ -48,6 +80,8 @@ export interface Snapshot {
   focused_project_id?: string;
   groups?: GroupInfo[];
   projects: ProjectInfo[];
+  workspaces?: WorkspaceInfo[];
+  tabs?: TabInfo[];
   terminals: TerminalInfo[];
 }
 
@@ -55,6 +89,14 @@ export interface Snapshot {
 export interface SessionStatus {
   running: boolean;
   version?: string;
+  /** canonical path of the running daemon binary */
+  exe?: string;
+  pid?: number;
+  /** unix seconds when the daemon process started */
+  started_at?: number;
+  /** the binary on disk is newer than the running process — restart to pick it up */
+  binary_updated?: boolean;
+  capabilities?: string[];
   terms?: number;
   projects?: number;
 }
@@ -71,15 +113,44 @@ export interface BootstrapResult {
   snapshot?: Snapshot;
 }
 
+/** One row of `lazed doctor --json` — a path the install manages. */
+export interface DoctorCheck {
+  id: string;
+  path?: string;
+  status: string;
+  detail?: string;
+}
+
+/** `lazed doctor --json` — `missing` holds check ids that need install. */
+export interface DoctorReport {
+  ok: boolean;
+  missing: string[];
+  warnings: string[];
+  checks: DoctorCheck[];
+}
+
 export const lazed = {
   bootstrap: () => invoke<BootstrapResult>("bootstrap"),
+  installStatus: () => invoke<DoctorReport>("install_status"),
+  installCli: () => invoke("install_cli"),
   snapshot: () => invoke<Snapshot>("session_snapshot"),
   status: () => invoke<SessionStatus>("session_status"),
+  /** stop + respawn the daemon; panes come back from the persisted session */
+  restartServer: () => invoke<SessionStatus>("server_restart"),
 
-  // terminal control streams
+  // pane control streams
   termClose: (termId: string) => invoke("term_close", { termId }),
-  termCreate: (projectId: string, command?: string, label?: string) =>
-    invoke<TerminalInfo>("term_create", { projectId, command, label }),
+  /**
+   * New pane. `tabId` splits a pane into an existing tab; `workspaceId` /
+   * `projectId` open a fresh tab under them (with its first pane).
+   */
+  termCreate: (opts: {
+    tabId?: string;
+    workspaceId?: string;
+    projectId?: string;
+    command?: string;
+    label?: string;
+  }) => invoke<TerminalInfo>("term_create", opts),
   termSend: (termId: string, text: string) =>
     invoke("term_send", { termId, text }),
   termRead: (termId: string, lines?: number) =>
@@ -89,7 +160,8 @@ export const lazed = {
   projectCreate: (cwd: string, label?: string, groupId?: string) =>
     invoke<{
       project: ProjectInfo;
-      terminal: { term_id: string };
+      workspace: WorkspaceInfo;
+      terminal: TerminalInfo;
     }>("project_create", { cwd, label, groupId }),
   projectFocus: (projectId: string) => invoke("project_focus", { projectId }),
   projectClose: (projectId: string) => invoke("project_close", { projectId }),
@@ -105,8 +177,8 @@ export const lazed = {
   groupAssign: (projectId: string, groupId?: string | null) =>
     invoke("group_assign", { projectId, groupId: groupId ?? null }),
 
-  // worktrees
-  worktreeCreate: (
+  // workspaces — one checkout each (main or a linked git worktree)
+  workspaceCreate: (
     projectId: string,
     branch: string,
     base?: string,
@@ -116,10 +188,25 @@ export const lazed = {
       checkout_path: string;
       branch: string;
       project_id: string;
+      workspace_id: string;
+      tab_id: string;
       terminal: TerminalInfo;
-    }>("worktree_create", { projectId, branch, base, label }),
-  worktreeRemove: (termId: string, force = false) =>
-    invoke("worktree_remove", { termId, force }),
+    }>("workspace_create", { projectId, branch, base, label }),
+  workspaceRemove: (workspaceId: string, force = false) =>
+    invoke("workspace_remove", { workspaceId, force }),
+  workspaceRename: (workspaceId: string, label: string) =>
+    invoke("workspace_rename", { workspaceId, label }),
+
+  // tabs — a named pane row inside a workspace
+  tabCreate: (workspaceId: string, label?: string, command?: string) =>
+    invoke<{ tab_id: string; terminal: TerminalInfo }>("tab_create", {
+      workspaceId,
+      label,
+      command,
+    }),
+  tabClose: (tabId: string) => invoke("tab_close", { tabId }),
+
+  // git helpers (pure — not tied to workspace entities)
   worktreeDiff: (checkout: string, base?: string) =>
     invoke<{
       branch: string;
@@ -140,6 +227,22 @@ export const lazed = {
     ),
 
   // agents
+  taskStart: (params: {
+    cwd: string;
+    kind: string;
+    text: string;
+    branch: string;
+    base?: string;
+    request_id: string;
+    allow_dirty?: boolean;
+  }) =>
+    invoke<{
+      task_id: string;
+      workspace_id?: string;
+      term_id?: string;
+      phase: string;
+      error?: string;
+    }>("task_start", { params }),
   agentStart: (termId: string, kind: string) =>
     invoke("agent_start", { termId, kind }),
   agentPrompt: (termId: string, text: string) =>

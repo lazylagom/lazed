@@ -1,14 +1,16 @@
-//! lazed daemon client — unix socket NDJSON + `lazed term attach` control
-//! streams. Replaces the herdr client: the daemon owns the model
+//! lazed daemon client — unix socket NDJSON for API calls, event streams,
+//! and per-terminal attach conns. The daemon owns the model
 //! (session > project > terminal), we just forward its protocol.
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+use crate::env;
 
 fn state_dir() -> PathBuf {
     if let Ok(d) = std::env::var("LAZED_STATE_DIR") {
@@ -50,8 +52,15 @@ fn lazed_bin() -> Result<String, String> {
 
 /// One request/response call over the socket.
 pub fn api_call(method: &str, params: Value) -> Result<Value, String> {
+    if matches!(method, "agent.start" | "agent.prompt" | "task.start") {
+        let status = api_call("session.status", json!({}))?;
+        if !status["capabilities"].as_array().is_some_and(|caps| caps.iter().any(|c| c == "agent.lifecycle.v1")) {
+            return Err("daemon_upgrade_required: finish active panes before restarting the daemon; the running version lacks safe agent launch".into());
+        }
+    }
     let mut s = UnixStream::connect(sock_path())
         .map_err(|e| format!("cannot connect {}: {e}", sock_path().display()))?;
+    s.set_read_timeout(Some(Duration::from_secs(660))).map_err(|e| e.to_string())?;
     let req = json!({"id": 1, "method": method, "params": params});
     writeln!(s, "{}", serde_json::to_string(&req).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -83,6 +92,7 @@ pub fn ensure_server() -> Result<(), String> {
     let bin = lazed_bin()?;
     Command::new(bin)
         .arg("server")
+        .envs(env::env_for_spawn())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -98,57 +108,64 @@ pub fn ensure_server() -> Result<(), String> {
     Err("lazed server did not become ready within 10s".to_string())
 }
 
-/// An attached terminal's control stream (`lazed term attach` child).
+/// Stop the daemon and bring up a fresh one from the current binary.
+/// The daemon respawns panes from its persisted session, but processes
+/// that were running inside them are gone — callers confirm first.
+pub fn restart_server() -> Result<Value, String> {
+    let was_running = api_call("server.stop", json!({})).is_ok();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while was_running && Instant::now() < deadline && server_running() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if was_running && server_running() {
+        return Err("old lazed server did not exit".to_string());
+    }
+    ensure_server()?;
+    api_call("session.status", json!({}))
+}
+
+/// An attached terminal's control stream — the socket half kept for
+/// {"type": ...} commands. Closing/shutdown unsubscribes server-side.
 pub struct ControlHandle {
-    pub child: Child,
-    pub stdin: ChildStdin,
+    pub stream: UnixStream,
 }
 
 impl ControlHandle {
     pub fn send(&mut self, msg: &Value) -> Result<(), String> {
         let mut line = serde_json::to_string(msg).map_err(|e| e.to_string())?;
         line.push('\n');
-        self.stdin
+        self.stream
             .write_all(line.as_bytes())
-            .and_then(|_| self.stdin.flush())
+            .and_then(|_| self.stream.flush())
             .map_err(|e| e.to_string())
     }
 }
 
-/// Spawn `lazed term attach <id> --cols --rows` — stdout is the frame
-/// stream, stdin takes {"type": ...} commands.
+/// Open a daemon socket conn and send `terminal.attach` — the same NDJSON
+/// channel `lazed term attach` proxies, without a subprocess per pane:
+/// pushed term.* lines come back on the reader, commands go out on the
+/// returned stream.
 pub fn open_attach_stream(
     term_id: &str,
     cols: u32,
     rows: u32,
-) -> Result<(Child, BufReader<std::process::ChildStdout>), String> {
-    let mut child = Command::new(lazed_bin()?)
-        .args([
-            "term",
-            "attach",
-            term_id,
-            "--cols",
-            &cols.to_string(),
-            "--rows",
-            &rows.to_string(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("failed to spawn lazed term attach: {e}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "attach: no stdout".to_string())?;
-    Ok((child, BufReader::new(stdout)))
-}
-
-pub fn take_stdin(child: &mut Child) -> Result<ChildStdin, String> {
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| "attach: no stdin".to_string())
+) -> Result<(UnixStream, BufReader<UnixStream>), String> {
+    let mut stream = UnixStream::connect(sock_path())
+        .map_err(|e| format!("cannot connect {}: {e}", sock_path().display()))?;
+    // No "id" — the attach reply is suppressed; this conn then carries
+    // only pushed term.* events inbound and {"type": ...} commands out.
+    let req = json!({
+        "method": "terminal.attach",
+        "params": {"term_id": term_id, "cols": cols, "rows": rows},
+    });
+    let mut line = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|_| stream.flush())
+        .map_err(|e| e.to_string())?;
+    let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+    Ok((stream, reader))
 }
 
 // ── control-stream stdin commands ──────────────────────────────────
@@ -178,6 +195,11 @@ pub fn cmd_scroll_px(
         "row": row,
         "modifiers": modifiers,
     })
+}
+
+/// Absolute scroll — jump straight to an offset from the bottom.
+pub fn cmd_scroll_to(offset_from_bottom: u32) -> Value {
+    json!({"type": "scroll", "offset_from_bottom": offset_from_bottom})
 }
 
 /// Line-granular scroll fallback (line/page delta modes).
@@ -235,25 +257,47 @@ pub fn run_event_stream(on_event: impl Fn(&Value) -> bool) -> String {
     }
 }
 
-/// Probe installed agent CLIs — simple `which` per known kind.
+/// `lazed doctor --json` — CLI/skill link state for the onboarding banner.
+/// doctor exits 1 when checks fail; the JSON is still valid, so parse
+/// whatever it printed.
+pub fn doctor_report() -> Result<Value, String> {
+    let out = Command::new(lazed_bin()?)
+        .args(["doctor", "--json"])
+        .envs(env::env_for_spawn())
+        .output()
+        .map_err(|e| format!("lazed doctor: {e}"))?;
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("lazed doctor output: {e} ({:?})", out.stdout))
+}
+
+/// `lazed install` — non-interactive; a conflicting existing link needs a
+/// terminal prompt, which fails here and surfaces as stderr text.
+pub fn cli_install() -> Result<Value, String> {
+    let out = Command::new(lazed_bin()?)
+        .arg("install")
+        .envs(env::env_for_spawn())
+        .output()
+        .map_err(|e| format!("lazed install: {e}"))?;
+    if out.status.success() {
+        Ok(json!({"ok": true, "output": String::from_utf8_lossy(&out.stdout)}))
+    } else {
+        Err(format!("lazed install failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+/// Probe installed agent CLIs — walk the resolved spawn PATH directly,
+/// so GUI launches find Homebrew/version-manager installs too.
 pub fn agent_detect() -> Value {
     let kinds = [
         "claude", "codex", "antigravity", "devin", "gemini", "opencode", "aider", "pi",
     ];
+    let spawn_env = env::env_for_spawn();
+    let path = spawn_env.get("PATH").cloned().unwrap_or_default();
     let agents: Vec<Value> = kinds
         .iter()
-        .map(|k| {
-            let path = Command::new("which")
-                .arg(k)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|p| !p.is_empty());
-            match path {
-                Some(p) => json!({"kind": k, "path": p}),
-                None => json!({"kind": k}),
-            }
+        .map(|k| match env::find_on_path(k, &path) {
+            Some(p) => json!({"kind": k, "path": p}),
+            None => json!({"kind": k}),
         })
         .collect();
     json!({"context": "local", "agents": agents})

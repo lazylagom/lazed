@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
+import type { EventCallback } from "@tauri-apps/api/event";
+import type { DragDropEvent } from "@tauri-apps/api/window";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IMEOverlay } from "./ime-overlay";
 
@@ -93,7 +96,176 @@ function fireInput(
   el.dispatchEvent(event);
 }
 
+function fireNativeDrop(x: number, y: number, paths = ["/tmp/photo.png"]) {
+  // Tauri broadcasts the same window event to every mounted pane.
+  for (const [handler] of tauriWindowState.onDragDropEventMock.mock.calls) {
+    (handler as EventCallback<DragDropEvent>)({
+      event: "tauri://drag-drop",
+      id: 1,
+      payload: { type: "drop", position: new PhysicalPosition(x, y), paths },
+    });
+  }
+}
+
+describe("IMEOverlay file drops", () => {
+  let first: ReturnType<typeof createTestEnv>;
+  let second: ReturnType<typeof createTestEnv>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tauriWindowState.onDragDropEventMock.mockResolvedValue(vi.fn());
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    );
+    vi.stubGlobal("devicePixelRatio", 2);
+    first = createTestEnv();
+    second = createTestEnv();
+    vi.spyOn(first.container, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(280, 80, 400, 600),
+    );
+    vi.spyOn(second.container, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(680, 80, 400, 600),
+    );
+    first.overlay.focus();
+  });
+
+  afterEach(() => {
+    first.overlay.dispose();
+    second.overlay.dispose();
+    first.container.remove();
+    second.container.remove();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([1, 2])(
+    "macOS 배율 %s에서 두 번째 pane의 드롭은 해당 pane에만 전달한다",
+    (scale) => {
+      vi.stubGlobal("devicePixelRatio", scale);
+
+      fireNativeDrop(800, 300);
+
+      expect(first.writeToPty).not.toHaveBeenCalled();
+      expect(second.writeToPty).toHaveBeenCalledExactlyOnceWith(
+        "'/tmp/photo.png' ",
+      );
+      expect(document.activeElement).toBe(second.input);
+    },
+  );
+
+  it("두 번째 pane에 포커스가 있어도 첫 번째 pane에 놓은 사진은 첫 번째로 보낸다", () => {
+    second.overlay.focus();
+
+    fireNativeDrop(400, 300);
+
+    expect(first.writeToPty).toHaveBeenCalledExactlyOnceWith(
+      "'/tmp/photo.png' ",
+    );
+    expect(second.writeToPty).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(first.input);
+  });
+
+  it.each([1, 1.5, 2])(
+    "Windows 배율 %s에서는 물리 좌표를 CSS 좌표로 변환한다",
+    (scale) => {
+      vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      );
+      vi.stubGlobal("devicePixelRatio", scale);
+
+      fireNativeDrop(800 * scale, 300 * scale);
+
+      expect(first.writeToPty).not.toHaveBeenCalled();
+      expect(second.writeToPty).toHaveBeenCalledExactlyOnceWith(
+        "'/tmp/photo.png' ",
+      );
+    },
+  );
+
+  it("인접 pane의 경계에 놓아도 한 pane에만 전달한다", () => {
+    vi.stubGlobal("devicePixelRatio", 1);
+
+    fireNativeDrop(680, 300);
+
+    expect(first.writeToPty).not.toHaveBeenCalled();
+    expect(second.writeToPty).toHaveBeenCalledExactlyOnceWith(
+      "'/tmp/photo.png' ",
+    );
+  });
+
+  it.each([
+    [200, 300],
+    [800, 40],
+    [1200, 300],
+  ])("pane 밖 (%s, %s)에 놓은 파일은 전달하지 않는다", (x, y) => {
+    fireNativeDrop(x, y);
+
+    expect(first.writeToPty).not.toHaveBeenCalled();
+    expect(second.writeToPty).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(first.input);
+  });
+
+  it("숨겨진 pane은 원점에 놓은 파일을 받지 않는다", () => {
+    vi.spyOn(second.container, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(),
+    );
+
+    fireNativeDrop(0, 0);
+
+    expect(first.writeToPty).not.toHaveBeenCalled();
+    expect(second.writeToPty).not.toHaveBeenCalled();
+  });
+
+  it("해제된 pane은 남아 있는 네이티브 리스너로 파일을 받지 않는다", () => {
+    vi.stubGlobal("devicePixelRatio", 1);
+    second.overlay.dispose();
+
+    fireNativeDrop(800, 300);
+
+    expect(first.writeToPty).not.toHaveBeenCalled();
+    expect(second.writeToPty).not.toHaveBeenCalled();
+  });
+
+  it("DOM 드롭도 두 번째 pane에 여러 파일 경로를 한 번만 전달한다", () => {
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: {
+        files: [],
+        getData: () =>
+          "file:///tmp/photo%20one.png\nfile:///tmp/photo%20two.png",
+      },
+    });
+
+    second.xtermEl.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(first.writeToPty).not.toHaveBeenCalled();
+    expect(second.writeToPty).toHaveBeenCalledExactlyOnceWith(
+      "'/tmp/photo one.png' '/tmp/photo two.png' ",
+    );
+    expect(document.activeElement).toBe(second.input);
+  });
+});
+
 describe("IMEOverlay", () => {
+  it.each([
+    ["ArrowLeft", "\x01"],
+    ["ArrowRight", "\x05"],
+  ])("forwards Command+%s to the agent prompt editor", (key, sequence) => {
+    const { input, writeToPty, overlay, container } = createTestEnv();
+    const event = new KeyboardEvent("keydown", {
+      key,
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(writeToPty).toHaveBeenCalledExactlyOnceWith(sequence);
+    overlay.dispose();
+    container.remove();
+  });
+
   let env: ReturnType<typeof createTestEnv>;
 
   beforeEach(() => {

@@ -1,11 +1,14 @@
 mod automation;
+mod env;
 mod git;
+mod integrations;
 mod lazed;
 
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager, State};
@@ -23,7 +26,8 @@ struct AppState {
 fn bootstrap(state: State<AppState>) -> Result<Value, String> {
     lazed::ensure_server()?;
     let snap = lazed::api_call("session.snapshot", json!({}))?;
-    // drop stale control streams whose terminal disappeared — kill + reap
+    // drop stale control streams whose terminal disappeared — the daemon
+    // unsubscribes on connection EOF
     let live: Vec<String> = snap
         .pointer("/terminals")
         .and_then(Value::as_array)
@@ -40,9 +44,8 @@ fn bootstrap(state: State<AppState>) -> Result<Value, String> {
             .cloned()
             .collect();
         for id in stale {
-            if let Some(mut h) = map.remove(&id) {
-                let _ = h.child.kill();
-                let _ = h.child.wait();
+            if let Some(h) = map.remove(&id) {
+                let _ = h.stream.shutdown(std::net::Shutdown::Both);
             }
         }
     }
@@ -59,6 +62,13 @@ fn session_status() -> Result<Value, String> {
     lazed::api_call("session.status", json!({}))
 }
 
+#[tauri::command]
+async fn server_restart() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(lazed::restart_server)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ── terminal control streams ───────────────────────────────────────
 
 #[tauri::command]
@@ -66,18 +76,17 @@ fn term_attach(
     term_id: String,
     cols: u32,
     rows: u32,
-    on_frame: Channel<Value>,
+    on_frame: Channel<Box<RawValue>>,
     state: State<AppState>,
 ) -> Result<(), String> {
     detach_term_internal(&state, &term_id);
 
-    let (mut child, mut reader) = lazed::open_attach_stream(&term_id, cols, rows)?;
-    let stdin = lazed::take_stdin(&mut child)?;
+    let (stream, mut reader) = lazed::open_attach_stream(&term_id, cols, rows)?;
     state
         .control
         .lock()
         .map_err(|e| e.to_string())?
-        .insert(term_id.clone(), lazed::ControlHandle { child, stdin });
+        .insert(term_id.clone(), lazed::ControlHandle { stream });
 
     let tid = term_id.clone();
     std::thread::spawn(move || {
@@ -91,25 +100,28 @@ fn term_attach(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    match serde_json::from_str::<Value>(trimmed) {
-                        Ok(v) => {
-                            if on_frame.send(v).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            let _ = on_frame.send(json!({
-                                "type": "log", "text": trimmed
-                            }));
-                        }
+                    // Frames are forwarded as raw JSON — no Value DOM
+                    // round-trip per line on the hot path.
+                    let raw = match serde_json::from_str::<Box<RawValue>>(trimmed) {
+                        Ok(v) => v,
+                        Err(_) => raw_json(&json!({"type": "log", "text": trimmed})),
+                    };
+                    if on_frame.send(raw).is_err() {
+                        break;
                     }
                 }
             }
         }
-        let _ = on_frame.send(json!({"type": "term.closed"}));
+        let _ = on_frame.send(raw_json(&json!({"type": "term.closed"})));
         eprintln!("[lazed] attach stream ended for {tid}");
     });
     Ok(())
+}
+
+/// Serialize a Value into a channel payload — json! output is always
+/// valid JSON so validation cannot fail.
+fn raw_json(v: &Value) -> Box<RawValue> {
+    RawValue::from_string(v.to_string()).expect("serialized json! is valid")
 }
 
 fn send_control(state: &State<AppState>, term_id: &str, msg: &Value) -> Result<(), String> {
@@ -136,12 +148,15 @@ fn term_scroll(
     delta_px: Option<f64>,
     cell_px: Option<f64>,
     delta_lines: Option<f64>,
+    offset_from_bottom: Option<u32>,
     column: u16,
     row: u16,
     modifiers: u8,
     state: State<AppState>,
 ) -> Result<(), String> {
-    let msg = if let (Some(px), Some(cell)) = (delta_px, cell_px) {
+    let msg = if let Some(off) = offset_from_bottom {
+        lazed::cmd_scroll_to(off)
+    } else if let (Some(px), Some(cell)) = (delta_px, cell_px) {
         lazed::cmd_scroll_px(px, cell, column, row, modifiers)
     } else {
         lazed::cmd_scroll_lines(delta_lines.unwrap_or(0.0), column, row, modifiers)
@@ -159,8 +174,9 @@ fn detach_term_internal(state: &State<AppState>, term_id: &str) {
     if let Ok(mut map) = state.control.lock() {
         if let Some(mut handle) = map.remove(term_id) {
             let _ = handle.send(&json!({"type": "detach"}));
-            let _ = handle.child.kill();
-            let _ = handle.child.wait();
+            // EOF on the conn unsubscribes server-side too — shutdown
+            // covers a daemon that doesn't act on the detach command.
+            let _ = handle.stream.shutdown(std::net::Shutdown::Both);
         }
     }
 }
@@ -226,15 +242,25 @@ fn group_assign(project_id: String, group_id: Option<String>) -> Result<Value, S
     )
 }
 
+/// New pane — `tab_id` splits into an existing tab, `workspace_id` /
+/// `project_id` open a fresh tab under them.
 #[tauri::command]
 fn term_create(
-    project_id: String,
+    tab_id: Option<String>,
+    workspace_id: Option<String>,
+    project_id: Option<String>,
     command: Option<String>,
     label: Option<String>,
 ) -> Result<Value, String> {
     lazed::api_call(
         "terminal.create",
-        json!({"project_id": project_id, "command": command, "label": label}),
+        json!({
+            "tab_id": tab_id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "command": command,
+            "label": label,
+        }),
     )
 }
 
@@ -244,25 +270,52 @@ fn term_close(term_id: String, state: State<AppState>) -> Result<(), String> {
     lazed::api_call("terminal.close", json!({"term_id": term_id})).map(|_| ())
 }
 
+// ── workspaces (one checkout each) & tabs (pane rows inside them) ──
+
 #[tauri::command]
-fn worktree_create(
+fn workspace_create(
     project_id: String,
     branch: String,
     base: Option<String>,
     label: Option<String>,
 ) -> Result<Value, String> {
     lazed::api_call(
-        "worktree.create",
+        "workspace.create",
         json!({"project_id": project_id, "branch": branch, "base": base, "label": label}),
     )
 }
 
 #[tauri::command]
-fn worktree_remove(term_id: String, force: bool) -> Result<Value, String> {
+fn workspace_remove(workspace_id: String, force: bool) -> Result<Value, String> {
     lazed::api_call(
-        "worktree.remove",
-        json!({"term_id": term_id, "force": force}),
+        "workspace.remove",
+        json!({"workspace_id": workspace_id, "force": force}),
     )
+}
+
+#[tauri::command]
+fn workspace_rename(workspace_id: String, label: String) -> Result<Value, String> {
+    lazed::api_call(
+        "workspace.rename",
+        json!({"workspace_id": workspace_id, "label": label}),
+    )
+}
+
+#[tauri::command]
+fn tab_create(
+    workspace_id: String,
+    label: Option<String>,
+    command: Option<String>,
+) -> Result<Value, String> {
+    lazed::api_call(
+        "tab.create",
+        json!({"workspace_id": workspace_id, "label": label, "command": command}),
+    )
+}
+
+#[tauri::command]
+fn tab_close(tab_id: String) -> Result<Value, String> {
+    lazed::api_call("tab.close", json!({"tab_id": tab_id}))
 }
 
 #[tauri::command]
@@ -285,19 +338,29 @@ fn resolve_repo(cwd: String) -> Result<Value, String> {
 // ── agents ─────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn agent_start(term_id: String, kind: String) -> Result<Value, String> {
-    lazed::api_call(
+async fn agent_start(term_id: String, kind: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || lazed::api_call(
         "agent.start",
         json!({"term_id": term_id, "kind": kind}),
-    )
+    )).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn agent_prompt(term_id: String, text: String) -> Result<Value, String> {
-    lazed::api_call(
+async fn agent_prompt(term_id: String, text: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let receipt = lazed::api_call(
         "agent.prompt",
         json!({"term_id": term_id, "text": text}),
-    )
+        )?;
+        if receipt["accepted"] != true { return Err(format!("{}", receipt["error"])); }
+        Ok(receipt)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn task_start(params: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || lazed::api_call("task.start", params))
+        .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -311,6 +374,23 @@ async fn agent_detect() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(lazed::agent_detect)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// CLI/skill link state — the onboarding banner polls this on boot.
+#[tauri::command]
+async fn install_status() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(lazed::doctor_report)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Link `~/.local/bin/lazed` + the agent-skill dirs. Runs the bundled (or
+/// installed) binary; user consent is the banner button itself.
+#[tauri::command]
+async fn install_cli() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(lazed::cli_install)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Send raw text into a terminal without a control stream (one-shot —
@@ -362,6 +442,45 @@ fn notify_agent(
     Ok(())
 }
 
+// ── inbox (daemon-owned GTD capture queue) ─────────────────────────
+
+#[tauri::command]
+fn inbox_list(all: Option<bool>) -> Result<Value, String> {
+    lazed::api_call("inbox.list", json!({"all": all.unwrap_or(false)}))
+}
+
+#[tauri::command]
+fn inbox_add(params: Value) -> Result<Value, String> {
+    lazed::api_call("inbox.add", params)
+}
+
+#[tauri::command]
+fn inbox_update(params: Value) -> Result<Value, String> {
+    lazed::api_call("inbox.update", params)
+}
+
+#[tauri::command]
+fn inbox_remove(id: String) -> Result<Value, String> {
+    lazed::api_call("inbox.remove", json!({"id": id}))
+}
+
+/// Open an item's source link in the desktop browser — http(s) only.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("refusing non-http(s) url".into());
+    }
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener)
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 // ── automations ────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -407,6 +526,49 @@ async fn automation_fire(id: String, item_id: String) -> Result<(), String> {
 #[tauri::command]
 async fn automation_test(command: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || automation::test(&command))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Editor's "requires" probe — bins resolved on the spawn PATH, env keys
+/// present in the merged spawn env (user env or a stored integration).
+#[tauri::command]
+async fn deps_check(input: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(env::deps_check(&input)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// ── integrations (connected accounts → env vars for spawned shells) ──
+
+#[tauri::command]
+fn integration_list() -> Result<Value, String> {
+    integrations::list()
+}
+
+#[tauri::command]
+fn integration_save(input: Value) -> Result<Value, String> {
+    integrations::save(&input)
+}
+
+#[tauri::command]
+fn integration_delete(provider: String, site: String) -> Result<(), String> {
+    integrations::delete(&provider, &site)
+}
+
+/// Probe a stored site's credentials — network call, off the IPC thread.
+#[tauri::command]
+async fn integration_test(provider: String, site: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || integrations::test(&provider, &site))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Validate unsaved credentials for the connect modal — network call,
+/// off the IPC thread.
+#[tauri::command]
+async fn integration_probe(input: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || integrations::probe(&input))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -469,6 +631,12 @@ pub fn run() {
                 eprintln!("[lazed] using bundled lazed: {}", p.display());
             }
             lazed::register_bundled(bundled);
+            env::warmup();
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            integrations::init(config_dir);
             automation::init(app.handle().clone(), events_for_setup);
             Ok(())
         })
@@ -481,6 +649,7 @@ pub fn run() {
             bootstrap,
             session_snapshot,
             session_status,
+            server_restart,
             term_attach,
             term_input,
             term_resize,
@@ -499,15 +668,21 @@ pub fn run() {
             group_rename,
             group_remove,
             group_assign,
-            worktree_create,
-            worktree_remove,
+            workspace_create,
+            workspace_remove,
+            workspace_rename,
+            tab_create,
+            tab_close,
             worktree_diff,
             worktree_merge,
             resolve_repo,
             agent_start,
+            task_start,
             agent_prompt,
             agent_get,
             agent_detect,
+            install_status,
+            install_cli,
             subscribe_events,
             automation_list,
             automation_save,
@@ -517,6 +692,17 @@ pub fn run() {
             automation_reset_seen,
             automation_fire,
             automation_test,
+            deps_check,
+            integration_list,
+            integration_save,
+            integration_delete,
+            integration_test,
+            integration_probe,
+            inbox_list,
+            inbox_add,
+            inbox_update,
+            inbox_remove,
+            open_url,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| {
@@ -525,13 +711,11 @@ pub fn run() {
         });
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
-            // kill attach-stream children — dropping a Child does not
-            // terminate the process, so they would outlive the app
+            // close attach-stream sockets — the daemon unsubscribes on EOF
             if let Some(state) = handle.try_state::<AppState>() {
                 if let Ok(mut map) = state.control.lock() {
-                    for (_, mut h) in map.drain() {
-                        let _ = h.child.kill();
-                        let _ = h.child.wait();
+                    for (_, h) in map.drain() {
+                        let _ = h.stream.shutdown(std::net::Shutdown::Both);
                     }
                 }
             }

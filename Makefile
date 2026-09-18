@@ -1,13 +1,21 @@
 BUN ?= bun
 CARGO ?= cargo
 
-.PHONY: help install dev web fetch-herdr check test format build dist schema-check perf clean
+.PHONY: help deps install uninstall dev web fetch-herdr check test format build dist schema-check perf clean
 
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-14s %s\n", $$1, $$2}'
 
-install: ## install frontend deps
+deps: ## install frontend deps
 	$(BUN) install
+
+install: ## link lazed CLI + agent skills into ~/ (builds release daemon first)
+	$(CARGO) build --release --manifest-path daemon/Cargo.toml
+	daemon/target/release/lazed install
+
+uninstall: ## remove lazed links; PURGE=1 also wipes state/config/worktrees
+	@bin=$$(command -v lazed || echo daemon/target/release/lazed); \
+	"$$bin" uninstall $(if $(PURGE),--purge) $(if $(YES),--yes)
 
 dev: ## run the app (tauri dev — starts vite + native shell)
 	$(BUN) run tauri dev
@@ -21,10 +29,14 @@ fetch-herdr: ## stage the herdr binary into src-tauri/bin
 check: ## typecheck + lint + cargo check
 	$(BUN) run check
 	$(CARGO) check --manifest-path src-tauri/Cargo.toml
+	$(CARGO) check --manifest-path daemon/Cargo.toml
 
 test: ## vitest + cargo test
 	$(BUN) run test
 	$(CARGO) test --manifest-path src-tauri/Cargo.toml
+	$(CARGO) test --manifest-path daemon/Cargo.toml
+	$(CARGO) build --manifest-path daemon/Cargo.toml
+	python3 scripts/test_task_runtime.py
 
 format: ## biome format --write
 	$(BUN) run format
@@ -32,7 +44,7 @@ format: ## biome format --write
 build: ## frontend production build (dist/)
 	$(BUN) run build
 
-dist: ## full app bundle (fetch-herdr + tauri build)
+dist: ## full app bundle (daemon + skills staged, then tauri build)
 	$(BUN) run dist
 
 schema-check: ## verify herdr schema fields lazed depends on
@@ -41,6 +53,6 @@ schema-check: ## verify herdr schema fields lazed depends on
 perf: ## frame-stream perf measurement (throwaway herdr session)
 	python3 scripts/perf_stream.py
 
-clean: ## remove generated artifacts (dist/, bundled herdr, cargo target)
-	rm -rf dist src-tauri/bin/herdr
+clean: ## remove generated artifacts (dist/, staged bundle payload, cargo target)
+	rm -rf dist src-tauri/bin src-tauri/skills
 	$(CARGO) clean --manifest-path src-tauri/Cargo.toml
