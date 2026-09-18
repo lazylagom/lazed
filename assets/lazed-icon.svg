@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="surface" x1="128" y1="80" x2="896" y2="944" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18263A"/>
+      <stop offset="1" stop-color="#0B1220"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="252" y1="288" x2="772" y2="744" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8AF5D0"/>
+      <stop offset="1" stop-color="#43C7B0"/>
+    </linearGradient>
+    <filter id="shadow" x="112" y="112" width="800" height="800" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#050A12" flood-opacity=".42"/>
+    </filter>
+  </defs>
+
+  <!-- A quiet, rounded app tile for dark and light desktop surfaces. -->
+  <rect x="128" y="128" width="768" height="768" rx="176" fill="url(#surface)" filter="url(#shadow)"/>
+  <rect x="128.75" y="128.75" width="766.5" height="766.5" rx="175.25" stroke="#31435B" stroke-opacity=".72" stroke-width="1.5"/>
+
+  <!-- Three terminal panes: the split layout is the lazed mark. -->
+  <rect x="242" y="240" width="540" height="544" rx="72" fill="#101B2C" stroke="#38516B" stroke-width="12"/>
+  <path d="M512 240V784" stroke="#38516B" stroke-width="12"/>
+  <path d="M242 490H782" stroke="#38516B" stroke-width="12"/>
+
+  <!-- Prompt chevrons double as a subtle L / lightning gesture. -->
+  <path d="M310 350L392 418L310 486" stroke="url(#accent)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M580 350L662 418L580 486" stroke="url(#accent)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M310 600L392 668L310 736" stroke="url(#accent)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M580 600L662 668L580 736" stroke="url(#accent)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

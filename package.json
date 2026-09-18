@@ -10,6 +10,7 @@
     "check": "tsc --noEmit && biome check .",
     "test": "vitest run",
     "format": "biome format --write .",
+    "icon": "sh scripts/generate-icons.sh",
     "fetch-herdr": "sh scripts/fetch-herdr",
     "dist": "bun run fetch-herdr && tauri build --config src-tauri/tauri.bundle.json"
   },
