@@ -55,11 +55,14 @@ pub fn ensure_dir() -> std::io::Result<()> {
 
 /// Commit a complete private state file without truncating the previous copy.
 pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::os::unix::fs::OpenOptionsExt;
     let parent = path.parent().ok_or_else(|| std::io::Error::other("missing parent"))?;
     std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".state-{}.tmp", crate::control::id()));
+    let mut nonce = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+    let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let tmp = parent.join(format!(".state-{nonce}.tmp"));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
         file.write_all(bytes)?;
