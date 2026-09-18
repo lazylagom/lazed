@@ -242,13 +242,6 @@ export function TermView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [term.term_id]);
 
-  // Re-apply the theme on render so live terminals pick up palette changes
-  // (xterm only reads `theme` at construction; assigning options.theme repaints).
-  useEffect(() => {
-    const xterm = termRef.current;
-    if (xterm) xterm.options.theme = TERMINAL_THEME;
-  });
-
   // When the terminal gains focus programmatically (sidebar, inbox,
   // shortcuts), move keyboard focus to the overlay input — unless focus is
   // currently in a UI element outside the terminals.
