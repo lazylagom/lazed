@@ -6,11 +6,10 @@
 //! actions always run locally; only the `agent` action talks to the daemon.
 
 use std::collections::HashSet;
-use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,6 +17,7 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 
+use crate::env;
 use crate::lazed;
 
 const TICK_SECS: u64 = 10;
@@ -32,6 +32,10 @@ const MAX_SEEN: usize = 2000;
 pub struct AutomationItem {
     pub id: String,
     pub text: String,
+    /// source link — picked from `url`/`link`/`permalink` in JSON lines, or
+    /// the first http(s) token in plain lines
+    #[serde(default)]
+    pub url: Option<String>,
     /// epoch seconds when the item was first seen
     pub at: u64,
     /// an action run completed for this item (auto or manual)
@@ -54,6 +58,8 @@ pub enum Action {
         project_id: String,
         prompt: String,
     },
+    /// Drop the item into the daemon inbox for GTD triage.
+    Inbox,
 }
 
 impl Default for Action {
@@ -77,6 +83,11 @@ pub struct Automation {
     pub command: String,
     #[serde(default)]
     pub action: Action,
+    /// Catalog preset this automation was switched on from (e.g.
+    /// `jira-mention`) — lets the Automations screen map the ready-made
+    /// list onto stored automations even after the command is edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     /// Ids already recorded — never fired twice.
     #[serde(default)]
     pub seen: HashSet<String>,
@@ -170,6 +181,13 @@ fn public(a: &Automation) -> Value {
     v
 }
 
+/// First http(s) token in a plain line, if any.
+fn find_url(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find(|t| t.starts_with("https://") || t.starts_with("http://"))
+        .map(str::to_string)
+}
+
 /// Parse one stdout line into an item: JSON objects give structured ids,
 /// anything else falls back to `first-token / whole-line`.
 fn parse_item(line: &str) -> AutomationItem {
@@ -183,9 +201,13 @@ fn parse_item(line: &str) -> AutomationItem {
         let text = pick(&["title", "summary", "text", "description"])
             .map(|t| format!("{id} {t}"))
             .unwrap_or_else(|| line.to_string());
+        let url = pick(&["url", "link", "permalink"])
+            .filter(|u| !u.is_empty())
+            .or_else(|| find_url(line));
         return AutomationItem {
             id,
             text,
+            url,
             at: now_secs(),
             fired: false,
         };
@@ -198,6 +220,7 @@ fn parse_item(line: &str) -> AutomationItem {
     AutomationItem {
         id,
         text: line.to_string(),
+        url: find_url(line),
         at: now_secs(),
         fired: false,
     }
@@ -222,74 +245,12 @@ fn parse_items(stdout: &str) -> Vec<AutomationItem> {
     out
 }
 
-/// `sh -c <cmd>` with a deadline. stdout/stderr are drained on threads so a
-/// noisy command can't deadlock against a full pipe.
+/// `sh -c <cmd>` with a deadline, under the resolved spawn env (login
+/// PATH + fallback dirs + integration values).
 fn run_shell(cmd: &str, timeout_secs: u64) -> Result<String, String> {
-    let mut child = Command::new("sh")
-        .args(["-c", cmd])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout
-            .as_mut()
-            .map(|o| o.read_to_string(&mut s));
-        s
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr
-            .as_mut()
-            .map(|o| o.read_to_string(&mut s));
-        s
-    });
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {
-                if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = out_t.join();
-                    let _ = err_t.join();
-                    return Err(format!("timed out after {timeout_secs}s"));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = out_t.join();
-                let _ = err_t.join();
-                return Err(format!("wait failed: {e}"));
-            }
-        }
-    };
-    let out = out_t.join().unwrap_or_default();
-    let err = err_t.join().unwrap_or_default();
-    if status.success() {
-        Ok(out)
-    } else {
-        let tail: String = err
-            .lines()
-            .rev()
-            .take(3)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join(" | ");
-        Err(if tail.is_empty() {
-            format!("exit {}", status)
-        } else {
-            format!("exit {}: {}", status, tail.chars().take(300).collect::<String>())
-        })
-    }
+    let mut c = Command::new("sh");
+    c.args(["-c", cmd]).envs(env::env_for_spawn());
+    env::capture(&mut c, timeout_secs)
 }
 
 /// POSIX single-quote escaping for command-action templates.
@@ -309,7 +270,7 @@ fn render(tpl: &str, item: &AutomationItem, quote: bool) -> String {
 }
 
 /// `agent` action: terminal in the configured project → agent → prompt.
-/// Mirrors the fanout sequencing (settle → detect → prompt).
+/// Uses the same readiness and submission protocol as CLI/GUI tasks.
 fn run_agent_action(
     agent_kind: &str,
     project_id: &str,
@@ -327,34 +288,15 @@ fn run_agent_action(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "terminal created but no term_id in response".to_string())?;
-    // fresh shell needs a beat before `agent.start`
-    std::thread::sleep(Duration::from_millis(1500));
     lazed::api_call(
         "agent.start",
         json!({"term_id": term_id, "kind": agent_kind}),
     )?;
-    // the daemon flips agent_status as its detector recognizes the TUI —
-    // wait for it to leave "unknown", then a short settle for paint
-    let deadline = Instant::now() + Duration::from_secs(6);
-    while Instant::now() < deadline {
-        if let Ok(a) =
-            lazed::api_call("agent.get", json!({"term_id": term_id}))
-        {
-            let st = a
-                .get("agent_status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            if st != "unknown" {
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    std::thread::sleep(Duration::from_secs(1));
-    lazed::api_call(
+    let receipt = lazed::api_call(
         "agent.prompt",
         json!({"term_id": term_id, "text": render(prompt_tpl, item, false)}),
     )?;
+    if receipt["accepted"] != true { return Err(format!("{}", receipt["error"])); }
     Ok(())
 }
 
@@ -378,6 +320,16 @@ fn run_action(auto: &Automation, item: &AutomationItem) -> Result<(), String> {
             project_id,
             prompt,
         } => run_agent_action(agent_kind, project_id, prompt, item),
+        Action::Inbox => lazed::api_call(
+            "inbox.add",
+            json!({
+                "title": item.text,
+                "key": item.id,
+                "source": auto.name,
+                "url": item.url,
+            }),
+        )
+        .map(|_| ()),
     }
 }
 
@@ -572,6 +524,9 @@ pub fn save(input: Value) -> Result<Value, String> {
                 .unwrap_or(a.enabled);
             a.interval_secs = interval;
             a.action = action;
+            if let Some(p) = input.get("preset") {
+                a.preset = p.as_str().filter(|p| !p.is_empty()).map(str::to_string);
+            }
             let out = public(a);
             let _ = save_store(s);
             return Ok(out);
@@ -595,6 +550,11 @@ pub fn save(input: Value) -> Result<Value, String> {
                 .unwrap_or("")
                 .to_string(),
             action,
+            preset: input
+                .get("preset")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
             seen: HashSet::new(),
             seeded: false,
             last_run_at: None,
@@ -721,6 +681,7 @@ mod tests {
         let item = AutomationItem {
             id: "A-1".into(),
             text: "it's here".into(),
+            url: None,
             at: 0,
             fired: false,
         };
