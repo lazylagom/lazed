@@ -247,6 +247,7 @@ export function Sidebar({
   onCloseTerm,
   onRemoveWorkspace,
   onDiff,
+  onNewWorktree,
   onOrchestrate,
 }: {
   snap: Snapshot | null;
@@ -267,6 +268,8 @@ export function Sidebar({
   onCloseTerm: (t: TerminalInfo) => void;
   onRemoveWorkspace: (ws: WorkspaceInfo) => void;
   onDiff: (ws: WorkspaceInfo) => void;
+  /** ⌘N — open the new-worktree sheet for this project */
+  onNewWorktree: (projectId: string) => void;
   onOrchestrate: (projectId: string) => void;
 }) {
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -348,6 +351,14 @@ export function Sidebar({
               <span>{name}</span>
             </button>
           )}
+          <button
+            type="button"
+            className="side-close"
+            title="new worktree (⌘N)"
+            onClick={() => onNewWorktree(p.project_id)}
+          >
+            <HugeiconsIcon icon={GitBranchIcon} size={12} strokeWidth={1.5} />
+          </button>
           <button
             type="button"
             className="side-close"
@@ -574,6 +585,23 @@ export function Sidebar({
           >
             {menu.kind === "project" && menuProject && (
               <>
+                <button
+                  type="button"
+                  className="proj-menu-item"
+                  onClick={() => {
+                    onNewWorktree(menuProject.project_id);
+                    setMenu(null);
+                  }}
+                >
+                  <HugeiconsIcon
+                    icon={GitBranchIcon}
+                    size={13}
+                    strokeWidth={1.5}
+                  />
+                  New Worktree
+                  <span className="proj-menu-key">⌘N</span>
+                </button>
+                <div className="proj-menu-sep" />
                 <div className="proj-menu-label">Move to group</div>
                 <button
                   type="button"

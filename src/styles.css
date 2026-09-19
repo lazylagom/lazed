@@ -665,6 +665,12 @@ body,
   text-align: left;
 }
 
+.proj-menu-key {
+  margin-left: auto;
+  color: var(--text-4);
+  font-size: 11px;
+}
+
 .proj-menu-item:hover {
   background: var(--fill-hover);
 }
@@ -3585,4 +3591,78 @@ body,
 /* Settings → Daemon: stale-binary / restart-error notice under a row */
 .set-row-sub.set-warn {
   color: rgb(var(--amber));
+}
+
+/* ── new worktree (⌘N) ───────────────────── */
+
+.modal.newwt {
+  width: 460px;
+  padding: 20px 22px 22px;
+  border-radius: 14px;
+}
+
+.newwt-repo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.newwt-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.newwt-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.newwt-field:focus-within {
+  border-color: rgb(var(--accent) / 0.45);
+}
+
+.newwt-label {
+  flex-shrink: 0;
+  width: 48px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.newwt-input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text-hi);
+  font-size: 13px;
+  outline: none;
+}
+
+.newwt-note {
+  margin-top: 12px;
+  color: var(--text-4);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.newwt-error {
+  margin-top: 8px;
+  color: rgb(var(--red));
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+.newwt-go {
+  margin-top: 16px;
+  border-radius: 9px;
 }

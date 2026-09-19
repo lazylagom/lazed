@@ -15,6 +15,7 @@ import { Automations } from "./features/Automations";
 import { DiffView } from "./features/DiffView";
 import { Fanout, type FanoutRequest } from "./features/Fanout";
 import { ImportProject } from "./features/ImportProject";
+import { NewWorktree, type NewWorktreeRequest } from "./features/NewWorktree";
 import { PromptBar, type PromptTarget } from "./features/PromptBar";
 import { Session } from "./features/Session";
 import { type Section, Settings } from "./features/Settings";
@@ -135,6 +136,8 @@ export function App() {
   const [showSession, setShowSession] = useState(false);
   const [showAutos, setShowAutos] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  // project id whose "new worktree" (⌘N) sheet is open
+  const [newWtProjectId, setNewWtProjectId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // non-null while `lazed doctor` reports missing/broken install links
   const [installReport, setInstallReport] = useState<DoctorReport | null>(null);
@@ -375,6 +378,11 @@ export function App() {
   const focusedProjectId = snap?.focused_project_id ?? projects[0]?.project_id;
   const focusedProject = focusedProjectId
     ? projById.get(focusedProjectId)
+    : undefined;
+
+  // the ⌘N sheet's target — drops itself if the project goes away
+  const newWtProject = newWtProjectId
+    ? projById.get(newWtProjectId)
     : undefined;
 
   /** The active workspace — the explicit pick when it still lives in the
@@ -688,6 +696,24 @@ export function App() {
     [focusProject, flash],
   );
 
+  /** ⌘N — `git worktree add` for the selected project, then focus the new
+   * workspace's first pane. Errors surface inside the sheet. */
+  const createWorktree = useCallback(
+    async (projectId: string, req: NewWorktreeRequest) => {
+      const res = await lazed.workspaceCreate(
+        projectId,
+        req.branch,
+        req.base,
+        req.label,
+      );
+      lastWsByProject.current.set(projectId, res.workspace_id);
+      await lazed.projectFocus(projectId).catch(() => {});
+      setFocusedWsId(res.workspace_id);
+      await focusCreatedTerm(res.terminal?.term_id);
+    },
+    [focusCreatedTerm],
+  );
+
   const spawnOrchestrator = useCallback(
     async (projectId: string) => {
       const live = await lazed.snapshot().catch(() => null);
@@ -861,6 +887,11 @@ export function App() {
         e.preventDefault();
         e.stopPropagation();
         newTab();
+      } else if (e.metaKey && !e.shiftKey && e.key === "n") {
+        // ⌘N — new git worktree in the selected project
+        e.preventDefault();
+        e.stopPropagation();
+        if (focusedProjectId) setNewWtProjectId(focusedProjectId);
       } else if (e.metaKey && e.shiftKey && (e.key === "n" || e.key === "N")) {
         e.preventDefault();
         e.stopPropagation();
@@ -967,6 +998,7 @@ export function App() {
     showSettings,
     showSession,
     showAutos,
+    focusedProjectId,
     newPane,
     newTab,
     closeTerm,
@@ -1119,6 +1151,18 @@ export function App() {
           }}
         />
       )}
+      {newWtProject && (
+        <NewWorktree
+          projectName={
+            newWtProject.label ??
+            newWtProject.repo_root.replace(/\/$/, "").split("/").pop() ??
+            newWtProject.project_id
+          }
+          repoRoot={newWtProject.repo_root}
+          onSubmit={(req) => createWorktree(newWtProject.project_id, req)}
+          onClose={() => setNewWtProjectId(null)}
+        />
+      )}
       {showImport && (
         <ImportProject
           onImport={newProject}
@@ -1227,6 +1271,7 @@ export function App() {
             onCloseTerm={closeTerm}
             onRemoveWorkspace={removeWorkspace}
             onDiff={setDiffWs}
+            onNewWorktree={setNewWtProjectId}
             onOrchestrate={spawnOrchestrator}
           />
         )}

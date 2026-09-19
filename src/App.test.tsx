@@ -227,3 +227,89 @@ it.each([false, true])(
     expect(create()).toBeUndefined();
   },
 );
+
+it("⌘N creates a worktree for the selected project", async () => {
+  const snapshot: Snapshot = {
+    focused_project_id: "p1",
+    projects: [
+      {
+        project_id: "p1",
+        repo_root: "/tmp/demo",
+        repo_key: "demo",
+        workspaces: ["w1"],
+      },
+    ],
+    workspaces: [
+      {
+        workspace_id: "w1",
+        project_id: "p1",
+        path: "/tmp/demo",
+        is_main: true,
+        tabs: ["tab1"],
+      },
+    ],
+    tabs: [{ tab_id: "tab1", workspace_id: "w1", panes: ["t1"] }],
+    terminals: [
+      {
+        term_id: "t1",
+        project_id: "p1",
+        workspace_id: "w1",
+        tab_id: "tab1",
+        cwd: "/tmp/demo",
+      },
+    ],
+  };
+  backend.invoke.mockImplementation(async (command: string) => {
+    if (command === "bootstrap") return { snapshot };
+    if (command === "session_snapshot") return snapshot;
+    if (command === "install_status") return { ok: true };
+    if (command === "inbox_list") return { items: [] };
+    if (command === "automation_list") return { automations: [] };
+    if (command === "workspace_create")
+      return {
+        checkout_path: "/tmp/wt",
+        branch: "feature/x",
+        project_id: "p1",
+        workspace_id: "w2",
+        tab_id: "tab2",
+        terminal: { term_id: "t2", cwd: "/tmp/wt" },
+      };
+    return [];
+  });
+  root = createRoot(host);
+  await act(async () => root.render(<App />));
+  act(() =>
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "n",
+        code: "KeyN",
+        metaKey: true,
+        bubbles: true,
+      }),
+    ),
+  );
+
+  const branch = host.querySelector<HTMLInputElement>(".newwt-input");
+  expect(branch).toBeTruthy();
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  await act(async () => {
+    setter?.call(branch, "feature/x");
+    branch?.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const create = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+    (b) => b.textContent === "Create worktree",
+  );
+  await act(async () => create?.click());
+
+  expect(backend.invoke).toHaveBeenCalledWith("workspace_create", {
+    projectId: "p1",
+    branch: "feature/x",
+    base: undefined,
+    label: undefined,
+  });
+  // the sheet closes once the daemon accepted the worktree
+  expect(host.querySelector(".newwt-input")).toBeNull();
+});

@@ -62,7 +62,10 @@ const SHORTCUT_GROUPS: {
   },
   {
     name: "Projects",
-    items: [["⇧⌘N", "Import project"]],
+    items: [
+      ["⌘N", "New worktree (selected project)"],
+      ["⇧⌘N", "Import project"],
+    ],
   },
   {
     name: "Tools",
