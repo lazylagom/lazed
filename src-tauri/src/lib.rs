@@ -63,8 +63,8 @@ fn session_status() -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn server_restart() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(lazed::restart_server)
+async fn server_restart(only_if_empty: Option<bool>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || lazed::restart_server(only_if_empty.unwrap_or(false)))
         .await
         .map_err(|e| e.to_string())?
 }

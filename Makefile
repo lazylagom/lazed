@@ -17,7 +17,8 @@ uninstall: ## remove lazed links; PURGE=1 also wipes state/config/worktrees
 	@bin=$$(command -v lazed || echo daemon/target/release/lazed); \
 	"$$bin" uninstall $(if $(PURGE),--purge) $(if $(YES),--yes)
 
-dev: ## run the app (tauri dev — starts vite + native shell)
+dev: ## build the daemon, then run the app (vite + native shell)
+	$(CARGO) build --release --manifest-path daemon/Cargo.toml
 	$(BUN) run tauri dev
 
 web: ## frontend only (vite dev server on :1420)
@@ -39,6 +40,7 @@ test: ## vitest + cargo test
 	$(CARGO) test --manifest-path src-tauri/Cargo.toml
 	$(CARGO) test --manifest-path daemon/Cargo.toml
 	$(CARGO) build --manifest-path daemon/Cargo.toml
+	python3 scripts/test_daemon_update.py
 	python3 scripts/test_task_runtime.py
 
 format: ## biome format --write

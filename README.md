@@ -71,6 +71,11 @@ pane 안의 에이전트가 lazed를 조작하는 방법은 스킬 문서(`skill
 
 ## 개발
 
+- `make dev`는 release 데몬을 빌드한 뒤 앱을 실행한다. 실행 중 데몬 코드를
+  수정했다면 다시 `make dev`하거나 `cargo build --release --manifest-path daemon/Cargo.toml`을 실행한다.
+  앱은 5초마다 업데이트를 확인해 상단에 표시한다. 터미널이 하나도 없으면
+  자동 재시작하며, 터미널이 있으면 종료 영향을 확인한 뒤 Restart로 적용한다.
+  자동 재시작을 지원하지 않는 구버전 데몬은 최초 한 번 수동 재시작이 필요하다.
 - `make check` — tsc + biome + `cargo check` (src-tauri, daemon).
 - `make test` — vitest + cargo test + `scripts/test_task_runtime.py`
   (임시 state dir의 일회용 데몬에 대한 블랙박스 테스트).

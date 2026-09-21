@@ -136,7 +136,8 @@ export const lazed = {
   snapshot: () => invoke<Snapshot>("session_snapshot"),
   status: () => invoke<SessionStatus>("session_status"),
   /** stop + respawn the daemon; panes come back from the persisted session */
-  restartServer: () => invoke<SessionStatus>("server_restart"),
+  restartServer: (onlyIfEmpty = false) =>
+    invoke<SessionStatus>("server_restart", { onlyIfEmpty }),
 
   // pane control streams
   termClose: (termId: string) => invoke("term_close", { termId }),

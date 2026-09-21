@@ -13,6 +13,7 @@ import { TermGrid } from "./components/TermGrid";
 import { AgentPicker } from "./features/AgentPicker";
 import { AutomationEditor } from "./features/AutomationEditor";
 import { Automations } from "./features/Automations";
+import { DaemonUpdate } from "./features/DaemonUpdate";
 import { DiffView } from "./features/DiffView";
 import { Fanout, type FanoutRequest } from "./features/Fanout";
 import { ImportProject } from "./features/ImportProject";
@@ -1109,6 +1110,7 @@ export function App() {
         </span>
         <span className="tagline">STAY LAZY, ACT CRAZY</span>
       </div>
+      <DaemonUpdate />
       {installReport && (
         <div className="install-banner">
           <span>

@@ -49,8 +49,19 @@ static STARTED_AT: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
         .unwrap_or(0)
 });
 
+// Capture the executable before serving requests. Timestamps rounded to
+// seconds miss quick rebuilds; inode + full mtime also detects replacement.
+fn binary_stamp() -> Option<(u64, u64, std::time::SystemTime)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
+    Some((meta.ino(), meta.len(), meta.modified().ok()?))
+}
+static BINARY_STAMP: std::sync::LazyLock<Option<(u64, u64, std::time::SystemTime)>> =
+    std::sync::LazyLock::new(binary_stamp);
+
 pub fn run() -> std::io::Result<()> {
     let _ = *STARTED_AT;
+    let _ = *BINARY_STAMP;
     state::ensure_dir()?;
     let path = state::sock_path();
     if path.exists() {
@@ -228,19 +239,14 @@ fn dispatch(
     match method {
         "session.status" => {
             let exe = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok());
-            // the binary on disk was rebuilt after this process started —
-            // the running daemon is stale until restarted
-            let binary_updated = exe
-                .as_ref()
-                .and_then(|p| std::fs::metadata(p).ok())
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() > *STARTED_AT)
-                .unwrap_or(false);
+            let binary_updated = matches!(
+                (*BINARY_STAMP, binary_stamp()),
+                (Some(started), Some(current)) if started != current
+            );
             Ok(json!({
                 "running": true,
                 "version": env!("CARGO_PKG_VERSION"),
-                "capabilities": ["agent.lifecycle.v1", "task.v1", "agent.names.v1", "pane.context.v1", "inbox.v1", "agent.busy_prompt.v1", "agent.history.v1", "server.restart.v1"],
+                "capabilities": ["agent.lifecycle.v1", "task.v1", "agent.names.v1", "pane.context.v1", "inbox.v1", "agent.busy_prompt.v1", "agent.history.v1", "server.restart.v1", "server.stop_if_empty.v1"],
                 "exe": exe.map(|p| p.to_string_lossy().to_string()),
                 "pid": std::process::id(),
                 "started_at": *STARTED_AT,
@@ -253,6 +259,16 @@ fn dispatch(
         "session.persist" => {
             s.persist()?;
             Ok(json!({"ok": true}))
+        }
+        "server.stop_if_empty" => {
+            // Deliberately close the connection without a reply: exit while
+            // holding the session lock, so no concurrent terminal creation
+            // can slip between the emptiness check and process exit.
+            if !s.terminals.is_empty() || !s.removing_workspaces.is_empty() {
+                return Err("daemon_has_terminals: manual restart required".into());
+            }
+            s.persist()?;
+            std::process::exit(0);
         }
         "server.stop" => {
             s.persist()?;
@@ -883,6 +899,22 @@ fn same_checkout_path(a: &str, b: &str) -> bool {
     }
 }
 
+/// Canonical spelling of a checkout path — resolves symlinked parents even
+/// after the checkout dir itself is already gone (macOS /var → /private/var),
+/// so git's recorded path still matches the workspace's stored path.
+fn canonical_spelling(path: &str) -> String {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p.to_string_lossy().into_owned();
+    }
+    let p = std::path::Path::new(path);
+    match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+            .map(|c| c.join(name).to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string()),
+        _ => path.to_string(),
+    }
+}
+
 /// A git-locked worktree is an external safety contract — Orca never folds
 /// it into the dirty-file force path; the caller must unlock it explicitly.
 fn locked_worktree_error(reason: Option<&str>) -> String {
@@ -1168,7 +1200,7 @@ fn remove_checkout(
     keep_branch: bool,
     fallback_branch: Option<&str>,
 ) -> Result<Value, String> {
-    let checkout_exists = std::path::Path::new(&path).exists();
+    let checkout_exists = std::path::Path::new(path).exists();
 
     let mut prefixes: Vec<Vec<String>> = Vec::new();
     if checkout_exists {
@@ -1196,7 +1228,8 @@ fn remove_checkout(
             break;
         }
     }
-    let entry = entries.iter().find(|e| same_checkout_path(&e.path, path));
+    let canon = canonical_spelling(path);
+    let entry = entries.iter().find(|e| same_checkout_path(&e.path, &canon));
     let registered_path = entry.map(|e| e.path.clone());
     if let Some(e) = entry {
         if e.locked {
@@ -1409,5 +1442,201 @@ mod reliability_tests {
     #[test]
     fn failed_git_list_is_an_error() {
         assert!(worktree_list(&json!({"repo": "/nonexistent-lazed-test-repo"})).unwrap_err().contains("git worktree list failed"));
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn tdir(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("lazed-rm-{tag}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn sh_git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repo with one commit; returns (repo, git-common-dir).
+    fn mk_repo(tag: &str) -> (PathBuf, String) {
+        let repo = tdir(tag).join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        sh_git(&repo, &["init", "-q"]);
+        sh_git(
+            &repo,
+            &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init", "--allow-empty"],
+        );
+        let common = sh_git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+        (repo, common)
+    }
+
+    fn add_worktree(repo: &Path, name: &str) -> PathBuf {
+        let wt = repo.parent().unwrap().join(name);
+        sh_git(repo, &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap()]);
+        wt
+    }
+
+    fn registered(repo: &Path, wt: &Path) -> bool {
+        sh_git(repo, &["worktree", "list", "--porcelain"])
+            .contains(&format!("worktree {}", wt.canonicalize().unwrap_or_else(|_| wt.into()).display()))
+    }
+
+    #[test]
+    fn parses_porcelain_branch_locked_detached() {
+        let text = "worktree /repo\nHEAD aaa\nbranch refs/heads/main\n\nworktree /wt\nHEAD bbb\ndetached\n\nworktree /lk\nHEAD ccc\nbranch refs/heads/lk\nlocked reasons here\n";
+        let e = parse_worktree_list(text);
+        assert_eq!(e.len(), 3);
+        assert_eq!(e[0].branch.as_deref(), Some("main"));
+        assert!(e[1].branch.is_none());
+        assert!(e[2].locked && e[2].lock_reason.as_deref() == Some("reasons here"));
+    }
+
+    #[test]
+    fn refusal_matchers() {
+        assert!(is_submodule_removal_refusal("fatal: working trees containing submodules cannot be moved or removed"));
+        assert!(!is_submodule_removal_refusal("fatal: 'x' contains modified or untracked files"));
+        assert!(is_locked_removal_refusal("fatal: cannot remove a locked working tree;"));
+        assert!(is_checked_out_branch_error("error: cannot delete branch 'x' used by worktree at /y"));
+        assert!(is_checked_out_branch_error("fatal: branch 'x' is checked out at /y"));
+        assert!(!is_checked_out_branch_error("error: the branch 'x' is not fully merged"));
+    }
+
+    #[test]
+    fn removes_clean_worktree_and_deletes_merged_branch() {
+        let (repo, common) = mk_repo("clean");
+        let wt = add_worktree(&repo, "feat");
+        let v = remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), false, false, None).unwrap();
+        assert!(!wt.exists());
+        assert_eq!(v["deleted_branch"], "feat");
+        assert!(!registered(&repo, &wt));
+    }
+
+    #[test]
+    fn dirty_worktree_refuses_then_force_removes() {
+        let (repo, common) = mk_repo("dirty");
+        let wt = add_worktree(&repo, "dirt");
+        std::fs::write(wt.join("untracked.txt"), "x").unwrap();
+        let err = remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), false, false, None)
+            .unwrap_err();
+        assert!(err.contains("modified or untracked"), "{err}");
+        assert!(wt.exists());
+        remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), true, false, None).unwrap();
+        assert!(!wt.exists());
+        assert!(!registered(&repo, &wt));
+    }
+
+    #[test]
+    fn clean_submodule_worktree_is_removed() {
+        let (repo, common) = mk_repo("subm");
+        let wt = add_worktree(&repo, "wt-sub");
+        sh_git(&wt, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", repo.to_str().unwrap(), "sub1"]);
+        sh_git(&wt, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "sub"]);
+        assert!(checkout_status(wt.to_str().unwrap()).unwrap().is_empty());
+        // plain git would refuse — the daemon must force past it after a
+        // clean proof (or bypass it entirely via the trash path).
+        let plain = git_out(
+            &["-C".into(), repo.to_string_lossy().into_owned()],
+            &["worktree", "remove", wt.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(is_submodule_removal_refusal(&stderr_text(&plain)));
+        remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), false, false, None).unwrap();
+        assert!(!wt.exists());
+        assert!(!registered(&repo, &wt));
+    }
+
+    #[test]
+    fn locked_worktree_is_refused_even_with_force() {
+        let (repo, common) = mk_repo("lock");
+        let wt = add_worktree(&repo, "lk");
+        sh_git(&repo, &["worktree", "lock", "--reason", "busy", wt.to_str().unwrap()]);
+        let err = remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), true, false, None).unwrap_err();
+        assert!(err.contains("locked by Git") && err.contains("busy"), "{err}");
+        assert!(wt.exists());
+        sh_git(&repo, &["worktree", "unlock", wt.to_str().unwrap()]);
+        remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), false, false, None).unwrap();
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn unmerged_branch_is_preserved() {
+        let (repo, common) = mk_repo("unmerged");
+        let wt = add_worktree(&repo, "wip");
+        std::fs::write(wt.join("new.txt"), "work").unwrap();
+        sh_git(&wt, &["add", "new.txt"]);
+        sh_git(&wt, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "wip"]);
+        let v = remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), false, false, None).unwrap();
+        assert!(!wt.exists());
+        assert_eq!(v["preserved_branch"]["name"], "wip");
+        sh_git(&repo, &["show-ref", "--verify", "--quiet", "refs/heads/wip"]);
+    }
+
+    #[test]
+    fn externally_deleted_checkout_is_deregistered() {
+        let (repo, common) = mk_repo("gone");
+        let wt = add_worktree(&repo, "gone");
+        std::fs::remove_dir_all(&wt).unwrap();
+        let v = remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), false, false, None).unwrap();
+        assert_eq!(v["deleted_branch"], "gone");
+        assert!(!registered(&repo, &wt));
+    }
+
+    #[test]
+    fn unregistered_directory_requires_force() {
+        let (_repo, common) = mk_repo("unreg");
+        let dir = _repo.parent().unwrap().join("plain-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = remove_checkout(Some(common.as_str()), dir.to_str().unwrap(), false, false, None).unwrap_err();
+        assert!(err.contains("--force"), "{err}");
+        assert!(dir.exists());
+        remove_checkout(Some(common.as_str()), dir.to_str().unwrap(), true, false, None).unwrap();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn keep_branch_retains_the_branch() {
+        let (repo, common) = mk_repo("keep");
+        let wt = add_worktree(&repo, "keepme");
+        remove_checkout(Some(common.as_str()), wt.to_str().unwrap(), false, true, None).unwrap();
+        assert!(!wt.exists());
+        sh_git(&repo, &["show-ref", "--verify", "--quiet", "refs/heads/keepme"]);
+    }
+
+    #[test]
+    fn stale_trash_is_swept() {
+        let base = tdir("sweep");
+        let prev = std::env::var("LAZED_WORKTREE_DIR").ok();
+        std::env::set_var("LAZED_WORKTREE_DIR", &base);
+        let trash = base.join("repo").join(WORKTREE_TRASH_DIR);
+        let stale = trash.join("wt-1-deadbeef");
+        std::fs::create_dir_all(&stale).unwrap();
+        sweep_worktree_trash();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while stale.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        match prev {
+            Some(v) => std::env::set_var("LAZED_WORKTREE_DIR", v),
+            None => std::env::remove_var("LAZED_WORKTREE_DIR"),
+        }
+        assert!(!stale.exists());
     }
 }

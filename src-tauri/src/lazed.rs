@@ -34,6 +34,15 @@ pub fn register_bundled(path: Option<PathBuf>) {
 }
 
 fn lazed_bin() -> Result<String, String> {
+    // Development must launch the binary built by this checkout's make dev,
+    // even if the installed CLI points at another checkout.
+    if cfg!(debug_assertions) {
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../daemon/target/release/lazed");
+        if dev.is_file() {
+            return Ok(dev.to_string_lossy().into_owned());
+        }
+    }
     if let Ok(g) = BUNDLED.lock() {
         if let Some(p) = g.as_ref() {
             return Ok(p.to_string_lossy().to_string());
@@ -66,9 +75,12 @@ pub fn api_call(method: &str, params: Value) -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     s.flush().map_err(|e| e.to_string())?;
     let mut line = String::new();
-    BufReader::new(s.try_clone().map_err(|e| e.to_string())?)
+    let bytes = BufReader::new(s.try_clone().map_err(|e| e.to_string())?)
         .read_line(&mut line)
         .map_err(|e| e.to_string())?;
+    if bytes == 0 {
+        return Err("daemon_disconnected".into());
+    }
     let v: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
     if let Some(e) = v.get("error") {
         return Err(e.as_str().unwrap_or("daemon error").to_string());
@@ -111,13 +123,33 @@ pub fn ensure_server() -> Result<(), String> {
 /// Stop the daemon and bring up a fresh one from the current binary.
 /// The daemon respawns panes from its persisted session, but processes
 /// that were running inside them are gone — callers confirm first.
-pub fn restart_server() -> Result<Value, String> {
-    let was_running = api_call("server.stop", json!({})).is_ok();
+pub fn restart_server(only_if_empty: bool) -> Result<Value, String> {
+    let status = api_call("session.status", json!({}))?;
+    let old_pid = status["pid"].clone();
+    // This gate lives in the daemon, under its session lock. A client-side
+    // count followed by server.stop could kill a newly created terminal.
+    if only_if_empty {
+        if !status["capabilities"].as_array().is_some_and(|caps|
+            caps.iter().any(|c| c == "server.stop_if_empty.v1")) {
+            return Err("daemon_manual_restart_required".into());
+        }
+    }
+    let method = if only_if_empty { "server.stop_if_empty" } else { "server.stop" };
+    match api_call(method, json!({})) {
+        Ok(_) => {},
+        // The atomic empty-session stop exits while still holding the lock.
+        Err(e) if only_if_empty && e == "daemon_disconnected" => {},
+        Err(e) => return Err(e),
+    };
+    // The event reconnect loop may have already started the replacement.
+    // Wait for the old PID, not for every daemon to disappear.
+    let old_running = || api_call("session.status", json!({}))
+        .is_ok_and(|s| s["pid"] == old_pid);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while was_running && Instant::now() < deadline && server_running() {
+    while Instant::now() < deadline && old_running() {
         std::thread::sleep(Duration::from_millis(100));
     }
-    if was_running && server_running() {
+    if old_running() {
         return Err("old lazed server did not exit".to_string());
     }
     ensure_server()?;
