@@ -95,7 +95,7 @@ export function DiffView({
   const doRemove = (force: boolean) => {
     setConfirmRemove(false);
     lazed
-      .workspaceRemove(workspaceId, force)
+      .workspaceRemove(workspaceId, force, force)
       .then(() => onClose())
       .catch((e) => setRemoveErr(String(e)));
   };

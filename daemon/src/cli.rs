@@ -4,7 +4,7 @@ use std::io::Read;
 
 const AGENT_HELP: &str = "lazed agent list | specs\n  agent start NAME --kind KIND|--spec SPEC --pane ID [--timeout MS] [-- NATIVE_ARGS...]\n  agent get NAME|PANE\n  agent read NAME|PANE [--lines N] [--source visible|recent|recent-unwrapped|detection]\n  agent prompt NAME|PANE TEXT [--wait] [--timeout MS]\n  agent prompt NAME|PANE --prompt-file PATH|--stdin [--wait] [--timeout MS]\n  agent wait NAME|PANE [--until idle|done|blocked|working] [--timeout MS]\n  agent send-keys NAME|PANE KEY...\nSupported managed kinds: claude, codex, devin, pi. Start uses an existing pane; it never creates a pane/worktree. Wait defaults to 30 seconds; max 600000 ms.";
 const PANE_HELP: &str = "lazed pane list\n  pane current --current\n  pane split --current|--pane ID [--cwd PATH] [--no-focus]\n  pane read ID [--lines N] [--source recent-unwrapped]\nSplit appends a sibling in the same tab, preserving focus. Current lazed layout uses rows of panes, not directional split trees.";
-const WORKTREE_HELP: &str = "lazed worktree create --branch NAME [--repo PATH] [--base REF] [--path PATH] [--allow-dirty]\n  worktree list [--repo PATH]\n  worktree remove WORKSPACE_ID [--force]\nCreate opens a workspace and shell pane, not an agent. Default repo is the caller cwd. Uncommitted files are never copied.";
+const WORKTREE_HELP: &str = "lazed worktree create --branch NAME [--repo PATH] [--base REF] [--path PATH] [--allow-dirty]\n  worktree list [--repo PATH]\n  worktree remove WORKSPACE_ID [--force] [--kill-agents] [--keep-branch]\nCreate opens a workspace and shell pane, not an agent. Default repo is the caller cwd. Uncommitted files are never copied. Remove refuses while a pane still hosts an agent unless --kill-agents is given.";
 
 fn help(group: &str) -> &'static str {
     match group {
@@ -190,6 +190,16 @@ fn parse(
             }
             "--force" if method == "workspace.remove" => {
                 p["force"] = json!(true);
+                i += 1;
+                continue;
+            }
+            "--kill-agents" if method == "workspace.remove" => {
+                p["kill_agents"] = json!(true);
+                i += 1;
+                continue;
+            }
+            "--keep-branch" if method == "workspace.remove" => {
+                p["keep_branch"] = json!(true);
                 i += 1;
                 continue;
             }

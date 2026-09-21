@@ -286,10 +286,15 @@ fn workspace_create(
 }
 
 #[tauri::command]
-fn workspace_remove(workspace_id: String, force: bool) -> Result<Value, String> {
+fn workspace_remove(
+    workspace_id: String,
+    force: bool,
+    kill_agents: bool,
+    keep_branch: Option<bool>,
+) -> Result<Value, String> {
     lazed::api_call(
         "workspace.remove",
-        json!({"workspace_id": workspace_id, "force": force}),
+        json!({"workspace_id": workspace_id, "force": force, "kill_agents": kill_agents, "keep_branch": keep_branch.unwrap_or(false)}),
     )
 }
 

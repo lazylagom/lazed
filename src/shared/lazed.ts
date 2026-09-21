@@ -192,8 +192,13 @@ export const lazed = {
       tab_id: string;
       terminal: TerminalInfo;
     }>("workspace_create", { projectId, branch, base, label }),
-  workspaceRemove: (workspaceId: string, force = false) =>
-    invoke("workspace_remove", { workspaceId, force }),
+  workspaceRemove: (
+    workspaceId: string,
+    force = false,
+    killAgents = false,
+    keepBranch?: boolean,
+  ) =>
+    invoke("workspace_remove", { workspaceId, force, killAgents, keepBranch }),
   workspaceRename: (workspaceId: string, label: string) =>
     invoke("workspace_rename", { workspaceId, label }),
 

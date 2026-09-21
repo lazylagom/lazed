@@ -160,16 +160,17 @@ function WorkspaceRow({
   onFocusWorkspace: (wsId: string) => void;
   onJumpTerm: (termId: string) => void;
   onCloseTerm: (t: TerminalInfo) => void;
-  onRemoveWorkspace: (ws: WorkspaceInfo) => void;
+  onRemoveWorkspace: (ws: WorkspaceInfo, killAgents: boolean) => void;
   onDiff: (ws: WorkspaceInfo) => void;
 }) {
   const name = ws.label ?? ws.branch ?? basename(ws.path) ?? ws.workspace_id;
   const remove = async () => {
-    const ok = await confirmClose(
-      "Remove Workspace",
-      `Remove workspace “${name}”? Its ${panes.length} pane(s) will be killed and the worktree checkout deleted.`,
-    );
-    if (ok) onRemoveWorkspace(ws);
+    const agents = panes.filter((t) => t.agent_kind).map((t) => t.agent_kind);
+    const message = agents.length
+      ? `Remove workspace “${name}”? Agents still running (${[...new Set(agents)].join(", ")}) — their panes will be killed and the worktree checkout deleted.`
+      : `Remove workspace “${name}”? Its ${panes.length} pane(s) will be killed and the worktree checkout deleted.`;
+    const ok = await confirmClose("Remove Workspace", message);
+    if (ok) onRemoveWorkspace(ws, agents.length > 0);
   };
   return (
     <div className="side-tree-group">
@@ -266,7 +267,7 @@ export function Sidebar({
   /** groupId null = move back to ungrouped */
   onAssignProject: (projectId: string, groupId: string | null) => void;
   onCloseTerm: (t: TerminalInfo) => void;
-  onRemoveWorkspace: (ws: WorkspaceInfo) => void;
+  onRemoveWorkspace: (ws: WorkspaceInfo, killAgents: boolean) => void;
   onDiff: (ws: WorkspaceInfo) => void;
   /** ⌘N — open the new-worktree sheet for this project */
   onNewWorktree: (projectId: string) => void;

@@ -3,6 +3,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   isPermissionGranted,
   requestPermission,
@@ -613,13 +614,57 @@ export function App() {
   );
 
   /** close a whole workspace — kills its tabs/panes; linked checkouts get
-   * `git worktree remove`d by the daemon */
-  const removeWorkspace = useCallback((ws: WorkspaceInfo) => {
-    setFocusedWsId((cur) => (cur === ws.workspace_id ? null : cur));
-    lazed
-      .workspaceRemove(ws.workspace_id, false)
-      .catch((e) => setError(String(e)));
-  }, []);
+   * `git worktree remove`d by the daemon. Refusals get an explicit
+   * escalation: agents need killAgents consent, a dirty checkout needs
+   * force. */
+  const removeWorkspace = useCallback(
+    async (ws: WorkspaceInfo, killAgents: boolean) => {
+      const clearFocus = () =>
+        setFocusedWsId((cur) => (cur === ws.workspace_id ? null : cur));
+      let force = false;
+      let kill = killAgents;
+      for (;;) {
+        try {
+          await lazed.workspaceRemove(ws.workspace_id, force, kill);
+          clearFocus();
+          return;
+        } catch (e) {
+          const msg = String(e);
+          if (!kill && msg.includes("workspace_has_agent")) {
+            kill = await ask(
+              "An agent is still running in this workspace. Kill it and remove the workspace?",
+              {
+                title: "Remove Workspace",
+                kind: "warning",
+                okLabel: "Kill & Remove",
+                cancelLabel: "Cancel",
+              },
+            ).catch(() => false);
+            if (kill) continue;
+          } else if (
+            !force &&
+            (msg.includes("use --force") ||
+              msg.includes("modified or untracked"))
+          ) {
+            force = await ask(
+              `"${ws.path}" has modified or untracked files. Force-remove the checkout anyway? Uncommitted work will be lost.`,
+              {
+                title: "Force Remove Workspace",
+                kind: "warning",
+                okLabel: "Force Remove",
+                cancelLabel: "Cancel",
+              },
+            ).catch(() => false);
+            if (force) continue;
+          } else {
+            setError(msg);
+          }
+          return;
+        }
+      }
+    },
+    [],
+  );
 
   /** Focus a newly created terminal once it is present in the model. */
   const focusCreatedTerm = useCallback(async (termId: string | undefined) => {
