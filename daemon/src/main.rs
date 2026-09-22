@@ -5,11 +5,15 @@
 //!   lazed term attach <id> [--cols N --rows N]
 //!                                     attach a control stream: JSON cmds
 //!                                     on stdin, frames/events on stdout
+//!   lazed herdr status|snapshot|call <method> [params-json]
+//!                                     herdr adapter — talks to the herdr
+//!                                     server directly, no lazed daemon needed
 //!   lazed install | uninstall | doctor
 //!                                     manage the CLI/skill links on $HOME
 //!   lazed status | stop | restart     convenience wrappers
 mod agent;
 mod control;
+mod herdr;
 mod history;
 mod inbox;
 mod install;
@@ -35,6 +39,7 @@ fn main() {
         Some("inbox") => inbox::cli(&args[1..]),
         Some(group @ ("agent" | "pane" | "worktree")) => cli::run(group, &args[1..]),
         Some("term") => cmd_term(&args[1..]),
+        Some("herdr") => cmd_herdr(&args[1..]),
         Some("install") => install::install(&args[1..]),
         Some("uninstall") => install::uninstall(&args[1..]),
         Some("doctor") => install::doctor(&args[1..]),
@@ -69,6 +74,8 @@ USAGE:
   lazed inbox <add|list|done|reopen|snooze|remove>
   lazed agent | pane | worktree   discover agent and layout commands
   lazed term attach <term_id>     control stream (JSON in, frames out)
+  lazed herdr <status|snapshot|call <method> [params]>
+                                  herdr execution-layer adapter (PLAN §3b)
   lazed install | uninstall | doctor
   lazed status | stop | restart
   lazed --version"
@@ -280,4 +287,41 @@ fn term_attach(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// `lazed herdr …` — exercise the herdr adapter without the lazed daemon
+/// (status/snapshot/call go straight to the herdr socket). Used by the
+/// app's health check and by hand when debugging the Path C seam.
+fn cmd_herdr(args: &[String]) -> i32 {
+    let out = match args.first().map(String::as_str) {
+        Some("status") => Ok(herdr::status_json()),
+        Some("snapshot") => herdr::snapshot(),
+        Some("call") => match args.get(1) {
+            None => Err("usage: lazed herdr call <method> [params-json]".to_string()),
+            Some(method) => {
+                let params = match args.get(2) {
+                    None => json!({}),
+                    Some(raw) => match serde_json::from_str::<Value>(raw) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("lazed herdr: params is not JSON: {e}");
+                            return 2;
+                        }
+                    },
+                };
+                herdr::call(method, params)
+            }
+        },
+        _ => Err("usage: lazed herdr <status|snapshot|call <method> [params]>".to_string()),
+    };
+    match out {
+        Ok(v) => {
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            0
+        }
+        Err(e) => {
+            eprintln!("lazed herdr: {e}");
+            1
+        }
+    }
 }

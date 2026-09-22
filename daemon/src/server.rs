@@ -95,6 +95,10 @@ pub fn run() -> std::io::Result<()> {
         std::thread::spawn(move || Session::agent_watch(s));
     }
 
+    // herdr event bridge — re-broadcasts execution-layer events as
+    // `herdr.*`; keeps retrying while herdr is down (degraded mode)
+    crate::herdr::spawn_bridge(session.clone());
+
     let listener = UnixListener::bind(&path)?;
     eprintln!("lazed: listening on {}", path.display());
     for conn in listener.incoming() {
@@ -163,6 +167,9 @@ fn handle_conn(stream: UnixStream, session: Shared) {
                 workspace_remove(&session, &params)
             } else if m == "worktree.list" {
                 worktree_list(&params)
+            } else if m.starts_with("herdr.") {
+                // socket/process IO — never under the session lock
+                herdr_call(m, &params)
             } else if m.starts_with("task.") {
                 crate::tasks::handle(&session, m, &params).map(crate::tasks::public)
             } else if m.starts_with("inbox.") {
@@ -676,6 +683,26 @@ mod tests {
 /// label?, path? — default checkout is ~/.lazed/worktrees/<repo>/<branch-
 /// slug>; a taken dir or branch bumps both to a `-N` suffix (response
 /// carries the actual branch/checkout).
+/// `herdr.*` passthrough: `herdr.status` (adapter + server health),
+/// `herdr.snapshot`, and `herdr.call {method, params}` for anything else.
+/// The app uses status/snapshot; `call` is the escape hatch while Step B
+/// (herdr-backed terminals) lands and for debugging.
+fn herdr_call(method: &str, p: &Value) -> Result<Value, String> {
+    match method {
+        "herdr.status" => Ok(crate::herdr::status_json()),
+        "herdr.snapshot" => crate::herdr::snapshot(),
+        "herdr.call" => {
+            let inner = p
+                .get("method")
+                .and_then(Value::as_str)
+                .ok_or("herdr.call needs method")?;
+            let params = p.get("params").cloned().unwrap_or_else(|| json!({}));
+            crate::herdr::call(inner, params)
+        }
+        other => Err(format!("unknown method {other}")),
+    }
+}
+
 fn workspace_create(session: &Shared, p: &Value) -> Result<Value, String> {
     let repo = p
         .get("repo")
