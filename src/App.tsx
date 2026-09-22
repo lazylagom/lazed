@@ -31,10 +31,11 @@ import {
   type AgentStatus,
   type DoctorReport,
   type LazedEvent,
+  type PaneInfo,
   type Snapshot,
-  type TerminalInfo,
   type WorkspaceInfo,
   lazed,
+  normalize,
   subscribeEvents,
 } from "./shared/lazed";
 import { notificationsEnabled } from "./shared/settings";
@@ -44,9 +45,12 @@ import { InboxView } from "./widgets/InboxView";
 import { Rail, type RailView } from "./widgets/Rail";
 import { Sidebar } from "./widgets/Sidebar";
 
-// daemon event names that mean "the model changed — refetch the snapshot"
+// event names that mean "the model changed — refetch the snapshot". lazed
+// emits its organization events; herdr's structural events arrive through
+// the daemon's bridge as `herdr.<event>`.
 const REFRESH_EVENTS = new Set([
   "project.created",
+  "project.updated",
   "project.closed",
   "project.focused",
   "group.created",
@@ -55,10 +59,22 @@ const REFRESH_EVENTS = new Set([
   "workspace.created",
   "workspace.updated",
   "workspace.removed",
-  "tab.created",
-  "tab.closed",
-  "terminal.created",
-  "terminal.closed",
+  "herdr.connected",
+  "herdr.disconnected",
+  "herdr.workspace_created",
+  "herdr.workspace_closed",
+  "herdr.workspace_renamed",
+  "herdr.workspace_focused",
+  "herdr.tab_created",
+  "herdr.tab_closed",
+  "herdr.tab_renamed",
+  "herdr.tab_focused",
+  "herdr.pane_created",
+  "herdr.pane_closed",
+  "herdr.pane_exited",
+  "herdr.pane_updated",
+  "herdr.pane_agent_detected",
+  "herdr.layout_updated",
   "events.reconnect",
 ]);
 
@@ -73,7 +89,7 @@ interface NotifyOpts {
   title: string;
   body: string;
   sound?: string;
-  termId: string;
+  paneId: string;
   projectId?: string;
   /** don't alert when the user is already looking at this terminal */
   skipIfFocused?: boolean;
@@ -90,7 +106,7 @@ async function notifyAgent(o: NotifyOpts) {
     if (!granted) return;
     if (o.skipIfFocused && (await getCurrentWindow().isFocused())) return;
     await invoke("notify_agent", {
-      termId: o.termId,
+      paneId: o.paneId,
       projectId: o.projectId,
       title: o.title,
       body: o.body,
@@ -101,7 +117,7 @@ async function notifyAgent(o: NotifyOpts) {
   }
 }
 
-function basename(p?: string) {
+function basename(p?: string | null) {
   if (!p) return "";
   const parts = p.replace(/\/$/, "").split("/");
   return parts[parts.length - 1] || p;
@@ -111,11 +127,11 @@ function basename(p?: string) {
  * or bypass approval/readiness rules with a second orchestration recipe. */
 function orchestratorPreamble(projectId: string, repoRoot: string): string {
   return [
-    "You orchestrate this project. The `lazed` skill describes how to orchestrate other terminals — read it if it is not already loaded.",
-    `Repo root: ${repoRoot}. Project id: ${projectId}. Your own terminal id is in $LAZED_TERM.`,
-    "Use named agents through `lazed agent start/prompt/get/read/wait`. Agent start uses an existing pane and does not choose layout.",
-    "Default to a sibling pane in the caller's current checkout and preserve focus. Create a worktree only when the user requests isolation or a separate branch/worktree.",
-    "Use `agent prompt NAME TEXT --wait` to wait for activity and a settled state. Read output and verify changes; a settled response is not proof that tests passed.",
+    "You orchestrate this project. The `lazed` skill (on top of the `herdr` skill) describes how to orchestrate other terminals — read them if not already loaded.",
+    `Repo root: ${repoRoot}. lazed project id: ${projectId}. Your own herdr pane id is in $HERDR_PANE.`,
+    "Use named agents through `herdr agent start/prompt/get/read/wait`. Agent start uses an existing pane and does not choose layout; `herdr pane split --current` makes one.",
+    "Default to a sibling pane in the caller's current checkout and preserve focus. Create a worktree (`lazed worktree create`) only when the user requests isolation or a separate branch/worktree.",
+    "Use `herdr agent prompt NAME TEXT --wait` to wait for a settled state. Read output and verify changes; a settled response is not proof that tests passed.",
     "Inspect trust, login, or permission dialogs and ask the user when approval is required. Never blindly approve, resend an uncertain prompt, merge, or delete workspaces.",
   ].join("\n");
 }
@@ -223,7 +239,7 @@ export function App() {
   const refresh = useCallback(() => {
     lazed
       .snapshot()
-      .then(setSnap)
+      .then((s) => setSnap(normalize(s)))
       .catch((e) => setError(String(e)));
   }, []);
 
@@ -239,8 +255,9 @@ export function App() {
     lazed
       .bootstrap()
       .then((res) => {
-        if (res.snapshot) setSnap(res.snapshot);
+        if (res.snapshot) setSnap(normalize(res.snapshot));
         else refresh();
+        if (res.herdr_error) setError(`herdr: ${res.herdr_error}`);
       })
       .catch((e) => setError(String(e)));
     // onboarding: offer `lazed install` when the CLI/skill links are absent
@@ -261,32 +278,43 @@ export function App() {
         loadInbox();
         return;
       }
-      if (name === "agent.status") {
+      if (name === "herdr.pane.scroll_changed") {
+        // scroll position lives in herdr — TermView paints its overlay
+        // scrollbar from this, keyed by pane id
+        window.dispatchEvent(
+          new CustomEvent("lazed:pane-scroll", { detail: ev.data ?? {} }),
+        );
+        return;
+      }
+      if (name === "herdr.pane.agent_status_changed") {
         const d = ev.data ?? {};
-        const termId = d.term_id as string | undefined;
+        const paneId = d.pane_id as string | undefined;
         const status = d.agent_status as AgentStatus | undefined;
-        if (termId && status) {
+        if (paneId && status) {
           // a terminal that goes back to work re-earns its next inbox entry
           if (status === "working" || status === "idle") {
             setDismissed((prev) => {
-              if (!prev.has(termId)) return prev;
+              if (!prev.has(paneId)) return prev;
               const next = new Set(prev);
-              next.delete(termId);
+              next.delete(paneId);
               return next;
             });
           }
           if (status === "blocked" || status === "done") {
             const cur = snapRef.current;
-            const term = cur?.terminals.find((x) => x.term_id === termId);
+            const term = cur?.panes.find((x) => x.pane_id === paneId);
+            const ws = cur?.workspaces?.find(
+              (w) => w.workspace_id === term?.workspace_id,
+            );
             const proj = cur?.projects.find(
-              (p) => p.project_id === term?.project_id,
+              (p) => p.project_id === ws?.project_id,
             );
             const who =
-              (d.name as string) ??
               term?.agent_name ??
-              (d.agent as string) ??
-              term?.agent_kind ??
-              termId;
+              (d.display_agent as string | null) ??
+              (d.agent as string | null) ??
+              term?.agent ??
+              paneId;
             const where = [
               proj?.label ?? basename(proj?.repo_root),
               term?.label ?? (term?.cwd ? basename(term.cwd) : undefined),
@@ -296,30 +324,30 @@ export function App() {
             notifyAgent({
               title:
                 status === "done" ? `${who} finished` : `${who} needs input`,
-              body: where || termId,
+              body: where || paneId,
               sound: status === "done" ? "Glass" : "Ping",
-              termId,
+              paneId,
               projectId: proj?.project_id,
-              skipIfFocused: focusRef.current === termId,
+              skipIfFocused: focusRef.current === paneId,
             });
           }
           setSnap((prev) =>
             prev
               ? {
                   ...prev,
-                  terminals: prev.terminals.map((t) =>
-                    t.term_id === termId
+                  panes: prev.panes.map((t) =>
+                    t.pane_id === paneId
                       ? {
                           ...t,
                           agent_status: status,
-                          agent_kind:
+                          agent:
                             "agent" in d
                               ? ((d.agent as string | null) ?? undefined)
-                              : t.agent_kind,
-                          agent_name:
-                            "name" in d
-                              ? (d.name as string | null)
-                              : t.agent_name,
+                              : t.agent,
+                          display_agent:
+                            "display_agent" in d
+                              ? (d.display_agent as string | null)
+                              : t.display_agent,
                         }
                       : t,
                   ),
@@ -357,7 +385,7 @@ export function App() {
 
   const projects = useMemo(() => snap?.projects ?? [], [snap]);
   const termsById = useMemo(
-    () => new Map((snap?.terminals ?? []).map((t) => [t.term_id, t])),
+    () => new Map((snap?.panes ?? []).map((t) => [t.pane_id, t])),
     [snap],
   );
   // stable onClose for memoized TermViews — reading the map through a ref
@@ -402,11 +430,11 @@ export function App() {
 
   /** All panes of a workspace in display order — tab order, pane order. */
   const panesOf = useCallback(
-    (ws?: WorkspaceInfo): TerminalInfo[] =>
+    (ws?: WorkspaceInfo): PaneInfo[] =>
       (ws?.tabs ?? [])
         .flatMap((tid) => tabById.get(tid)?.panes ?? [])
         .map((pid) => termsById.get(pid))
-        .filter((t): t is TerminalInfo => Boolean(t)),
+        .filter((t): t is PaneInfo => Boolean(t)),
     [tabById, termsById],
   );
 
@@ -436,12 +464,12 @@ export function App() {
     () =>
       (activeTabId ? (tabById.get(activeTabId)?.panes ?? []) : [])
         .map((pid) => termsById.get(pid))
-        .filter((t): t is TerminalInfo => Boolean(t)),
+        .filter((t): t is PaneInfo => Boolean(t)),
     [tabById, activeTabId, termsById],
   );
 
   const effectiveFocusedTerm =
-    focusedInWs?.term_id ?? tabPanes[0]?.term_id ?? null;
+    focusedInWs?.pane_id ?? tabPanes[0]?.pane_id ?? null;
 
   // ⇧⌘Enter zoom — the focused pane alone fills the workspace area
   const zoomedTerm =
@@ -504,15 +532,17 @@ export function App() {
       const ws = wsById.get(wsId);
       if (!ws) return;
       setZoomed(false);
-      lazed.projectFocus(ws.project_id).catch(() => {});
-      lastWsByProject.current.set(ws.project_id, wsId);
+      if (ws.project_id) {
+        lazed.projectFocus(ws.project_id).catch(() => {});
+        lastWsByProject.current.set(ws.project_id, wsId);
+      }
       setFocusedWsId(wsId);
       const remembered = lastTermByWs.current.get(wsId);
       const panes = panesOf(ws);
       const target =
-        remembered && panes.some((t) => t.term_id === remembered)
+        remembered && panes.some((t) => t.pane_id === remembered)
           ? remembered
-          : (panes[0]?.term_id ?? null);
+          : (panes[0]?.pane_id ?? null);
       setFocusedTermId(target);
     },
     [wsById, panesOf],
@@ -541,47 +571,47 @@ export function App() {
       const pane =
         remembered && wsId ? lastTermByWs.current.get(wsId) : undefined;
       setFocusedTermId(
-        pane && panes.some((t) => t.term_id === pane)
+        pane && panes.some((t) => t.pane_id === pane)
           ? pane
-          : (panes[0]?.term_id ?? null),
+          : (panes[0]?.pane_id ?? null),
       );
     },
     [projById, wsById, panesOf],
   );
 
   const jumpToTerm = useCallback(
-    (termId: string) => {
-      const t = termsById.get(termId);
+    (paneId: string) => {
+      const t = termsById.get(paneId);
       if (!t) return;
-      if (t.project_id) lazed.projectFocus(t.project_id).catch(() => {});
+      const projectId = wsById.get(t.workspace_id)?.project_id;
+      if (projectId) lazed.projectFocus(projectId).catch(() => {});
       if (t.workspace_id) {
-        if (t.project_id)
-          lastWsByProject.current.set(t.project_id, t.workspace_id);
+        if (projectId) lastWsByProject.current.set(projectId, t.workspace_id);
         setFocusedWsId(t.workspace_id);
       }
-      setFocusedTermId(termId);
+      setFocusedTermId(paneId);
       setZoomed(false);
       setInboxOpen(false);
     },
-    [termsById],
+    [termsById, wsById],
   );
 
   // notification click → raise the window and jump to that terminal
   useEffect(() => {
     let off: (() => void) | undefined;
     let cancelled = false;
-    listen<{ term_id?: string; project_id?: string }>(
+    listen<{ pane_id?: string; project_id?: string }>(
       "notification.jump",
       (e) => {
-        const termId = e.payload.term_id;
-        if (!termId) return;
+        const paneId = e.payload.pane_id;
+        if (!paneId) return;
         const win = getCurrentWindow();
         win
           .show()
           .then(() => win.unminimize())
           .then(() => win.setFocus())
           .catch(() => {});
-        jumpToTerm(termId);
+        jumpToTerm(paneId);
       },
     )
       .then((unlisten) => {
@@ -599,9 +629,9 @@ export function App() {
   }, [jumpToTerm]);
 
   /** close one pane — workspace checkouts are never touched by this */
-  const closeTerm = useCallback((t: TerminalInfo) => {
-    setFocusedTermId((cur) => (cur === t.term_id ? null : cur));
-    lazed.termClose(t.term_id).catch((e) => setError(String(e)));
+  const closeTerm = useCallback((t: PaneInfo) => {
+    setFocusedTermId((cur) => (cur === t.pane_id ? null : cur));
+    lazed.paneClose(t.pane_id).catch((e) => setError(String(e)));
   }, []);
 
   /** TermView's close handler — stable identity (memoized children) via
@@ -668,39 +698,40 @@ export function App() {
   );
 
   /** Focus a newly created terminal once it is present in the model. */
-  const focusCreatedTerm = useCallback(async (termId: string | undefined) => {
-    if (!termId) return;
+  const focusCreatedTerm = useCallback(async (paneId: string | undefined) => {
+    if (!paneId) return;
     // Publish the new model and selection together. Selecting an ID before
     // it exists in the snapshot falls back to the first pane, whose DOM
     // focus event can overwrite the requested selection.
     const next = await lazed.snapshot();
-    setSnap(next);
-    setFocusedTermId(termId);
+    setSnap(normalize(next));
+    setFocusedTermId(paneId);
     setZoomed(false);
   }, []);
 
-  /** ⌘D — split a pane into the active tab (or open the workspace's first
-   * tab when it has none). */
+  /** ⌘D — split next to the focused pane of the active tab (or open the
+   * workspace's first tab when it has none). */
   const newPane = useCallback(() => {
-    if (activeTabId) {
+    const target = effectiveFocusedTerm ?? tabPanes[0]?.pane_id;
+    if (target) {
       lazed
-        .termCreate({ tabId: activeTabId })
-        .then((t) => focusCreatedTerm(t.term_id))
+        .paneCreate({ targetPaneId: target })
+        .then((r) => focusCreatedTerm(r.pane?.pane_id))
         .catch((e) => setError(String(e)));
     } else if (activeWorkspace) {
       lazed
         .tabCreate(activeWorkspace.workspace_id)
-        .then((r) => focusCreatedTerm(r.terminal?.term_id))
+        .then((r) => focusCreatedTerm(r.root_pane?.pane_id))
         .catch((e) => setError(String(e)));
     }
-  }, [activeTabId, activeWorkspace, focusCreatedTerm]);
+  }, [effectiveFocusedTerm, tabPanes, activeWorkspace, focusCreatedTerm]);
 
-  /** ⌘T — a fresh tab (with its first pane) in the active workspace. */
+  /** ⌘T — a fresh tab (with its root pane) in the active workspace. */
   const newTab = useCallback(() => {
     if (!activeWorkspace) return;
     lazed
       .tabCreate(activeWorkspace.workspace_id)
-      .then((r) => focusCreatedTerm(r.terminal?.term_id))
+      .then((r) => focusCreatedTerm(r.root_pane?.pane_id))
       .catch((e) => setError(String(e)));
   }, [activeWorkspace, focusCreatedTerm]);
 
@@ -733,13 +764,14 @@ export function App() {
           lastWsByProject.current.set(pid, wid);
           setFocusedWsId(wid);
         }
-        const tid = res.terminal?.term_id;
-        if (tid) setFocusedTermId(tid);
+        if (res.opened?.error) setError(`herdr: ${res.opened.error}`);
+        const tid = res.opened?.pane_id;
+        if (tid) await focusCreatedTerm(tid);
       } catch (e) {
         setError(String(e));
       }
     },
-    [focusProject, flash],
+    [focusProject, flash, focusCreatedTerm],
   );
 
   /** ⌘N — `git worktree add` for the selected project, then focus the new
@@ -755,7 +787,7 @@ export function App() {
       lastWsByProject.current.set(projectId, res.workspace_id);
       await lazed.projectFocus(projectId).catch(() => {});
       setFocusedWsId(res.workspace_id);
-      await focusCreatedTerm(res.terminal?.term_id);
+      await focusCreatedTerm(res.pane_id);
     },
     [focusCreatedTerm],
   );
@@ -769,25 +801,25 @@ export function App() {
       const mainWs = (live?.workspaces ?? []).find(
         (w) => w.project_id === projectId && w.is_main,
       );
-      let termId =
+      let paneId =
         mainWs &&
         (live?.tabs ?? [])
           .filter((t) => t.workspace_id === mainWs.workspace_id)
           .flatMap((t) => t.panes)[0];
-      if (mainWs && !termId) {
+      if (mainWs && !paneId) {
         const r = await lazed.tabCreate(mainWs.workspace_id).catch(() => null);
-        termId = r?.terminal?.term_id;
+        paneId = r?.root_pane?.pane_id;
       }
-      if (!termId) {
+      if (!paneId) {
         setError("orchestrator: workspace has no pane");
         return;
       }
       lazed.projectFocus(projectId).catch(() => {});
       if (mainWs) setFocusedWsId(mainWs.workspace_id);
-      setFocusedTermId(termId);
+      setFocusedTermId(paneId);
       try {
-        const existing = await lazed.agentGet(termId);
-        if (!existing.agent) await lazed.agentStart(termId, "claude");
+        const existing = await lazed.agentGet(paneId);
+        if (!existing.agent) await lazed.agentStart(paneId, "claude");
         else if (
           existing.agent !== "claude" ||
           !["idle", "done"].includes(existing.agent_status ?? "unknown")
@@ -797,7 +829,7 @@ export function App() {
           );
         }
         await lazed.agentPrompt(
-          termId,
+          paneId,
           orchestratorPreamble(projectId, p.repo_root),
         );
         flash("orchestrator started");
@@ -820,14 +852,14 @@ export function App() {
 
   const submitPrompt = useCallback(
     (text: string, target: PromptTarget) => {
-      const agentTerms = workspacePanes.filter((t) => t.agent_kind);
-      const run = (t: TerminalInfo) =>
-        (t.agent_kind
-          ? lazed.agentPrompt(t.term_id, text)
-          : lazed.termSend(t.term_id, `${text}\n`)
+      const agentTerms = workspacePanes.filter((t) => t.agent);
+      const run = (t: PaneInfo) =>
+        (t.agent
+          ? lazed.agentPrompt(t.pane_id, text)
+          : lazed.paneSend(t.pane_id, `${text}\n`)
         ).catch((e) => setError(String(e)));
       if (target.kind === "focused") {
-        const t = termsById.get(target.termId);
+        const t = termsById.get(target.paneId);
         if (t) run(t);
       } else if (target.kind === "agents") {
         for (const t of agentTerms) run(t);
@@ -909,7 +941,7 @@ export function App() {
         return;
       }
       // panes of the active tab — ⌘[ ] never leaves the tab
-      const paneIds = tabPanes.map((t) => t.term_id);
+      const paneIds = tabPanes.map((t) => t.pane_id);
       const step = (list: string[], cur: string | undefined, d: number) => {
         const i = Math.max(0, list.indexOf(cur ?? ""));
         return list[(i + d + list.length) % list.length];
@@ -1057,7 +1089,7 @@ export function App() {
     .filter(
       (t) =>
         (t.agent_status === "blocked" || t.agent_status === "done") &&
-        !dismissed.has(t.term_id),
+        !dismissed.has(t.pane_id),
     )
     .sort((a, b) =>
       a.agent_status === b.agent_status
@@ -1066,15 +1098,12 @@ export function App() {
           ? -1
           : 1,
     )
-    .map((term) => ({
-      term,
-      project:
-        projects.find((p) => p.project_id === term.project_id)?.label ??
-        basename(
-          projects.find((p) => p.project_id === term.project_id)?.repo_root,
-        ),
-    }));
-  const agentCount = workspacePanes.filter((t) => t.agent_kind).length;
+    .map((term) => {
+      const pid = wsById.get(term.workspace_id)?.project_id;
+      const proj = projects.find((p) => p.project_id === pid);
+      return { term, project: proj?.label ?? basename(proj?.repo_root) };
+    });
+  const agentCount = workspacePanes.filter((t) => t.agent).length;
   const openInboxCount = inboxItems.filter((i) => i.status === "open").length;
 
   // dock badge = undismissed attention count (blocked/finished agents plus
@@ -1135,14 +1164,14 @@ export function App() {
       {inboxOpen && (
         <InboxPanel
           items={attentionItems}
-          onJump={(t) => jumpToTerm(t.term_id)}
+          onJump={(t) => jumpToTerm(t.pane_id)}
           onDismiss={(id) => setDismissed((prev) => new Set(prev).add(id))}
           onDismissAll={() =>
             setDismissed(
               (prev) =>
                 new Set([
                   ...prev,
-                  ...attentionItems.map((i) => i.term.term_id),
+                  ...attentionItems.map((i) => i.term.pane_id),
                 ]),
             )
           }
@@ -1237,15 +1266,15 @@ export function App() {
       )}
       {diffWs &&
         (() => {
-          const p = projById.get(diffWs.project_id);
-          const agent = panesOf(diffWs).find((t) => t.agent_kind);
+          const p = projById.get(diffWs.project_id ?? "");
+          const agent = panesOf(diffWs).find((t) => t.agent);
           return (
             <DiffView
-              checkout={diffWs.path}
+              checkout={diffWs.path ?? ""}
               repoRoot={p?.repo_root}
               label={diffWs.label ?? diffWs.branch}
               workspaceId={diffWs.workspace_id}
-              agentTermId={agent?.term_id}
+              agentTermId={agent?.pane_id}
               onClose={() => setDiffWs(null)}
               onJump={() => {
                 selectWorkspace(diffWs.workspace_id);
@@ -1330,14 +1359,14 @@ export function App() {
                   {workspaceTabs.map((tab, i) => {
                     const panes = tab.panes
                       .map((pid) => termsById.get(pid))
-                      .filter((t): t is TerminalInfo => Boolean(t));
+                      .filter((t): t is PaneInfo => Boolean(t));
                     const sole = panes.length === 1 ? panes[0] : undefined;
                     const name =
                       tab.label ??
                       (sole
                         ? (sole.label ??
-                          sole.agent_kind ??
-                          sole.branch ??
+                          sole.agent_name ??
+                          sole.agent ??
                           basename(sole.cwd))
                         : `${panes.length} panes`) ??
                       `tab ${i + 1}`;

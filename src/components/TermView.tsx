@@ -6,23 +6,28 @@ import { Terminal } from "@xterm/xterm";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { openUrl } from "../shared/inbox";
-import type { TerminalInfo } from "../shared/lazed";
+import type { PaneInfo } from "../shared/lazed";
 import { TERMINAL_FONT_FAMILY, TERMINAL_THEME } from "../terminal/config";
 import { IMEOverlay } from "../terminal/ime-overlay";
 
+/** One NDJSON line from `herdr terminal session control`. */
 interface Frame {
   type?: string;
-  term_id?: string;
+  /** base64 ANSI — a full repaint when `full`, else a viewport diff */
   bytes?: string;
   full?: boolean;
   seq?: number;
+  width?: number;
+  height?: number;
   text?: string;
+}
+
+/** `herdr.pane.scroll_changed` relayed by App as a window event. */
+interface PaneScroll {
+  pane_id?: string;
   offset_from_bottom?: number;
   max_offset_from_bottom?: number;
-  viewport_cols?: number;
   viewport_rows?: number;
-  agent_kind?: string;
-  agent_status?: string;
 }
 
 // Uint8Array.fromBase64 (Baseline 2025 / WKWebView 18.4+) decodes straight
@@ -45,18 +50,22 @@ export const TermView = memo(function TermView({
   onFocus,
   onClose,
 }: {
-  term: TerminalInfo;
+  term: PaneInfo;
   focused: boolean;
-  onFocus: (termId: string) => void;
-  onClose: (termId: string) => void;
+  onFocus: (paneId: string) => void;
+  onClose: (paneId: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const imeRef = useRef<IMEOverlay | null>(null);
-  // daemon-side scroll state: offset = lines above the live edge. Kept in
-  // a ref + imperative DOM — term.scroll can arrive at ~125fps during
+  // herdr-side scroll state: offset = lines above the live edge. Kept in
+  // a ref + imperative DOM — scroll events can arrive at frame rate during
   // floods and must not re-render React per message.
-  const scrollRef = useRef({ offset: 0, max: 0, rows: 1 });
+  const scrollRef = useRef({
+    offset: term.scroll?.offset_from_bottom ?? 0,
+    max: term.scroll?.max_offset_from_bottom ?? 0,
+    rows: term.scroll?.viewport_rows ?? 1,
+  });
   const [scrollable, setScrollable] = useState(false);
   const barRef = useRef<HTMLDivElement>(null);
   const thumbRef = useRef<HTMLDivElement>(null);
@@ -115,7 +124,7 @@ export const TermView = memo(function TermView({
     // to the terminal directly; xterm only renders. App-level Cmd+*
     // shortcuts still bubble to the window keydown handler.
     const ime = new IMEOverlay(xterm, host, (text) => {
-      invoke("term_input", { termId: term.term_id, text }).catch(() => {});
+      invoke("pane_input", { paneId: term.pane_id, text }).catch(() => {});
     });
     imeRef.current = ime;
 
@@ -139,16 +148,11 @@ export const TermView = memo(function TermView({
         return;
       }
       lastSizePush = now;
-      invoke("term_resize", {
-        termId: term.term_id,
+      invoke("pane_resize", {
+        paneId: term.pane_id,
         cols: xterm.cols,
         rows: xterm.rows,
       }).catch(() => {});
-    };
-    const resync = (cols?: number, rows?: number) => {
-      if ((rows && rows !== xterm.rows) || (cols && cols !== xterm.cols)) {
-        pushSize();
-      }
     };
 
     let disposed = false;
@@ -160,24 +164,10 @@ export const TermView = memo(function TermView({
       if (disposed) return;
       frames = new Channel<Frame>();
       frames.onmessage = (msg) => {
-        if (msg.type === "term.frame" && msg.bytes) {
+        if (msg.type === "terminal.frame" && msg.bytes) {
           retries = 0;
           xterm.write(b64ToBytes(msg.bytes));
-        } else if (msg.type === "term.scroll") {
-          scrollRef.current = {
-            offset: msg.offset_from_bottom ?? 0,
-            max: msg.max_offset_from_bottom ?? 0,
-            rows: msg.viewport_rows ?? xterm.rows,
-          };
-          applyScroll();
-          // viewport_{cols,rows} is the daemon's size — it re-sends this on
-          // every resize, so a mismatch here means we're stale
-          resync(msg.viewport_cols, msg.viewport_rows);
-        } else if (msg.type === "term.agent") {
-          // per-terminal agent updates also arrive via global events
-        } else if (msg.type === "log" && msg.text) {
-          xterm.writeln(`\x1b[33m[lazed] ${msg.text}\x1b[0m`);
-        } else if (msg.type === "term.closed") {
+        } else if (msg.type === "terminal.closed") {
           if (disposed) return;
           // stream ended (daemon restart or terminal gone) — retry attach
           if (retries < 20) {
@@ -188,8 +178,8 @@ export const TermView = memo(function TermView({
           }
         }
       };
-      invoke("term_attach", {
-        termId: term.term_id,
+      invoke("pane_attach", {
+        paneId: term.pane_id,
         cols: xterm.cols,
         rows: xterm.rows,
         onFrame: frames,
@@ -206,23 +196,20 @@ export const TermView = memo(function TermView({
     attach();
 
     const dataSub = xterm.onData((text) => {
-      invoke("term_input", { termId: term.term_id, text }).catch(() => {});
+      invoke("pane_input", { paneId: term.pane_id, text }).catch(() => {});
     });
 
-    // Scrollback lives in the daemon, not xterm's buffer — the attach stream
-    // only mirrors the visible viewport as ANSI diffs, so xterm's own wheel
-    // scroll has nothing to scroll. We forward PIXEL deltas and let the
-    // daemon accumulate sub-line remainders + route them (display scroll
-    // for shells, SGR wheel bytes for mouse-reporting apps, arrows for
-    // alternate-scroll apps).
+    // Scrollback lives in herdr, not xterm's buffer — the stream only
+    // mirrors the visible viewport as ANSI diffs, so xterm's own wheel
+    // scroll has nothing to scroll. herdr takes whole-line scroll commands
+    // (`terminal.scroll {direction, lines}`), so wheel pixels are turned
+    // into lines here, carrying the sub-line remainder across events.
     //
-    // Events are still batched once per animation frame — trackpads emit
-    // ~120/s while the daemon paces frames at ~125fps, so per-event commands
-    // would just queue up and trail behind the gesture.
+    // Events are batched once per animation frame — trackpads emit ~120/s,
+    // so per-event commands would just queue up and trail the gesture.
     let pendingWheelPx = 0;
     let pendingLines = 0;
     let scrollRaf: number | null = null;
-    let wheelPos = { column: 1, row: 1, modifiers: 0 };
     let wheelCellH = 1;
     let screenRect: DOMRect | null = null;
     let screenRectAt = 0;
@@ -237,28 +224,26 @@ export const TermView = memo(function TermView({
       }
       return screenRect;
     };
+    // wheel deltaY > 0 = toward the live edge; herdr lines > 0 = toward
+    // history, so the sign flips here
+    const sendScroll = (lines: number) => {
+      if (lines === 0) return;
+      invoke("pane_scroll", { paneId: term.pane_id, lines: -lines }).catch(
+        () => {},
+      );
+    };
     const flushScroll = () => {
       scrollRaf = null;
       if (pendingLines !== 0) {
         // line/page delta modes arrive as whole lines already
-        const lines = pendingLines;
-        pendingLines = 0;
-        invoke("term_scroll", {
-          termId: term.term_id,
-          deltaLines: lines,
-          ...wheelPos,
-        }).catch(() => {});
-        return;
+        const lines = Math.trunc(pendingLines);
+        pendingLines -= lines;
+        sendScroll(lines);
       }
       if (pendingWheelPx !== 0) {
-        const px = pendingWheelPx;
-        pendingWheelPx = 0;
-        invoke("term_scroll", {
-          termId: term.term_id,
-          deltaPx: px,
-          cellPx: wheelCellH,
-          ...wheelPos,
-        }).catch(() => {});
+        const lines = Math.trunc(pendingWheelPx / Math.max(1, wheelCellH));
+        pendingWheelPx -= lines * wheelCellH;
+        sendScroll(lines);
       }
     };
     const onWheel = (e: WheelEvent) => {
@@ -266,8 +251,7 @@ export const TermView = memo(function TermView({
       e.stopPropagation();
       const rect = wheelRect();
       const cellH = rect.height / xterm.rows;
-      const cellW = rect.width / xterm.cols;
-      if (!(cellH > 0) || !(cellW > 0)) return;
+      if (!(cellH > 0)) return;
       wheelCellH = cellH;
 
       if (e.deltaMode === 1) {
@@ -277,23 +261,25 @@ export const TermView = memo(function TermView({
       } else {
         pendingWheelPx += e.deltaY;
       }
-
-      const clamp = (v: number, max: number) =>
-        Math.max(0, Math.min(max - 1, v));
-      wheelPos = {
-        column: clamp(Math.floor((e.clientX - rect.left) / cellW), xterm.cols),
-        row: clamp(Math.floor((e.clientY - rect.top) / cellH), xterm.rows),
-        modifiers:
-          (e.shiftKey ? 1 : 0) |
-          (e.ctrlKey ? 2 : 0) |
-          (e.altKey ? 4 : 0) |
-          (e.metaKey ? 8 : 0),
-      };
       if (scrollRaf === null) {
         scrollRaf = requestAnimationFrame(flushScroll);
       }
     };
     host.addEventListener("wheel", onWheel, { capture: true, passive: false });
+
+    // scroll position comes from herdr (`pane.scroll_changed`), relayed by
+    // App as a window event keyed by pane id
+    const onPaneScroll = (e: Event) => {
+      const d = (e as CustomEvent<PaneScroll>).detail;
+      if (!d || d.pane_id !== term.pane_id) return;
+      scrollRef.current = {
+        offset: d.offset_from_bottom ?? 0,
+        max: d.max_offset_from_bottom ?? 0,
+        rows: d.viewport_rows ?? xterm.rows,
+      };
+      applyScroll();
+    };
+    window.addEventListener("lazed:pane-scroll", onPaneScroll);
 
     // fit() mutates xterm's DOM, which would queue another RO notification
     // inside the same delivery pass ("ResizeObserver loop completed with
@@ -313,8 +299,8 @@ export const TermView = memo(function TermView({
           resizeRaf = null;
           if (disposed) return;
           fit.fit();
-          invoke("term_resize", {
-            termId: term.term_id,
+          invoke("pane_resize", {
+            paneId: term.pane_id,
             cols: xterm.cols,
             rows: xterm.rows,
           }).catch(() => {});
@@ -330,16 +316,17 @@ export const TermView = memo(function TermView({
       if (scrollRaf !== null) cancelAnimationFrame(scrollRaf);
       if (resizeRaf !== null) cancelAnimationFrame(resizeRaf);
       host.removeEventListener("wheel", onWheel, { capture: true });
+      window.removeEventListener("lazed:pane-scroll", onPaneScroll);
       dataSub.dispose();
       ro.disconnect();
-      invoke("term_detach", { termId: term.term_id }).catch(() => {});
+      invoke("pane_detach", { paneId: term.pane_id }).catch(() => {});
       ime.dispose();
       imeRef.current = null;
       xterm.dispose();
       termRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [term.term_id, applyScroll]);
+  }, [term.pane_id, applyScroll]);
 
   // The scrollbar nodes mount after scrollable changes; paint them after render.
   useEffect(() => {
@@ -361,26 +348,23 @@ export const TermView = memo(function TermView({
   const label =
     term.label ??
     term.agent_name ??
-    term.branch ??
-    term.agent_kind ??
-    term.term_id;
+    term.title ??
+    term.display_agent ??
+    term.agent ??
+    term.pane_id;
 
-  // Thin overlay scrollbar driven by daemon scroll metrics — display + jump
-  // only; the wheel path still forwards deltas to the daemon.
+  // Thin overlay scrollbar driven by herdr's scroll metrics — display + jump
+  // only; a jump is sent as the line delta from the current offset.
   const jumpScroll = (e: React.PointerEvent<HTMLDivElement>) => {
-    const { max, rows } = scrollRef.current;
+    const { offset, max, rows } = scrollRef.current;
     const thumbFrac = Math.max(0.04, rows / (rows + max));
     const rect = e.currentTarget.getBoundingClientRect();
     const f = (e.clientY - rect.top) / Math.max(1, rect.height) - thumbFrac / 2;
     const t = Math.max(0, Math.min(1 - thumbFrac, f));
-    const offset = Math.round(max * (1 - t / (1 - thumbFrac)));
-    invoke("term_scroll", {
-      termId: term.term_id,
-      offsetFromBottom: offset,
-      column: 1,
-      row: 1,
-      modifiers: 0,
-    }).catch(() => {});
+    const target = Math.round(max * (1 - t / (1 - thumbFrac)));
+    const lines = target - offset;
+    if (lines === 0) return;
+    invoke("pane_scroll", { paneId: term.pane_id, lines }).catch(() => {});
   };
   const onScrollBarDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -393,22 +377,19 @@ export const TermView = memo(function TermView({
   return (
     <div
       className={`pane-cell ${focused ? "focused" : ""}`}
-      onMouseDown={() => onFocus(term.term_id)}
+      onMouseDown={() => onFocus(term.pane_id)}
       role="presentation"
     >
       <div className="pane-header">
         <span className={`badge ${term.agent_status ?? "unknown"}`}>
           {term.agent_status ?? "unknown"}
         </span>
-        <span className="pane-label">
-          {term.kind === "worktree" ? "⑂ " : ""}
-          {label}
-        </span>
+        <span className="pane-label">{label}</span>
         <span className="pane-cwd">{term.cwd}</span>
         <button
           type="button"
           className="close"
-          onClick={() => onClose(term.term_id)}
+          onClick={() => onClose(term.pane_id)}
           title="close terminal"
         >
           ✕
@@ -417,7 +398,7 @@ export const TermView = memo(function TermView({
       <div
         ref={hostRef}
         className="pane-term"
-        onFocusCapture={() => onFocus(term.term_id)}
+        onFocusCapture={() => onFocus(term.pane_id)}
       >
         {scrollable && (
           <div

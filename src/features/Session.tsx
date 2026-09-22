@@ -12,13 +12,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useState } from "react";
 import {
   type AgentStatus,
+  type PaneInfo,
   type SessionStatus,
   type Snapshot,
-  type TerminalInfo,
   lazed,
 } from "../shared/lazed";
 
-function basename(p?: string) {
+function basename(p?: string | null) {
   if (!p) return "";
   const parts = p.replace(/\/$/, "").split("/");
   return parts[parts.length - 1] || p;
@@ -44,7 +44,7 @@ export function Session({
 }: {
   snap: Snapshot | null;
   focusedTermId: string | null;
-  onJumpTerm: (termId: string) => void;
+  onJumpTerm: (paneId: string) => void;
   onFocusProject: (id: string) => void;
   onClose: () => void;
 }) {
@@ -76,28 +76,26 @@ export function Session({
   }, [onClose]);
 
   const projects = snap?.projects ?? [];
-  const termsById = new Map((snap?.terminals ?? []).map((t) => [t.term_id, t]));
+  const termsById = new Map((snap?.panes ?? []).map((t) => [t.pane_id, t]));
   const wsById = new Map(
     (snap?.workspaces ?? []).map((w) => [w.workspace_id, w]),
   );
   const tabById = new Map((snap?.tabs ?? []).map((t) => [t.tab_id, t]));
-  const allTerms = snap?.terminals ?? [];
+  const allTerms = snap?.panes ?? [];
 
   const counts = new Map<AgentStatus, number>();
   let agentTotal = 0;
   for (const t of allTerms) {
-    if (!t.agent_kind) continue;
+    if (!t.agent) continue;
     agentTotal += 1;
     const s = t.agent_status ?? "unknown";
     counts.set(s, (counts.get(s) ?? 0) + 1);
   }
-  const deadCount = allTerms.filter((t) => t.dead).length;
+  const termName = (t: PaneInfo) =>
+    t.label ?? t.agent_name ?? t.agent ?? basename(t.cwd) ?? t.pane_id;
 
-  const termName = (t: TerminalInfo) =>
-    t.label ?? t.agent_kind ?? basename(t.cwd) ?? t.term_id;
-
-  const jump = (t: TerminalInfo) => {
-    onJumpTerm(t.term_id);
+  const jump = (t: PaneInfo) => {
+    onJumpTerm(t.pane_id);
     onClose();
   };
 
@@ -168,10 +166,7 @@ export function Session({
               </div>
               <div className="set-row">
                 <div className="set-row-label">Terminals</div>
-                <span className="sess-val">
-                  {allTerms.length}
-                  {deadCount > 0 && ` · ${deadCount} dead`}
-                </span>
+                <span className="sess-val">{allTerms.length}</span>
               </div>
               <div className="set-row">
                 <div className="set-row-label">Agents</div>
@@ -234,7 +229,7 @@ export function Session({
                     const panes = ws.tabs
                       .flatMap((tid) => tabById.get(tid)?.panes ?? [])
                       .map((pid) => termsById.get(pid))
-                      .filter((t): t is TerminalInfo => Boolean(t));
+                      .filter((t): t is PaneInfo => Boolean(t));
                     return (
                       <div key={ws.workspace_id} className="sess-ws">
                         <div className="sess-ws-head" title={ws.path}>
@@ -259,22 +254,20 @@ export function Session({
                             ? (tabById.get(t.tab_id)?.label ?? t.tab_id)
                             : null;
                           const meta = [
-                            t.term_id,
+                            t.pane_id,
                             tabLabel,
-                            t.agent_kind,
-                            t.cols && t.rows ? `${t.cols}×${t.rows}` : null,
-                            t.dead ? "dead" : null,
+                            t.agent_name ?? t.agent,
                           ]
                             .filter(Boolean)
                             .join(" · ");
                           return (
                             <button
-                              key={t.term_id}
+                              key={t.pane_id}
                               type="button"
                               className={`sess-term ${
-                                t.term_id === focusedTermId ? "focused" : ""
+                                t.pane_id === focusedTermId ? "focused" : ""
                               }`}
-                              title={`${t.cwd}\n${t.command ?? ""}${
+                              title={`${t.cwd ?? ""}${
                                 t.scroll
                                   ? `\nscroll ${t.scroll.offset_from_bottom}/${t.scroll.max_offset_from_bottom}`
                                   : ""
@@ -283,7 +276,7 @@ export function Session({
                             >
                               <span className={`dot ${st}`} />
                               <HugeiconsIcon
-                                icon={t.agent_kind ? BotIcon : TerminalIcon}
+                                icon={t.agent ? BotIcon : TerminalIcon}
                                 size={12}
                                 strokeWidth={1.5}
                                 className="set-row-ico"

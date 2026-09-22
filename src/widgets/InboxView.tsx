@@ -10,8 +10,8 @@ import { useEffect, useRef, useState } from "react";
 import { type InboxItem, inbox, openUrl } from "../shared/inbox";
 import {
   AGENT_KINDS,
+  type PaneInfo,
   type ProjectInfo,
-  type TerminalInfo,
   lazed,
 } from "../shared/lazed";
 import { useSidebarWidth } from "./sidebar-width";
@@ -82,7 +82,7 @@ export function InboxView({
   error?: string | null;
   projects: ProjectInfo[];
   focusedProjectId?: string;
-  focusedTerm?: TerminalInfo;
+  focusedTerm?: PaneInfo;
   onChanged: () => void;
   onFlash: (msg: string) => void;
   onError: (msg: string) => void;
@@ -172,12 +172,12 @@ export function InboxView({
     setBusy(true);
     try {
       const text = delegateText(item);
-      if (focusedTerm.agent_kind) {
-        await lazed.agentPrompt(focusedTerm.term_id, text);
+      if (focusedTerm.agent) {
+        await lazed.agentPrompt(focusedTerm.pane_id, text);
       } else {
-        await lazed.termSend(focusedTerm.term_id, `${text}\n`);
+        await lazed.paneSend(focusedTerm.pane_id, `${text}\n`);
       }
-      onFlash(`sent to ${focusedTerm.label ?? focusedTerm.term_id}`);
+      onFlash(`sent to ${focusedTerm.label ?? focusedTerm.pane_id}`);
       await inbox.update(item.id, { status: "done" });
       setMenu(null);
       onChanged();
@@ -391,7 +391,7 @@ export function InboxView({
                   disabled={busy || !focusedTerm}
                   title={
                     focusedTerm
-                      ? `send to ${focusedTerm.label ?? focusedTerm.term_id}`
+                      ? `send to ${focusedTerm.label ?? focusedTerm.pane_id}`
                       : "no focused pane"
                   }
                   onClick={() => delegateToPane(menu.item)}

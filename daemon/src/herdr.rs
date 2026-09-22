@@ -284,7 +284,8 @@ fn str_at(v: &Value, pointer: &str) -> Result<String, String> {
 // event bridge
 
 /// Global (session-wide) event types. Per-pane `pane.agent_status_changed`
-/// subscriptions are added for every pane in the snapshot at connect time;
+/// + `pane.scroll_changed` subscriptions are added for every pane in the
+/// snapshot at connect time;
 /// a `pane_created` afterwards restarts the stream so the new pane is
 /// covered (herdr closes a stream that receives a second subscribe).
 pub const GLOBAL_SUBS: &[&str] = &[
@@ -309,6 +310,7 @@ pub fn subscribe_request(pane_ids: &[String]) -> Value {
     let mut subs: Vec<Value> = GLOBAL_SUBS.iter().map(|t| json!({"type": t})).collect();
     for id in pane_ids {
         subs.push(json!({"type": "pane.agent_status_changed", "pane_id": id}));
+        subs.push(json!({"type": "pane.scroll_changed", "pane_id": id}));
     }
     json!({"id": "lazed:events", "method": "events.subscribe", "params": {"subscriptions": subs}})
 }
@@ -487,8 +489,9 @@ mod tests {
         let req = subscribe_request(&["w1:p1".into(), "w1:p2".into()]);
         assert_eq!(req["method"], "events.subscribe");
         let subs = req["params"]["subscriptions"].as_array().unwrap();
-        assert_eq!(subs.len(), GLOBAL_SUBS.len() + 2);
+        assert_eq!(subs.len(), GLOBAL_SUBS.len() + 4);
         assert_eq!(subs[GLOBAL_SUBS.len()], json!({"type": "pane.agent_status_changed", "pane_id": "w1:p1"}));
+        assert_eq!(subs[GLOBAL_SUBS.len() + 1], json!({"type": "pane.scroll_changed", "pane_id": "w1:p1"}));
         assert!(subs.iter().any(|s| s["type"] == "pane.created"));
     }
 

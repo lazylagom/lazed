@@ -1,6 +1,7 @@
 mod automation;
 mod env;
 mod git;
+mod herdr;
 mod integrations;
 mod lazed;
 
@@ -14,7 +15,8 @@ use tauri::ipc::Channel;
 use tauri::{Emitter, Manager, State};
 
 struct AppState {
-    control: Mutex<HashMap<String, lazed::ControlHandle>>,
+    /// live herdr terminal streams, by pane id
+    control: Mutex<HashMap<String, herdr::ControlHandle>>,
     events_running: Mutex<bool>,
     /// The live webview's event channel. A reload re-invokes
     /// subscribe_events with a fresh Channel — the stream thread must
@@ -22,18 +24,24 @@ struct AppState {
     events_channel: Arc<Mutex<Option<Channel<Value>>>>,
 }
 
+/// Boot both daemons (rule 4: the app auto-detect-launches each; they
+/// never spawn one another). herdr failing to start is degraded mode, not
+/// a boot failure — the organization layer still renders.
 #[tauri::command]
 fn bootstrap(state: State<AppState>) -> Result<Value, String> {
+    let herdr_error = herdr::ensure_server().err();
+    if let Some(e) = &herdr_error {
+        eprintln!("[lazed] herdr unavailable: {e}");
+    }
     lazed::ensure_server()?;
     let snap = lazed::api_call("session.snapshot", json!({}))?;
-    // drop stale control streams whose terminal disappeared — the daemon
-    // unsubscribes on connection EOF
+    // drop stale control streams whose pane disappeared
     let live: Vec<String> = snap
-        .pointer("/terminals")
+        .pointer("/panes")
         .and_then(Value::as_array)
-        .map(|ts| {
-            ts.iter()
-                .filter_map(|t| t.get("term_id").and_then(Value::as_str).map(str::to_string))
+        .map(|ps| {
+            ps.iter()
+                .filter_map(|p| p.get("pane_id").and_then(Value::as_str).map(str::to_string))
                 .collect()
         })
         .unwrap_or_default();
@@ -45,11 +53,17 @@ fn bootstrap(state: State<AppState>) -> Result<Value, String> {
             .collect();
         for id in stale {
             if let Some(h) = map.remove(&id) {
-                let _ = h.stream.shutdown(std::net::Shutdown::Both);
+                h.close();
             }
         }
     }
-    Ok(json!({"snapshot": snap}))
+    Ok(json!({"snapshot": snap, "herdr_error": herdr_error}))
+}
+
+/// herdr adapter + server health, as the daemon sees it.
+#[tauri::command]
+fn herdr_status() -> Result<Value, String> {
+    lazed::api_call("herdr.status", json!({}))
 }
 
 #[tauri::command]
@@ -69,26 +83,26 @@ async fn server_restart(only_if_empty: Option<bool>) -> Result<Value, String> {
         .map_err(|e| e.to_string())?
 }
 
-// ── terminal control streams ───────────────────────────────────────
+// ── herdr terminal streams (one `terminal session control` child per pane) ──
 
 #[tauri::command]
-fn term_attach(
-    term_id: String,
+fn pane_attach(
+    pane_id: String,
     cols: u32,
     rows: u32,
     on_frame: Channel<Box<RawValue>>,
     state: State<AppState>,
 ) -> Result<(), String> {
-    detach_term_internal(&state, &term_id);
+    detach_pane_internal(&state, &pane_id);
 
-    let (stream, mut reader) = lazed::open_attach_stream(&term_id, cols, rows)?;
+    let (handle, mut reader) = herdr::open_control_stream(&pane_id, cols, rows)?;
     state
         .control
         .lock()
         .map_err(|e| e.to_string())?
-        .insert(term_id.clone(), lazed::ControlHandle { stream });
+        .insert(pane_id.clone(), handle);
 
-    let tid = term_id.clone();
+    let tid = pane_id.clone();
     std::thread::spawn(move || {
         let mut line = String::new();
         loop {
@@ -112,8 +126,8 @@ fn term_attach(
                 }
             }
         }
-        let _ = on_frame.send(raw_json(&json!({"type": "term.closed"})));
-        eprintln!("[lazed] attach stream ended for {tid}");
+        let _ = on_frame.send(raw_json(&json!({"type": "terminal.closed"})));
+        eprintln!("[lazed] herdr stream ended for {tid}");
     });
     Ok(())
 }
@@ -124,59 +138,44 @@ fn raw_json(v: &Value) -> Box<RawValue> {
     RawValue::from_string(v.to_string()).expect("serialized json! is valid")
 }
 
-fn send_control(state: &State<AppState>, term_id: &str, msg: &Value) -> Result<(), String> {
+fn send_control(state: &State<AppState>, pane_id: &str, msg: &Value) -> Result<(), String> {
     let mut map = state.control.lock().map_err(|e| e.to_string())?;
     let handle = map
-        .get_mut(term_id)
-        .ok_or_else(|| format!("no control stream for {term_id}"))?;
+        .get_mut(pane_id)
+        .ok_or_else(|| format!("no control stream for {pane_id}"))?;
     handle.send(msg)
 }
 
 #[tauri::command]
-fn term_input(term_id: String, text: String, state: State<AppState>) -> Result<(), String> {
-    send_control(&state, &term_id, &lazed::cmd_input_text(&text))
+fn pane_input(pane_id: String, text: String, state: State<AppState>) -> Result<(), String> {
+    send_control(&state, &pane_id, &herdr::cmd_input_text(&text))
 }
 
 #[tauri::command]
-fn term_resize(term_id: String, cols: u32, rows: u32, state: State<AppState>) -> Result<(), String> {
-    send_control(&state, &term_id, &lazed::cmd_resize(cols, rows))
+fn pane_resize(pane_id: String, cols: u32, rows: u32, state: State<AppState>) -> Result<(), String> {
+    send_control(&state, &pane_id, &herdr::cmd_resize(cols, rows))
+}
+
+/// Whole-line scroll of herdr's scrollback — the webview converts wheel
+/// pixels to lines; positive = toward history.
+#[tauri::command]
+fn pane_scroll(pane_id: String, lines: i64, state: State<AppState>) -> Result<(), String> {
+    match herdr::cmd_scroll(lines) {
+        Some(msg) => send_control(&state, &pane_id, &msg),
+        None => Ok(()),
+    }
 }
 
 #[tauri::command]
-fn term_scroll(
-    term_id: String,
-    delta_px: Option<f64>,
-    cell_px: Option<f64>,
-    delta_lines: Option<f64>,
-    offset_from_bottom: Option<u32>,
-    column: u16,
-    row: u16,
-    modifiers: u8,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let msg = if let Some(off) = offset_from_bottom {
-        lazed::cmd_scroll_to(off)
-    } else if let (Some(px), Some(cell)) = (delta_px, cell_px) {
-        lazed::cmd_scroll_px(px, cell, column, row, modifiers)
-    } else {
-        lazed::cmd_scroll_lines(delta_lines.unwrap_or(0.0), column, row, modifiers)
-    };
-    send_control(&state, &term_id, &msg)
-}
-
-#[tauri::command]
-fn term_detach(term_id: String, state: State<AppState>) -> Result<(), String> {
-    detach_term_internal(&state, &term_id);
+fn pane_detach(pane_id: String, state: State<AppState>) -> Result<(), String> {
+    detach_pane_internal(&state, &pane_id);
     Ok(())
 }
 
-fn detach_term_internal(state: &State<AppState>, term_id: &str) {
+fn detach_pane_internal(state: &State<AppState>, pane_id: &str) {
     if let Ok(mut map) = state.control.lock() {
-        if let Some(mut handle) = map.remove(term_id) {
-            let _ = handle.send(&json!({"type": "detach"}));
-            // EOF on the conn unsubscribes server-side too — shutdown
-            // covers a daemon that doesn't act on the detach command.
-            let _ = handle.stream.shutdown(std::net::Shutdown::Both);
+        if let Some(handle) = map.remove(pane_id) {
+            handle.close();
         }
     }
 }
@@ -242,32 +241,31 @@ fn group_assign(project_id: String, group_id: Option<String>) -> Result<Value, S
     )
 }
 
-/// New pane — `tab_id` splits into an existing tab, `workspace_id` /
-/// `project_id` open a fresh tab under them.
+/// New pane — `target_pane_id` splits next to an existing pane (herdr
+/// `pane.split`), otherwise `workspace_id` opens a fresh tab with its root
+/// pane. Both return the new herdr pane under `pane`.
 #[tauri::command]
-fn term_create(
-    tab_id: Option<String>,
+fn pane_create(
+    target_pane_id: Option<String>,
     workspace_id: Option<String>,
-    project_id: Option<String>,
-    command: Option<String>,
-    label: Option<String>,
+    cwd: Option<String>,
 ) -> Result<Value, String> {
-    lazed::api_call(
-        "terminal.create",
-        json!({
-            "tab_id": tab_id,
-            "workspace_id": workspace_id,
-            "project_id": project_id,
-            "command": command,
-            "label": label,
-        }),
-    )
+    if let Some(target) = target_pane_id {
+        let r = lazed::herdr_call(
+            "pane.split",
+            json!({"target_pane_id": target, "direction": "right", "cwd": cwd}),
+        )?;
+        return Ok(json!({"pane": r.get("pane").cloned().unwrap_or(r)}));
+    }
+    let ws = workspace_id.ok_or("pane_create needs target_pane_id or workspace_id")?;
+    let r = lazed::herdr_call("tab.create", json!({"workspace_id": ws, "cwd": cwd}))?;
+    Ok(json!({"pane": r.get("root_pane").cloned().unwrap_or(Value::Null), "tab": r.get("tab").cloned().unwrap_or(Value::Null)}))
 }
 
 #[tauri::command]
-fn term_close(term_id: String, state: State<AppState>) -> Result<(), String> {
-    detach_term_internal(&state, &term_id);
-    lazed::api_call("terminal.close", json!({"term_id": term_id})).map(|_| ())
+fn pane_close(pane_id: String, state: State<AppState>) -> Result<(), String> {
+    detach_pane_internal(&state, &pane_id);
+    lazed::herdr_call("pane.close", json!({"pane_id": pane_id})).map(|_| ())
 }
 
 // ── workspaces (one checkout each) & tabs (pane rows inside them) ──
@@ -307,20 +305,13 @@ fn workspace_rename(workspace_id: String, label: String) -> Result<Value, String
 }
 
 #[tauri::command]
-fn tab_create(
-    workspace_id: String,
-    label: Option<String>,
-    command: Option<String>,
-) -> Result<Value, String> {
-    lazed::api_call(
-        "tab.create",
-        json!({"workspace_id": workspace_id, "label": label, "command": command}),
-    )
+fn tab_create(workspace_id: String, label: Option<String>) -> Result<Value, String> {
+    lazed::herdr_call("tab.create", json!({"workspace_id": workspace_id, "label": label}))
 }
 
 #[tauri::command]
 fn tab_close(tab_id: String) -> Result<Value, String> {
-    lazed::api_call("tab.close", json!({"tab_id": tab_id}))
+    lazed::herdr_call("tab.close", json!({"tab_id": tab_id}))
 }
 
 #[tauri::command]
@@ -340,25 +331,38 @@ fn resolve_repo(cwd: String) -> Result<Value, String> {
     Ok(git::resolve_repo(&cwd)?.unwrap_or(Value::Null))
 }
 
-// ── agents ─────────────────────────────────────────────────────────
+// ── agents (herdr's — names, readiness, lifecycle) ─────────────────
 
-#[tauri::command]
-async fn agent_start(term_id: String, kind: String) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || lazed::api_call(
-        "agent.start",
-        json!({"term_id": term_id, "kind": kind}),
-    )).await.map_err(|e| e.to_string())?
+/// herdr needs a unique live name per agent; GUI launches derive one
+/// from the kind and the pane (`claude-w1-p3`).
+pub(crate) fn gui_agent_name(kind: &str, pane_id: &str) -> String {
+    let mut name: String = format!("{kind}-{pane_id}")
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' { c } else { '-' })
+        .collect();
+    if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
+        name.insert(0, 'a');
+    }
+    name.truncate(32);
+    name
 }
 
 #[tauri::command]
-async fn agent_prompt(term_id: String, text: String) -> Result<Value, String> {
+async fn agent_start(pane_id: String, kind: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || lazed::herdr_call(
+        "agent.start",
+        json!({"name": gui_agent_name(&kind, &pane_id), "kind": kind, "pane_id": pane_id}),
+    )).await.map_err(|e| e.to_string())?
+}
+
+/// Submit a prompt; herdr refuses (`agent_blocked`/`agent_not_ready`)
+/// before writing anything when the agent can't take input, so Ok means
+/// the text + Enter were delivered.
+#[tauri::command]
+async fn agent_prompt(pane_id: String, text: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let receipt = lazed::api_call(
-        "agent.prompt",
-        json!({"term_id": term_id, "text": text}),
-        )?;
-        if receipt["accepted"] != true { return Err(format!("{}", receipt["error"])); }
-        Ok(receipt)
+        lazed::herdr_call("agent.prompt", json!({"target": pane_id, "text": text}))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -369,8 +373,8 @@ async fn task_start(params: Value) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn agent_get(term_id: String) -> Result<Value, String> {
-    lazed::api_call("agent.get", json!({"term_id": term_id}))
+fn agent_get(pane_id: String) -> Result<Value, String> {
+    lazed::herdr_call("agent.get", json!({"target": pane_id}))
 }
 
 /// Installed agent CLIs (Settings → Agents). Local `which` probe.
@@ -398,21 +402,21 @@ async fn install_cli() -> Result<Value, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Send raw text into a terminal without a control stream (one-shot —
-/// used by prompt fan-out to terminals that aren't attached).
+/// Type a line into a shell pane without a stream (prompt fan-out to
+/// panes that aren't attached). Text + Enter as one ordered submission.
 #[tauri::command]
-fn term_send(term_id: String, text: String) -> Result<Value, String> {
-    lazed::api_call(
-        "terminal.input",
-        json!({"term_id": term_id, "text": text}),
+fn pane_send(pane_id: String, text: String) -> Result<Value, String> {
+    lazed::herdr_call(
+        "pane.send_input",
+        json!({"pane_id": pane_id, "text": text, "keys": ["enter"]}),
     )
 }
 
 #[tauri::command]
-fn term_read(term_id: String, lines: Option<u32>) -> Result<Value, String> {
-    lazed::api_call(
-        "terminal.read",
-        json!({"term_id": term_id, "lines": lines.unwrap_or(50)}),
+fn pane_read(pane_id: String, lines: Option<u32>) -> Result<Value, String> {
+    lazed::herdr_call(
+        "pane.read",
+        json!({"pane_id": pane_id, "source": "visible", "lines": lines.unwrap_or(50)}),
     )
 }
 
@@ -422,7 +426,7 @@ fn term_read(term_id: String, lines: Option<u32>) -> Result<Value, String> {
 #[tauri::command]
 fn notify_agent(
     app: tauri::AppHandle,
-    term_id: String,
+    pane_id: String,
     project_id: Option<String>,
     title: String,
     body: String,
@@ -439,7 +443,7 @@ fn notify_agent(
             if action == "default" {
                 let _ = app.emit(
                     "notification.jump",
-                    json!({"term_id": term_id, "project_id": project_id}),
+                    json!({"pane_id": pane_id, "project_id": project_id}),
                 );
             }
         });
@@ -636,6 +640,18 @@ pub fn run() {
                 eprintln!("[lazed] using bundled lazed: {}", p.display());
             }
             lazed::register_bundled(bundled);
+            // bundled herdr (bundle.resources → bin/herdr) — the daemon gets
+            // the same path via HERDR_BIN when the app spawns it
+            let bundled_herdr = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|dir| dir.join("bin").join("herdr"))
+                .filter(|p| p.is_file());
+            if let Some(p) = &bundled_herdr {
+                eprintln!("[lazed] using bundled herdr: {}", p.display());
+            }
+            herdr::register_bundled(bundled_herdr);
             env::warmup();
             let config_dir = app
                 .path()
@@ -652,18 +668,19 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            herdr_status,
             session_snapshot,
             session_status,
             server_restart,
-            term_attach,
-            term_input,
-            term_resize,
-            term_scroll,
-            term_detach,
-            term_close,
-            term_create,
-            term_send,
-            term_read,
+            pane_attach,
+            pane_input,
+            pane_resize,
+            pane_scroll,
+            pane_detach,
+            pane_close,
+            pane_create,
+            pane_send,
+            pane_read,
             notify_agent,
             project_create,
             project_focus,
@@ -716,11 +733,11 @@ pub fn run() {
         });
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
-            // close attach-stream sockets — the daemon unsubscribes on EOF
+            // stop the herdr stream children — panes live on in herdr
             if let Some(state) = handle.try_state::<AppState>() {
                 if let Ok(mut map) = state.control.lock() {
                     for (_, h) in map.drain() {
-                        let _ = h.stream.shutdown(std::net::Shutdown::Both);
+                        h.close();
                     }
                 }
             }

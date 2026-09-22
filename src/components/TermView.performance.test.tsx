@@ -81,7 +81,13 @@ it("does not repaint the theme or recreate xterm for metadata and focus updates"
     act(() =>
       root.render(
         <TermView
-          term={{ term_id: "t1", cwd: "/tmp", label: `pane ${i}` }}
+          term={{
+            pane_id: "t1",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            cwd: "/tmp",
+            label: `pane ${i}`,
+          }}
           focused={i % 2 === 0}
           onFocus={onFocus}
           onClose={onClose}
@@ -99,7 +105,12 @@ it("does not repaint the theme or recreate xterm for metadata and focus updates"
   act(() =>
     root.render(
       <TermView
-        term={{ term_id: "t2", cwd: "/tmp" }}
+        term={{
+          pane_id: "t2",
+          workspace_id: "w1",
+          tab_id: "w1:t1",
+          cwd: "/tmp",
+        }}
         focused={false}
         onFocus={onFocus}
         onClose={onClose}

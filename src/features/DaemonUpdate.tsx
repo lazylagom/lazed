@@ -2,7 +2,10 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { type SessionStatus, lazed } from "../shared/lazed";
 
-/** Global build notice; a done/idle agent still owns a live terminal. */
+/** Global build notice. Panes and agents live in herdr, so restarting the
+ * lazed daemon interrupts only its own in-flight work (a worktree removal,
+ * a task launch) — the daemon's guarded stop refuses while one is running,
+ * and that is the only reason to wait. */
 export function DaemonUpdate() {
   const [status, setStatus] = useState<SessionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -21,7 +24,6 @@ export function DaemonUpdate() {
         setStatus(next);
         if (
           next?.binary_updated &&
-          next.terms === 0 &&
           next.pid !== undefined &&
           attempted.current !== next.pid &&
           next.capabilities?.includes("server.stop_if_empty.v1")
@@ -54,7 +56,7 @@ export function DaemonUpdate() {
     try {
       const current = await lazed.status();
       const ok = await ask(
-        `Restart the lazed daemon to apply the new build? All processes in its ${current.terms ?? "open"} terminal(s), including agents, will be terminated. Panes will be restored, but running processes will not.`,
+        `Restart the lazed daemon to apply the new build? Panes and agents run in herdr and are not affected; a worktree removal or task launch in progress (${current.workspaces ?? 0} workspace(s) tracked) would be interrupted.`,
         { title: "Restart daemon", kind: "warning", okLabel: "Restart" },
       );
       if (!ok) return;
@@ -72,9 +74,8 @@ export function DaemonUpdate() {
   return (
     <div className="install-banner" aria-live="polite">
       <span>
-        Daemon update available. Restart to apply the new build.
-        {(status.terms ?? 0) > 0 &&
-          ` ${status.terms} terminal(s) will be interrupted.`}
+        Daemon update available. Restart to apply the new build — panes and
+        agents stay up in herdr.
       </span>
       {error && <span className="warn">{error}</span>}
       <span className="grow" />

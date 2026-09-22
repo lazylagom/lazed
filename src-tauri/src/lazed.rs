@@ -1,6 +1,7 @@
-//! lazed daemon client — unix socket NDJSON for API calls, event streams,
-//! and per-terminal attach conns. The daemon owns the model
-//! (session > project > terminal), we just forward its protocol.
+//! lazed daemon client — unix socket NDJSON for API calls and the event
+//! stream. The daemon owns the organization model (group > project >
+//! herdr workspace annotations) and proxies herdr control through
+//! `herdr.call`; terminal bytes go straight to herdr (see herdr.rs).
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -61,10 +62,10 @@ fn lazed_bin() -> Result<String, String> {
 
 /// One request/response call over the socket.
 pub fn api_call(method: &str, params: Value) -> Result<Value, String> {
-    if matches!(method, "agent.start" | "agent.prompt" | "task.start") {
+    if method == "task.start" || method.starts_with("herdr.") {
         let status = api_call("session.status", json!({}))?;
-        if !status["capabilities"].as_array().is_some_and(|caps| caps.iter().any(|c| c == "agent.lifecycle.v1")) {
-            return Err("daemon_upgrade_required: finish active panes before restarting the daemon; the running version lacks safe agent launch".into());
+        if !status["capabilities"].as_array().is_some_and(|caps| caps.iter().any(|c| c == "herdr.overlay.v1")) {
+            return Err("daemon_upgrade_required: the running lazed daemon predates the herdr overlay; restart it (herdr keeps the panes alive)".into());
         }
     }
     let mut s = UnixStream::connect(sock_path())
@@ -95,8 +96,15 @@ fn server_running() -> bool {
         .unwrap_or(false)
 }
 
+/// One herdr API call through the daemon's passthrough — tab/pane/agent
+/// control stays on the single lazed socket the app already holds.
+pub fn herdr_call(method: &str, params: Value) -> Result<Value, String> {
+    api_call("herdr.call", json!({"method": method, "params": params}))
+}
+
 /// Ensure the daemon is up; spawn a detached `lazed server` if not.
-/// The daemon outlives the app — on relaunch we just reconnect.
+/// The daemon outlives the app — on relaunch we just reconnect. It gets
+/// the same herdr binary + session as the app so both see one herdr.
 pub fn ensure_server() -> Result<(), String> {
     if server_running() {
         return Ok(());
@@ -105,6 +113,7 @@ pub fn ensure_server() -> Result<(), String> {
     Command::new(bin)
         .arg("server")
         .envs(env::env_for_spawn())
+        .envs(crate::herdr::env_for_daemon())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -158,101 +167,6 @@ pub fn restart_server(only_if_empty: bool) -> Result<Value, String> {
 
 /// An attached terminal's control stream — the socket half kept for
 /// {"type": ...} commands. Closing/shutdown unsubscribes server-side.
-pub struct ControlHandle {
-    pub stream: UnixStream,
-}
-
-impl ControlHandle {
-    pub fn send(&mut self, msg: &Value) -> Result<(), String> {
-        let mut line = serde_json::to_string(msg).map_err(|e| e.to_string())?;
-        line.push('\n');
-        self.stream
-            .write_all(line.as_bytes())
-            .and_then(|_| self.stream.flush())
-            .map_err(|e| e.to_string())
-    }
-}
-
-/// Open a daemon socket conn and send `terminal.attach` — the same NDJSON
-/// channel `lazed term attach` proxies, without a subprocess per pane:
-/// pushed term.* lines come back on the reader, commands go out on the
-/// returned stream.
-pub fn open_attach_stream(
-    term_id: &str,
-    cols: u32,
-    rows: u32,
-) -> Result<(UnixStream, BufReader<UnixStream>), String> {
-    let mut stream = UnixStream::connect(sock_path())
-        .map_err(|e| format!("cannot connect {}: {e}", sock_path().display()))?;
-    // No "id" — the attach reply is suppressed; this conn then carries
-    // only pushed term.* events inbound and {"type": ...} commands out.
-    let req = json!({
-        "method": "terminal.attach",
-        "params": {"term_id": term_id, "cols": cols, "rows": rows},
-    });
-    let mut line = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-    line.push('\n');
-    stream
-        .write_all(line.as_bytes())
-        .and_then(|_| stream.flush())
-        .map_err(|e| e.to_string())?;
-    let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-    Ok((stream, reader))
-}
-
-// ── control-stream stdin commands ──────────────────────────────────
-
-pub fn cmd_input_text(text: &str) -> Value {
-    json!({"type": "input", "text": text})
-}
-
-pub fn cmd_resize(cols: u32, rows: u32) -> Value {
-    json!({"type": "resize", "cols": cols, "rows": rows})
-}
-
-/// Pixel-granular scroll — the daemon accumulates sub-line remainders.
-/// `delta_px` > 0 = scroll down (wheel convention).
-pub fn cmd_scroll_px(
-    delta_px: f64,
-    cell_px: f64,
-    column: u16,
-    row: u16,
-    modifiers: u8,
-) -> Value {
-    json!({
-        "type": "scroll",
-        "delta_px": delta_px,
-        "cell_px": cell_px,
-        "column": column,
-        "row": row,
-        "modifiers": modifiers,
-    })
-}
-
-/// Absolute scroll — jump straight to an offset from the bottom.
-pub fn cmd_scroll_to(offset_from_bottom: u32) -> Value {
-    json!({"type": "scroll", "offset_from_bottom": offset_from_bottom})
-}
-
-/// Line-granular scroll fallback (line/page delta modes).
-pub fn cmd_scroll_lines(
-    delta_lines: f64,
-    column: u16,
-    row: u16,
-    modifiers: u8,
-) -> Value {
-    json!({
-        "type": "scroll",
-        "delta_lines": delta_lines,
-        "column": column,
-        "row": row,
-        "modifiers": modifiers,
-    })
-}
-
-/// Global event stream: opens a socket conn, sends `events.subscribe`,
-/// and calls `on_event` for every pushed {"event","data"} line.
-/// Returns when the connection drops (caller reconnects).
 pub fn run_event_stream(on_event: impl Fn(&Value) -> bool) -> String {
     let conn = match UnixStream::connect(sock_path()) {
         Ok(c) => c,
@@ -320,8 +234,9 @@ pub fn cli_install() -> Result<Value, String> {
 /// Probe installed agent CLIs — walk the resolved spawn PATH directly,
 /// so GUI launches find Homebrew/version-manager installs too.
 pub fn agent_detect() -> Value {
+    // herdr 0.9.0 manifests lazed offers in the picker
     let kinds = [
-        "claude", "codex", "antigravity", "devin", "gemini", "opencode", "aider", "pi",
+        "claude", "codex", "devin", "gemini", "opencode", "pi", "cursor", "copilot", "amp", "kimi", "qwen",
     ];
     let spawn_env = env::env_for_spawn();
     let path = spawn_env.get("PATH").cloned().unwrap_or_default();

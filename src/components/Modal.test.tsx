@@ -116,7 +116,7 @@ it("focuses the prompt and submits trimmed text to the focused terminal", () => 
   key(input, "Enter");
   expect(submit).toHaveBeenCalledWith("review changes", {
     kind: "focused",
-    termId: "t1",
+    paneId: "t1",
   });
   expect(close).toHaveBeenCalledTimes(1);
 });

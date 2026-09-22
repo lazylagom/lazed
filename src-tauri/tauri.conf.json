@@ -39,7 +39,7 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "GUI client for the lazed workspace daemon",
-    "longDescription": "lazed - a desktop GUI front-end for lazed terminal workspaces"
+    "shortDescription": "GUI agent multiplexer on herdr",
+    "longDescription": "lazed - a desktop GUI for herdr terminal workspaces: projects, worktrees, agents, inbox"
   }
 }

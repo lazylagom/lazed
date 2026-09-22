@@ -1,18 +1,30 @@
 # lazed
 
-GUI 에이전트 멀티플렉서 — 자체 `lazed` 데몬(헤드리스 터미널 워크스페이스
-관리자) 위의 Tauri v2 + React + xterm.js 클라이언트.
+GUI 에이전트 멀티플렉서 — **[herdr](https://github.com/safishamsi/herdr)** 위의
+Tauri v2 + React + xterm.js 클라이언트.
 
-데몬이 PTY와 세션 모델(`group > project > workspace > tab > terminal`)을 소유하고,
-앱은 unix socket NDJSON API(`~/.local/state/lazed/lazed.sock`)로 붙는 클라이언트다.
-창을 닫아도 데몬과 pane 프로세스는 살아 있고, 재실행 시 스냅샷으로 복원된다.
+herdr가 코어다: workspace / tab / pane과 그 ID(`w1`, `w1:t1`, `w1:p1`), PTY, 프레임
+스트림, 에이전트 감지·이름·라이프사이클, 네이티브 세션 복원, 원격 SSH는 전부
+herdr의 것이다. lazed는 herdr에 없는 것만 덧붙인다:
+
+- **조직층** — `group > project` 계층. herdr workspace를 저장소(project) 아래에
+  파일링하고, main 체크아웃과 linked worktree를 구분한다.
+- **worktree 파이프라인** — 생성(`git worktree add` → herdr workspace로 열기),
+  fan-out, 안전 제거(에이전트 점유 확인·재시도·branch 정리).
+- **tasks** — worktree + 에이전트 + 첫 프롬프트를 하나의 `request_id`로 묶은 내구 기록.
+- **GTD Inbox / Automations / 알림 / install·update.**
+
+두 데몬은 서로 독립이다. `lazed` 데몬(`~/.local/state/lazed/lazed.sock`)은 조직층
+API를 제공하고 herdr 이벤트를 `herdr.*`로 재방송한다. herdr 서버(`herdr --session
+lazed`)는 pane과 에이전트를 소유한다. 앱은 부팅 시 둘을 각각 auto-detect-launch하며,
+herdr가 없으면 조직층만 동작하는 degraded 모드로 뜬다. 창을 닫아도 둘 다 살아 있다.
 
 ## 기능
 
-- **사이드바** — group > project > workspace > tab > terminal 트리, 에이전트 상태
-  배지(working/blocked/done/idle), `events.subscribe` 스트림으로 실시간 갱신.
-- **네임드 에이전트** — pane에 이름 붙은 claude/codex/devin/pi. 프롬프트 회송,
-  후속 지시, 출력 읽기는 이름으로 대상을 가리킨다 (`lazed agent`).
+- **사이드바** — group > project > herdr workspace > tab > pane 트리, herdr의 에이전트
+  상태 배지(working/blocked/done/idle), 이벤트 스트림으로 실시간 갱신.
+- **네임드 에이전트** — herdr 에이전트. 프롬프트 회송·후속 지시·출력 읽기는
+  `herdr agent …`로 이름을 가리킨다.
 - **프롬프트 바** (⌘K) — focused pane / 전체 에이전트 / 전체 pane에 브로드캐스트.
 - **blocked·done 인박스** (⇧⌘I) + macOS 알림(클릭 시 해당 pane으로 점프), Dock 뱃지.
 - **worktree** — ⌘N 새 worktree, ⇧⌘F fan-out(프롬프트 하나 → N개 worktree ×
@@ -23,77 +35,85 @@ GUI 에이전트 멀티플렉서 — 자체 `lazed` 데몬(헤드리스 터미�
   GitHub 리뷰 요청·Slack 채널) + 커스텀 셸 폴러 → collect/notify/command/agent/
   inbox 액션.
 - **Session Monitor** (⇧⌘3) — 워크스페이스 전체의 에이전트 상태를 한 화면에.
-- **Settings** (⌘,) — Jira 등 연동 계정. 토큰은 데몬이 스폰하는 셸/폴러의
-  env로 주입된다.
+- **Settings** (⌘,) — Jira 등 연동 계정. 토큰은 데몬이 스폰하는 폴러의 env로 주입된다.
 
 ## 단축키
 
 | 키 | 동작 |
 |---|---|
-| `⌘D` / `⌘T` / `⌘W` | pane 분할 / 새 tab / pane 닫기 |
-| `⌘N` / `⇧⌘N` | 선택 프로젝트에 새 worktree / 프로젝트 import |
-| `⌘[` `⌘]` / `⇧⌘[` `⇧⌘]` | tab 내 pane 순환 / workspace 순환 |
-| `⌘1-9` / `⌃1-9` | N번째 workspace / N번째 tab으로 이동 |
-| `⇧⌘Enter` | focused pane 줌 토글 |
-| `⌘K` / `⇧⌘A` / `⇧⌘F` / `⇧⌘I` | 프롬프트 바 / 에이전트 시작 / fan-out / blocked·done |
-| `⇧⌘1-4` | rail·화면: projects · automations · session · inbox |
-| `⌘,` | 설정 |
+| ⌘D | 현재 tab에서 focused pane 옆에 pane 분할 |
+| ⌘T | 현재 workspace에 새 tab |
+| ⌘W | focused pane 닫기 |
+| ⌘N | 선택된 project에 새 worktree |
+| ⇧⌘N | project import |
+| ⌘[ / ⌘] | 같은 tab의 이전/다음 pane |
+| ⇧⌘[ / ⇧⌘] | 이전/다음 workspace |
+| ⌘1-9 / ⌃1-9 | N번째 workspace / tab |
+| ⇧⌘Enter | focused pane 확대 토글 |
+| ⌘K / ⇧⌘A / ⇧⌘F | 프롬프트 바 / 에이전트 시작 / fan-out |
+| ⇧⌘1-4 | projects / automations / session / inbox |
 
 ## CLI
 
-`make install`이 `~/.local/bin/lazed`에 링크하는 바이너리가 데몬이자 CLI다.
+에이전트(그리고 사람)가 pane·에이전트를 다룰 때는 **herdr CLI**를 그대로 쓴다 —
+`herdr pane split --current`, `herdr agent start reviewer --kind codex --pane w1:p3`,
+`herdr agent prompt reviewer "…" --wait`. 자세한 것은 `herdr --skill`.
 
-- `lazed server [--foreground]` — 데몬 기동. 앱은 실행 중이면 attach, 없으면 spawn.
-- `lazed agent` / `lazed pane` / `lazed worktree` — 네임드 에이전트·레이아웃·
-  worktree 조작. bare 그룹과 `--help`는 읽기 전용 디스커버리.
-- `lazed inbox` — capture 큐 (`add|list|done|reopen|snooze|remove`).
-- `lazed task` — 기존 작업 레코드 호환 (`status|read|tell|resume`).
-- `lazed term attach <id>` — pane 컨트롤 스트림 (stdin으로 JSON 명령,
-  stdout으로 프레임).
-- `lazed api <method> [params-json]` — 소켓 API 원샷 호출.
-- `lazed status` / `stop` / `restart`, `lazed install` / `uninstall` / `doctor`.
+lazed CLI는 herdr에 없는 것만 제공한다:
 
-pane 안 프로세스는 `LAZED_TERM`(자기 pane ID)을 env로 받는다 — `lazed pane
-split --current` 같은 호출이 GUI 포커스가 아니라 호출자 pane을 가리키게 한다.
-pane 안의 에이전트가 lazed를 조작하는 방법은 스킬 문서(`skills/lazed/SKILL.md`) 참조.
+- `lazed worktree create --branch NAME [--repo PATH] [--base REF]` — git worktree를
+  만들고 herdr workspace로 열어 project 아래에 파일링. 결과의 `pane_id`로 에이전트를
+  시작한다. `lazed worktree list|remove WORKSPACE_ID [--force] [--kill-agents]`.
+- `lazed task start --branch NAME --kind KIND -- "프롬프트"` — worktree + 에이전트 +
+  첫 프롬프트를 한 `request_id`로. `task status|read|tell|resume|list`.
+- `lazed inbox add|list|done|reopen|snooze|remove`.
+- `lazed api <method> [params]` — 데몬 API 직접 호출. `lazed api herdr.call
+  '{"method":"pane.list"}'`처럼 herdr 패스스루도 된다.
+- `lazed herdr status|snapshot|call` — herdr 어댑터 상태·스냅샷(데몬 없이 herdr에
+  직접).
+- `lazed install|uninstall|doctor`, `lazed status|stop|restart`.
+
+`skills/lazed/SKILL.md`가 에이전트용 계약이다 — herdr 스킬 위에 위 명령만 덧붙인다.
 
 ## 설치
 
-- **개발**: `make deps` 후 `make dev` (`make web`은 프론트만 :1420).
-- **CLI·스킬 링크**: `make install` (release 데몬을 빌드하고 `lazed install` 실행).
-  - `~/.local/bin/lazed` → 데몬/CLI 바이너리
-  - `~/.agents/skills/lazed`, `~/.claude/skills/lazed` → 에이전트 스킬
-  - 만든 링크는 `~/.local/state/lazed/install.json` 매니페스트에 기록된다.
-- **앱 번들**: `make dist` → `src-tauri/target/release/bundle/macos/lazed.app`.
-  `bin/lazed`(데몬)와 `skills/lazed`를 함께 싣기 때문에 소스 저장소 없이 동작한다.
-- **점검**: `lazed doctor` — 링크·데몬·에이전트 바이너리 상태를 출력한다.
-- 첫 실행 시 앱이 링크 누락을 감지하면 상단 배너의 Install 버튼이 같은 일을 한다.
+herdr가 먼저 있어야 한다(앱 번들에는 포함된다; 개발 시에는 `mise`/Homebrew/`~/.local/bin`).
+lazed는 고정 버전(0.9.0)을 기대하고, 다른 버전이 떠 있으면 `herdr.status`의
+`compat_warning`으로 알린다. 버전을 올릴 때는 `make schema-check`로 의존 필드를 확인한다.
+
+```sh
+make install     # daemon 빌드 + ~/.local/bin/lazed + 에이전트 스킬 링크
+```
+
+앱 첫 실행 배너의 Install 버튼도 같은 일을 한다.
 
 ## 개발
 
-- `make dev`는 release 데몬을 빌드한 뒤 앱을 실행한다. 실행 중 데몬 코드를
-  수정했다면 다시 `make dev`하거나 `cargo build --release --manifest-path daemon/Cargo.toml`을 실행한다.
-  앱은 5초마다 업데이트를 확인해 상단에 표시한다. 터미널이 하나도 없으면
-  자동 재시작하며, 터미널이 있으면 종료 영향을 확인한 뒤 Restart로 적용한다.
-  자동 재시작을 지원하지 않는 구버전 데몬은 최초 한 번 수동 재시작이 필요하다.
-- `make check` — tsc + biome + `cargo check` (src-tauri, daemon).
-- `make test` — vitest + cargo test + `scripts/test_task_runtime.py`
-  (임시 state dir의 일회용 데몬에 대한 블랙박스 테스트).
-- `make format` / `make icon` / `make clean`.
+```sh
+make dev         # daemon 릴리즈 빌드 → tauri dev
+make check       # tsc + biome + cargo check (app, daemon)
+make test        # vitest + cargo test + 데몬 업데이트 라이프사이클 스크립트
+make dist        # herdr 바이너리·daemon·스킬을 스테이징하고 앱 번들
+```
+
+`LAZED_HERDR_SESSION`(기본 `lazed`)으로 앱·데몬이 붙는 herdr 세션을 바꿀 수 있다.
+같은 세션에 `herdr --session lazed`로 TUI를 붙여도 된다. `HERDR_BIN`은 바이너리
+override.
 
 ## 상태 위치
 
-- `~/.local/state/lazed/` — `lazed.sock`, `session.json`, `inbox.json`, `tasks/`,
-  `install.json`, `lazed.log` (`LAZED_STATE_DIR`로 재지정).
-- `~/.config/lazed/` — 사용자 설정 (`LAZED_CONFIG_DIR`).
-- `~/.lazed/worktrees/` — worktree 체크아웃 (`LAZED_WORKTREE_DIR`).
+- `~/.local/state/lazed/` — `lazed.sock`, `session.json`(group/project/workspace 주석),
+  `inbox.json`, `tasks/`, `lazed.log`
+- `~/.config/lazed/` — `agents.json`(launch spec), 연동 설정
+- `~/.lazed/worktrees/<repo>/<branch>` — worktree 체크아웃
+- herdr 자체 상태는 `~/.config/herdr/sessions/<session>/`에 있다(lazed가 건드리지 않음).
 
 ## 제거
 
-- `lazed uninstall` — 매니페스트가 기록한 링크만 제거한다. 상태·설정·워크트리는 남는다.
-- `lazed uninstall --purge` — 여기에 더해 `~/.local/state/lazed`, `~/.config/lazed`,
-  `~/.lazed/worktrees`, `~/Library/*/com.lazed.app*`까지 지운다. 커밋 안 된
-  워크트리 변경이 있으면 `--yes` 없이는 중단한다.
-- 구버전 herdr 흔적(`~/.local/bin/herdr`, `~/.herdr` 등)은 건드리지 않고 목록만 출력한다.
-- `/Applications/lazed.app`은 직접 휴지통으로 옮긴다.
-- `make uninstall`은 `lazed uninstall`의 얇은 래퍼다 (`PURGE=1`, `YES=1` 지원).
+```sh
+make uninstall            # CLI/스킬 링크 제거
+make uninstall PURGE=1    # + state/config/worktrees
+```
+
+- herdr는 별도 제품이므로 제거하지 않는다. 구버전 herdr 흔적(`~/.local/bin/herdr`,
+  `~/.herdr` 등)은 건드리지 않고 목록만 출력한다.

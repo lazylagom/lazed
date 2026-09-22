@@ -1,4 +1,4 @@
-import type { TerminalInfo } from "../shared/lazed";
+import type { PaneInfo } from "../shared/lazed";
 import { TermView } from "./TermView";
 
 /** Equal-width flex row of a tab's panes (order matches tab.panes). */
@@ -8,7 +8,7 @@ export function TermGrid({
   onFocusTerm,
   onCloseTerm,
 }: {
-  terms: TerminalInfo[];
+  terms: PaneInfo[];
   focusedTerm: string | null;
   onFocusTerm: (id: string) => void;
   onCloseTerm: (id: string) => void;
@@ -16,10 +16,10 @@ export function TermGrid({
   return (
     <div className="pane-grid term-grid">
       {terms.map((t) => (
-        <div key={t.term_id} className="term-cell-wrap">
+        <div key={t.pane_id} className="term-cell-wrap">
           <TermView
             term={t}
-            focused={t.term_id === focusedTerm}
+            focused={t.pane_id === focusedTerm}
             onFocus={onFocusTerm}
             onClose={onCloseTerm}
           />

@@ -2,7 +2,7 @@
 import { act, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
-import type { LazedEvent, Snapshot, TerminalInfo } from "./shared/lazed";
+import type { LazedEvent, PaneInfo, Snapshot } from "./shared/lazed";
 
 const backend = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -32,7 +32,7 @@ vi.mock("./components/TermView", () => ({
     focused,
     onFocus,
   }: {
-    term: TerminalInfo;
+    term: PaneInfo;
     focused: boolean;
     onFocus: (id: string) => void;
   }) => {
@@ -43,8 +43,8 @@ vi.mock("./components/TermView", () => ({
     return (
       <input
         ref={input}
-        data-term={term.term_id}
-        onFocus={() => onFocus(term.term_id)}
+        data-term={term.pane_id}
+        onFocus={() => onFocus(term.pane_id)}
       />
     );
   },
@@ -69,9 +69,8 @@ it.each([false, true])(
   "focuses the new pane with event-first=%s",
   async (eventFirst) => {
     vi.useFakeTimers();
-    const terminal = (id: string): TerminalInfo => ({
-      term_id: id,
-      project_id: "p1",
+    const terminal = (id: string): PaneInfo => ({
+      pane_id: id,
       workspace_id: "w1",
       tab_id: "tab1",
       cwd: "/tmp",
@@ -96,18 +95,18 @@ it.each([false, true])(
         },
       ],
       tabs: [{ tab_id: "tab1", workspace_id: "w1", panes: ids }],
-      terminals: ids.map(terminal),
+      panes: ids.map(terminal),
     });
     let current = snapshot(["t1", "t2"]);
-    let created!: (t: TerminalInfo) => void;
+    let created!: (r: { pane: PaneInfo }) => void;
     backend.invoke.mockImplementation(async (command: string) => {
       if (command === "bootstrap") return { snapshot: current };
       if (command === "session_snapshot") return current;
       if (command === "install_status") return { ok: true };
       if (command === "inbox_list") return { items: [] };
       if (command === "automation_list") return { automations: [] };
-      if (command === "term_create")
-        return new Promise<TerminalInfo>((resolve) => {
+      if (command === "pane_create")
+        return new Promise<{ pane: PaneInfo }>((resolve) => {
           created = resolve;
         });
       return [];
@@ -127,20 +126,20 @@ it.each([false, true])(
         }),
       ),
     );
-    expect(backend.invoke).toHaveBeenCalledWith("term_create", {
-      tabId: "tab1",
+    expect(backend.invoke).toHaveBeenCalledWith("pane_create", {
+      targetPaneId: "t2",
     });
     current = snapshot(["t1", "t2", "t3"]);
     if (eventFirst) {
       await act(async () => {
-        backend.event({ event: "terminal.created" });
+        backend.event({ event: "herdr.pane_created" });
         await vi.advanceTimersByTimeAsync(40);
       });
     }
-    await act(async () => created(terminal("t3")));
+    await act(async () => created({ pane: terminal("t3") }));
     if (!eventFirst) {
       await act(async () => {
-        backend.event({ event: "terminal.created" });
+        backend.event({ event: "herdr.pane_created" });
         await vi.advanceTimersByTimeAsync(40);
       });
     }
@@ -151,9 +150,8 @@ it.each([false, true])(
 it.each([false, true])(
   "creates a terminal from an empty workspace with existing tab=%s",
   async (hasTab) => {
-    const terminal: TerminalInfo = {
-      term_id: "t1",
-      project_id: "p1",
+    const terminal: PaneInfo = {
+      pane_id: "t1",
       workspace_id: "w1",
       tab_id: "tab1",
       cwd: "/tmp",
@@ -178,7 +176,7 @@ it.each([false, true])(
         },
       ],
       tabs: hasTab ? [{ tab_id: "tab1", workspace_id: "w1", panes: [] }] : [],
-      terminals: [],
+      panes: [],
     };
     let fail = true;
     backend.invoke.mockImplementation(async (command: string) => {
@@ -187,7 +185,7 @@ it.each([false, true])(
       if (command === "install_status") return { ok: true };
       if (command === "inbox_list") return { items: [] };
       if (command === "automation_list") return { automations: [] };
-      if (command === "tab_create" || command === "term_create") {
+      if (command === "tab_create" || command === "pane_create") {
         if (fail) throw new Error("shell unavailable");
         current = {
           ...current,
@@ -196,11 +194,14 @@ it.each([false, true])(
             tabs: ["tab1"],
           })),
           tabs: [{ tab_id: "tab1", workspace_id: "w1", panes: ["t1"] }],
-          terminals: [terminal],
+          panes: [terminal],
         };
         return command === "tab_create"
-          ? { tab_id: "tab1", terminal }
-          : terminal;
+          ? {
+              tab: { tab_id: "tab1", workspace_id: "w1", panes: [] },
+              root_pane: terminal,
+            }
+          : { pane: terminal };
       }
       return [];
     });
@@ -217,12 +218,11 @@ it.each([false, true])(
     );
     fail = false;
     await act(async () => create()?.click());
-    expect(backend.invoke).toHaveBeenCalledWith(
-      hasTab ? "term_create" : "tab_create",
-      hasTab
-        ? { tabId: "tab1" }
-        : { workspaceId: "w1", label: undefined, command: undefined },
-    );
+    // an empty tab has no pane to split next to — both cases open a tab
+    expect(backend.invoke).toHaveBeenCalledWith("tab_create", {
+      workspaceId: "w1",
+      label: undefined,
+    });
     expect(document.activeElement?.getAttribute("data-term")).toBe("t1");
     expect(create()).toBeUndefined();
   },
@@ -249,10 +249,9 @@ it("⌘N creates a worktree for the selected project", async () => {
       },
     ],
     tabs: [{ tab_id: "tab1", workspace_id: "w1", panes: ["t1"] }],
-    terminals: [
+    panes: [
       {
-        term_id: "t1",
-        project_id: "p1",
+        pane_id: "t1",
         workspace_id: "w1",
         tab_id: "tab1",
         cwd: "/tmp/demo",
@@ -272,7 +271,7 @@ it("⌘N creates a worktree for the selected project", async () => {
         project_id: "p1",
         workspace_id: "w2",
         tab_id: "tab2",
-        terminal: { term_id: "t2", cwd: "/tmp/wt" },
+        pane_id: "t2",
       };
     return [];
   });

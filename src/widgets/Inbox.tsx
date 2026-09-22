@@ -1,8 +1,8 @@
 import { BellIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { TerminalInfo } from "../shared/lazed";
+import type { PaneInfo } from "../shared/lazed";
 
-function basename(p?: string) {
+function basename(p?: string | null) {
   if (!p) return "";
   const parts = p.replace(/\/$/, "").split("/");
   return parts[parts.length - 1] || p;
@@ -19,9 +19,9 @@ export function InboxPanel({
   onDismissAll,
   onClose,
 }: {
-  items: { term: TerminalInfo; project?: string }[];
-  onJump: (t: TerminalInfo) => void;
-  onDismiss: (termId: string) => void;
+  items: { term: PaneInfo; project?: string }[];
+  onJump: (t: PaneInfo) => void;
+  onDismiss: (paneId: string) => void;
   onDismissAll: () => void;
   onClose: () => void;
 }) {
@@ -57,7 +57,7 @@ export function InboxPanel({
           <div className="modal-empty">no agents need attention</div>
         )}
         {items.map(({ term, project }) => (
-          <div key={term.term_id} className={`inbox-row ${term.agent_status}`}>
+          <div key={term.pane_id} className={`inbox-row ${term.agent_status}`}>
             <button
               type="button"
               className="inbox-jump"
@@ -66,7 +66,7 @@ export function InboxPanel({
             >
               <span className={`dot ${term.agent_status}`} />
               <span className="inbox-agent">
-                {term.agent_kind ?? basename(term.cwd) ?? term.term_id}
+                {term.agent ?? basename(term.cwd) ?? term.pane_id}
               </span>
               <span className="inbox-ws">{project}</span>
               <span className="inbox-status">{term.agent_status}</span>
@@ -74,7 +74,7 @@ export function InboxPanel({
             <button
               type="button"
               className="inbox-dismiss"
-              onClick={() => onDismiss(term.term_id)}
+              onClick={() => onDismiss(term.pane_id)}
               title="dismiss"
             >
               <HugeiconsIcon icon={Cancel01Icon} size={12} strokeWidth={1.5} />

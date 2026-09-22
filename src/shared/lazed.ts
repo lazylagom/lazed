@@ -11,8 +11,9 @@ export interface GroupInfo {
 }
 
 /**
- * A project = one git repo. Owns workspaces; `workspaces` is ordered —
- * the first entry is the main-checkout workspace.
+ * A project = one git repo (lazed's overlay on herdr). Owns the ordered list
+ * of herdr workspace ids checked out from that repo — index 0 is the main
+ * checkout.
  */
 export interface ProjectInfo {
   project_id: string;
@@ -21,59 +22,86 @@ export interface ProjectInfo {
   repo_key: string;
   /** id of the group this project belongs to, if any */
   group_id?: string | null;
-  /** ordered workspace ids — index 0 is the main checkout */
+  /** ordered herdr workspace ids — index 0 is the main checkout */
   workspaces: string[];
   focused?: boolean;
 }
 
-/** One workspace = one checkout (the main checkout or a linked worktree). */
+/**
+ * A herdr workspace (`w1`) with lazed's annotation merged in: which project
+ * it belongs to, its checkout path/branch, main vs linked worktree.
+ * `tabs` is derived client-side from the tab list (see `normalize`).
+ */
 export interface WorkspaceInfo {
   workspace_id: string;
-  project_id: string;
+  /** lazed project — null for a herdr workspace lazed couldn't file */
+  project_id?: string | null;
   label?: string;
   /** checkout path (repo_root for the main workspace) */
-  path: string;
-  /** branch at spawn — the sidebar card's display name */
+  path?: string;
+  /** branch at open — the sidebar card's display name for worktrees */
   branch?: string;
-  is_main: boolean;
-  /** ordered tab ids */
+  is_main?: boolean;
+  // herdr WorkspaceInfo
+  number?: number;
+  focused?: boolean;
+  pane_count?: number;
+  tab_count?: number;
+  active_tab_id?: string;
+  agent_status?: AgentStatus;
+  /** ordered tab ids (derived) */
   tabs: string[];
 }
 
-/** A tab inside a workspace — an ordered row of panes. */
+/** A herdr tab (`w1:t1`). `panes` is derived client-side. */
 export interface TabInfo {
   tab_id: string;
   workspace_id: string;
   label?: string;
-  /** ordered pane (terminal) ids */
+  number?: number;
+  focused?: boolean;
+  pane_count?: number;
+  agent_status?: AgentStatus;
+  /** ordered pane ids (derived — layout order when herdr reports one) */
   panes: string[];
 }
 
-/** One terminal = one pane = one PTY owned by the daemon. */
-export interface TerminalInfo {
-  term_id: string;
-  /** owning tab / workspace / project ids */
-  tab_id?: string;
-  workspace_id?: string;
-  project_id?: string;
-  cwd: string;
-  command?: string;
-  label?: string;
-  /** "worktree" | "plain" — display tag derived from the workspace */
-  kind?: string;
-  /** git branch of the checkout at spawn */
-  branch?: string;
-  cols?: number;
-  rows?: number;
-  dead?: boolean;
-  agent_kind?: string;
-  agent_name?: string | null;
+/** A herdr pane (`w1:p1`) = one PTY owned by herdr. */
+export interface PaneInfo {
+  pane_id: string;
+  workspace_id: string;
+  tab_id: string;
+  terminal_id?: string;
+  cwd?: string | null;
+  foreground_cwd?: string | null;
+  label?: string | null;
+  title?: string | null;
+  /** agent kind herdr detected in the pane (manifest name), if any */
+  agent?: string | null;
+  display_agent?: string | null;
   agent_status?: AgentStatus;
+  /** live herdr agent name — merged from `agents[]` by `normalize` */
+  agent_name?: string | null;
+  focused?: boolean;
+  revision?: number;
   scroll?: {
     offset_from_bottom: number;
     max_offset_from_bottom: number;
     viewport_rows: number;
-  };
+  } | null;
+}
+
+/** herdr AgentInfo — a pane that hosts a live (possibly named) agent. */
+export interface AgentInfo {
+  pane_id: string;
+  workspace_id?: string;
+  tab_id?: string;
+  name?: string | null;
+  agent?: string | null;
+  display_agent?: string | null;
+  agent_status?: AgentStatus;
+  launch_pending?: boolean;
+  interactive_ready?: boolean;
 }
 
 export interface Snapshot {
@@ -82,7 +110,66 @@ export interface Snapshot {
   projects: ProjectInfo[];
   workspaces?: WorkspaceInfo[];
   tabs?: TabInfo[];
-  terminals: TerminalInfo[];
+  panes: PaneInfo[];
+  agents?: AgentInfo[];
+  layouts?: {
+    tab_id: string;
+    workspace_id: string;
+    panes: { pane_id: string; focused?: boolean }[];
+  }[];
+  focused_workspace_id?: string | null;
+  focused_tab_id?: string | null;
+  focused_pane_id?: string | null;
+  /** execution layer — false means herdr is unreachable (degraded mode) */
+  herdr?: { connected: boolean; session?: string; version?: string | null };
+}
+
+/**
+ * Fill in the client-side derivations the daemon's merged snapshot leaves
+ * out: `workspace.tabs`, `tab.panes` (layout order when available) and each
+ * pane's live agent name. Idempotent — safe on an already-normalized value.
+ */
+export function normalize(snap: Snapshot): Snapshot {
+  const panes = snap.panes ?? [];
+  const tabs = snap.tabs ?? [];
+  const workspaces = snap.workspaces ?? [];
+  const byNumber = <T extends { number?: number }>(a: T, b: T) =>
+    (a.number ?? 0) - (b.number ?? 0);
+  const layoutOrder = new Map<string, string[]>();
+  for (const l of snap.layouts ?? []) {
+    layoutOrder.set(
+      l.tab_id,
+      l.panes.map((p) => p.pane_id),
+    );
+  }
+  const nameByPane = new Map<string, string>();
+  for (const a of snap.agents ?? []) {
+    if (a.name) nameByPane.set(a.pane_id, a.name);
+  }
+  const normPanes = panes.map((p) => ({
+    ...p,
+    agent_name: nameByPane.get(p.pane_id) ?? p.agent_name ?? null,
+  }));
+  const normTabs = [...tabs].sort(byNumber).map((t) => {
+    const inTab = normPanes
+      .filter((p) => p.tab_id === t.tab_id)
+      .map((p) => p.pane_id);
+    const order = layoutOrder.get(t.tab_id);
+    const ordered = order
+      ? [
+          ...order.filter((id) => inTab.includes(id)),
+          ...inTab.filter((id) => !order.includes(id)),
+        ]
+      : inTab;
+    return { ...t, panes: ordered };
+  });
+  const normWs = workspaces.map((w) => ({
+    ...w,
+    tabs: normTabs
+      .filter((t) => t.workspace_id === w.workspace_id)
+      .map((t) => t.tab_id),
+  }));
+  return { ...snap, panes: normPanes, tabs: normTabs, workspaces: normWs };
 }
 
 /** `session.status` result — daemon liveness + version + object counts. */
@@ -97,12 +184,27 @@ export interface SessionStatus {
   /** the binary on disk is newer than the running process — restart to pick it up */
   binary_updated?: boolean;
   capabilities?: string[];
-  terms?: number;
+  workspaces?: number;
   projects?: number;
+  herdr?: { session?: string; bridge_connected?: boolean };
+}
+
+/** `herdr.status` — adapter + herdr server health. */
+export interface HerdrStatus {
+  installed: boolean;
+  binary?: string | null;
+  session: string;
+  expected_version: string;
+  running: boolean;
+  version?: string | null;
+  socket?: string | null;
+  compat_warning?: string | null;
+  bridge_connected: boolean;
+  error?: string | null;
 }
 
 export interface LazedEvent {
-  /** daemon event name, e.g. "terminal.created", "agent.status" */
+  /** daemon event name, e.g. "herdr.pane_created", "project.created" */
   event?: string;
   /** synthetic client-side events also carry `type` (e.g. "events.reconnect") */
   type?: string;
@@ -111,6 +213,8 @@ export interface LazedEvent {
 
 export interface BootstrapResult {
   snapshot?: Snapshot;
+  /** herdr could not be started — the app runs in degraded mode */
+  herdr_error?: string | null;
 }
 
 /** One row of `lazed doctor --json` — a path the install manages. */
@@ -135,34 +239,39 @@ export const lazed = {
   installCli: () => invoke("install_cli"),
   snapshot: () => invoke<Snapshot>("session_snapshot"),
   status: () => invoke<SessionStatus>("session_status"),
-  /** stop + respawn the daemon; panes come back from the persisted session */
+  herdrStatus: () => invoke<HerdrStatus>("herdr_status"),
+  /** stop + respawn the lazed daemon; herdr (and every pane) is untouched */
   restartServer: (onlyIfEmpty = false) =>
     invoke<SessionStatus>("server_restart", { onlyIfEmpty }),
 
-  // pane control streams
-  termClose: (termId: string) => invoke("term_close", { termId }),
+  // panes (herdr) — the frame stream itself lives in TermView
+  paneClose: (paneId: string) => invoke("pane_close", { paneId }),
   /**
-   * New pane. `tabId` splits a pane into an existing tab; `workspaceId` /
-   * `projectId` open a fresh tab under them (with its first pane).
+   * New pane. `targetPaneId` splits next to an existing pane (same tab);
+   * `workspaceId` opens a fresh tab with its root pane.
    */
-  termCreate: (opts: {
-    tabId?: string;
+  paneCreate: (opts: {
+    targetPaneId?: string;
     workspaceId?: string;
-    projectId?: string;
-    command?: string;
-    label?: string;
-  }) => invoke<TerminalInfo>("term_create", opts),
-  termSend: (termId: string, text: string) =>
-    invoke("term_send", { termId, text }),
-  termRead: (termId: string, lines?: number) =>
-    invoke<{ text: string }>("term_read", { termId, lines }),
+    cwd?: string;
+  }) => invoke<{ pane: PaneInfo | null; tab?: TabInfo }>("pane_create", opts),
+  /** type a line into a shell pane (text + Enter) */
+  paneSend: (paneId: string, text: string) =>
+    invoke("pane_send", { paneId, text }),
+  paneRead: (paneId: string, lines?: number) =>
+    invoke<{ text: string }>("pane_read", { paneId, lines }),
 
   // projects
   projectCreate: (cwd: string, label?: string, groupId?: string) =>
     invoke<{
       project: ProjectInfo;
-      workspace: WorkspaceInfo;
-      terminal: TerminalInfo;
+      workspace?: WorkspaceInfo | null;
+      opened?: {
+        workspace_id?: string;
+        tab_id?: string;
+        pane_id?: string;
+        error?: string;
+      } | null;
     }>("project_create", { cwd, label, groupId }),
   projectFocus: (projectId: string) => invoke("project_focus", { projectId }),
   projectClose: (projectId: string) => invoke("project_close", { projectId }),
@@ -191,7 +300,7 @@ export const lazed = {
       project_id: string;
       workspace_id: string;
       tab_id: string;
-      terminal: TerminalInfo;
+      pane_id: string;
     }>("workspace_create", { projectId, branch, base, label }),
   workspaceRemove: (
     workspaceId: string,
@@ -203,12 +312,11 @@ export const lazed = {
   workspaceRename: (workspaceId: string, label: string) =>
     invoke("workspace_rename", { workspaceId, label }),
 
-  // tabs — a named pane row inside a workspace
-  tabCreate: (workspaceId: string, label?: string, command?: string) =>
-    invoke<{ tab_id: string; terminal: TerminalInfo }>("tab_create", {
+  // tabs (herdr) — each opens with a root pane
+  tabCreate: (workspaceId: string, label?: string) =>
+    invoke<{ tab: TabInfo; root_pane: PaneInfo }>("tab_create", {
       workspaceId,
       label,
-      command,
     }),
   tabClose: (tabId: string) => invoke("tab_close", { tabId }),
 
@@ -232,7 +340,7 @@ export const lazed = {
       { cwd },
     ),
 
-  // agents
+  // agents (herdr's) + lazed tasks
   taskStart: (params: {
     cwd: string;
     kind: string;
@@ -245,20 +353,16 @@ export const lazed = {
     invoke<{
       task_id: string;
       workspace_id?: string;
-      term_id?: string;
+      pane_id?: string;
+      agent_name?: string;
       phase: string;
       error?: string;
     }>("task_start", { params }),
-  agentStart: (termId: string, kind: string) =>
-    invoke("agent_start", { termId, kind }),
-  agentPrompt: (termId: string, text: string) =>
-    invoke("agent_prompt", { termId, text }),
-  agentGet: (termId: string) =>
-    invoke<{
-      term_id: string;
-      agent?: string;
-      agent_status?: AgentStatus;
-    }>("agent_get", { termId }),
+  agentStart: (paneId: string, kind: string) =>
+    invoke("agent_start", { paneId, kind }),
+  agentPrompt: (paneId: string, text: string) =>
+    invoke("agent_prompt", { paneId, text }),
+  agentGet: (paneId: string) => invoke<AgentInfo>("agent_get", { paneId }),
   agentDetect: () => invoke<AgentDetectResult>("agent_detect"),
 };
 
@@ -279,16 +383,16 @@ export function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Agent kinds the daemon knows how to start. */
+/** Agent kinds offered in the picker — a subset of herdr's manifests. */
 export const AGENT_KINDS = [
   "claude",
   "codex",
-  "antigravity",
   "devin",
   "gemini",
   "opencode",
-  "aider",
   "pi",
+  "cursor",
+  "copilot",
 ] as const;
 
 export function subscribeEvents(handler: (ev: LazedEvent) => void) {

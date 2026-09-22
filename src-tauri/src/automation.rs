@@ -269,34 +269,49 @@ fn render(tpl: &str, item: &AutomationItem, quote: bool) -> String {
         .replace("{title}", &text)
 }
 
-/// `agent` action: terminal in the configured project → agent → prompt.
-/// Uses the same readiness and submission protocol as CLI/GUI tasks.
+/// `agent` action: a fresh tab in the project's main workspace → herdr
+/// agent → prompt. Readiness and submission are herdr's (agent.start waits
+/// for the interactive prompt; agent.prompt refuses a blocked agent).
 fn run_agent_action(
     agent_kind: &str,
     project_id: &str,
     prompt_tpl: &str,
     item: &AutomationItem,
 ) -> Result<(), String> {
-    let label = format!("auto-{}", item.id.chars().take(24).collect::<String>());
-    let res = lazed::api_call(
-        "terminal.create",
-        json!({"project_id": project_id, "label": label}),
-    )?;
-    let term_id = res
-        .get("term_id")
-        .or_else(|| res.pointer("/terminal/term_id"))
+    let snap = lazed::api_call("session.snapshot", json!({}))?;
+    let ws = snap
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .and_then(|ws| {
+            ws.iter().find(|w| {
+                w.get("project_id").and_then(Value::as_str) == Some(project_id)
+                    && w.get("is_main").and_then(Value::as_bool) == Some(true)
+            })
+        })
+        .and_then(|w| w.get("workspace_id").and_then(Value::as_str))
+        .ok_or_else(|| format!("project {project_id} has no open main workspace (herdr down or project closed)"))?
+        .to_string();
+    let tab = lazed::herdr_call("tab.create", json!({"workspace_id": ws}))?;
+    let pane_id = tab
+        .pointer("/root_pane/pane_id")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| "terminal created but no term_id in response".to_string())?;
-    lazed::api_call(
+        .ok_or_else(|| "tab created but no root pane in response".to_string())?;
+    let name = format!(
+        "auto-{}",
+        item.id.to_ascii_lowercase().chars()
+            .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' { c } else { '-' })
+            .take(26)
+            .collect::<String>()
+    );
+    lazed::herdr_call(
         "agent.start",
-        json!({"term_id": term_id, "kind": agent_kind}),
+        json!({"name": name, "kind": agent_kind, "pane_id": pane_id}),
     )?;
-    let receipt = lazed::api_call(
+    lazed::herdr_call(
         "agent.prompt",
-        json!({"term_id": term_id, "text": render(prompt_tpl, item, false)}),
+        json!({"target": pane_id, "text": render(prompt_tpl, item, false)}),
     )?;
-    if receipt["accepted"] != true { return Err(format!("{}", receipt["error"])); }
     Ok(())
 }
 

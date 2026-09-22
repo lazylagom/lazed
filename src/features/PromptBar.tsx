@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Modal } from "../components/Modal";
 
 export type PromptTarget =
-  | { kind: "focused"; termId: string }
+  | { kind: "focused"; paneId: string }
   | { kind: "agents" }
   | { kind: "all" };
 
@@ -27,7 +27,7 @@ export function PromptBar({
     const t = text.trim();
     if (!t) return;
     if (target === "focused" && focusedTerm) {
-      onSubmit(t, { kind: "focused", termId: focusedTerm });
+      onSubmit(t, { kind: "focused", paneId: focusedTerm });
     } else if (target === "agents") {
       onSubmit(t, { kind: "agents" });
     } else {

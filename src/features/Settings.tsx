@@ -640,9 +640,8 @@ function DaemonPane() {
   }, [refresh]);
 
   const restart = async () => {
-    const terms = status?.terms ?? 0;
     const ok = await ask(
-      `Restart the lazed daemon?\n\nPanes are restored from the saved session, but anything running inside them (${terms} pane${terms === 1 ? "" : "s"}, including agents) will be terminated.`,
+      "Restart the lazed daemon?\n\nPanes and agents run in herdr and are not affected. Only lazed's own in-flight work (a worktree removal, a task launch) would be interrupted.",
       { title: "Restart daemon", kind: "warning", okLabel: "Restart" },
     );
     if (!ok) return;
@@ -668,7 +667,7 @@ function DaemonPane() {
             <div className="set-row-label">lazed server</div>
             <div className="set-row-sub">
               {status
-                ? `v${status.version ?? "?"} · pid ${status.pid ?? "?"} · up ${fmtUptime(status.started_at)} · ${status.terms ?? 0} panes`
+                ? `v${status.version ?? "?"} · pid ${status.pid ?? "?"} · up ${fmtUptime(status.started_at)} · ${status.projects ?? 0} projects · ${status.workspaces ?? 0} workspaces · herdr ${status.herdr?.bridge_connected ? "connected" : "offline"}`
                 : error
                   ? `not reachable: ${error}`
                   : "checking…"}

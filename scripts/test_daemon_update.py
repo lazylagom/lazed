@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Update lifecycle checks against a disposable daemon; never uses the live socket."""
+"""Update lifecycle checks against a disposable lazed daemon (no herdr needed —
+the overlay daemon runs degraded); never uses the live socket."""
 import json
 import os
 from pathlib import Path
@@ -46,8 +47,6 @@ class DaemonUpdateTests(unittest.TestCase):
 
     def stop(self):
         if self.server.poll() is None:
-            for term in self.rpc("session.snapshot")["result"]["terminals"]:
-                self.rpc("terminal.close", {"term_id": term["term_id"]})
             self.rpc("server.stop")
             self.server.wait(timeout=5)
 
@@ -77,18 +76,20 @@ class DaemonUpdateTests(unittest.TestCase):
         self.assertNotEqual(before["pid"], after["pid"])
         self.assertFalse(after["binary_updated"])
 
-    def test_terminal_created_after_status_blocks_automatic_stop(self):
-        self.assertEqual(self.rpc("session.status")["result"]["terms"], 0)
+    def test_project_survives_restart_without_herdr(self):
+        # degraded mode: the project is filed, no herdr workspace could open
         project = self.rpc("project.create", {"cwd": str(self.root)})
         self.assertIn("result", project, project)
-        tid = project["result"]["terminal"]["term_id"]
-        refused = self.rpc("server.stop_if_empty")
-        self.assertIn("daemon_has_terminals", refused["error"])
-        self.assertIsNone(self.server.poll())
-        self.assertEqual(self.rpc("session.status")["result"]["terms"], 1)
-        self.rpc("terminal.close", {"term_id": tid})
+        self.assertIn("error", project["result"]["opened"])
+        snap = self.rpc("session.snapshot")["result"]
+        self.assertFalse(snap["herdr"]["connected"])
+        self.assertEqual(len(snap["projects"]), 1)
         self.assertIsNone(self.rpc("server.stop_if_empty"))
         self.assertEqual(self.server.wait(timeout=5), 0)
+        self.start()
+        after = self.rpc("session.snapshot")["result"]
+        self.assertEqual([p["project_id"] for p in after["projects"]],
+                         [p["project_id"] for p in snap["projects"]])
 
 
 if __name__ == "__main__":

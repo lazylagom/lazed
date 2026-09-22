@@ -20,9 +20,9 @@ import { useEffect, useRef, useState } from "react";
 import type {
   AgentStatus,
   GroupInfo,
+  PaneInfo,
   ProjectInfo,
   Snapshot,
-  TerminalInfo,
   WorkspaceInfo,
 } from "../shared/lazed";
 import { useSidebarWidth } from "./sidebar-width";
@@ -31,7 +31,7 @@ function statusClass(s?: AgentStatus) {
   return `st-${s ?? "unknown"}`;
 }
 
-function basename(p?: string) {
+function basename(p?: string | null) {
   if (!p) return "";
   const parts = p.replace(/\/$/, "").split("/");
   return parts[parts.length - 1] || p;
@@ -96,13 +96,13 @@ function PaneRow({
   onFocus,
   onClose,
 }: {
-  t: TerminalInfo;
+  t: PaneInfo;
   focused: boolean;
   onFocus: () => void;
   onClose: () => void;
 }) {
   const name =
-    t.label ?? t.agent_kind ?? t.branch ?? basename(t.cwd) ?? t.term_id;
+    t.label ?? t.agent_name ?? t.agent ?? basename(t.cwd) ?? t.pane_id;
   const close = async () => {
     const ok = await confirmClose(
       "Close Pane",
@@ -116,11 +116,11 @@ function PaneRow({
         type="button"
         className="side-ws-label"
         onClick={onFocus}
-        title={t.cwd}
+        title={t.cwd ?? undefined}
       >
         <span className={`dot ${t.agent_status ?? "unknown"}`} />
         <HugeiconsIcon
-          icon={t.agent_kind ? BotIcon : TerminalIcon}
+          icon={t.agent ? BotIcon : TerminalIcon}
           size={12}
           strokeWidth={1.5}
           className="side-ico"
@@ -154,18 +154,18 @@ function WorkspaceRow({
   onDiff,
 }: {
   ws: WorkspaceInfo;
-  panes: TerminalInfo[];
+  panes: PaneInfo[];
   focusedWs: boolean;
   focusedTermId: string | null;
   onFocusWorkspace: (wsId: string) => void;
-  onJumpTerm: (termId: string) => void;
-  onCloseTerm: (t: TerminalInfo) => void;
+  onJumpTerm: (paneId: string) => void;
+  onCloseTerm: (t: PaneInfo) => void;
   onRemoveWorkspace: (ws: WorkspaceInfo, killAgents: boolean) => void;
   onDiff: (ws: WorkspaceInfo) => void;
 }) {
   const name = ws.label ?? ws.branch ?? basename(ws.path) ?? ws.workspace_id;
   const remove = async () => {
-    const agents = panes.filter((t) => t.agent_kind).map((t) => t.agent_kind);
+    const agents = panes.filter((t) => t.agent).map((t) => t.agent);
     const message = agents.length
       ? `Remove workspace “${name}”? Agents still running (${[...new Set(agents)].join(", ")}) — their panes will be killed and the worktree checkout deleted.`
       : `Remove workspace “${name}”? Its ${panes.length} pane(s) will be killed and the worktree checkout deleted.`;
@@ -218,10 +218,10 @@ function WorkspaceRow({
         <div className="side-tree-children">
           {panes.map((t) => (
             <PaneRow
-              key={t.term_id}
+              key={t.pane_id}
               t={t}
-              focused={t.term_id === focusedTermId}
-              onFocus={() => onJumpTerm(t.term_id)}
+              focused={t.pane_id === focusedTermId}
+              onFocus={() => onJumpTerm(t.pane_id)}
               onClose={() => onCloseTerm(t)}
             />
           ))}
@@ -256,7 +256,7 @@ export function Sidebar({
   focusedTermId: string | null;
   onFocusProject: (id: string) => void;
   onFocusWorkspace: (wsId: string) => void;
-  onJumpTerm: (termId: string) => void;
+  onJumpTerm: (paneId: string) => void;
   onNewProject: () => void;
   /** creates a group — resolves to its id so the caller can enter rename */
   onNewGroup: () => Promise<string | null>;
@@ -266,7 +266,7 @@ export function Sidebar({
   onRemoveGroup: (id: string) => void;
   /** groupId null = move back to ungrouped */
   onAssignProject: (projectId: string, groupId: string | null) => void;
-  onCloseTerm: (t: TerminalInfo) => void;
+  onCloseTerm: (t: PaneInfo) => void;
   onRemoveWorkspace: (ws: WorkspaceInfo, killAgents: boolean) => void;
   onDiff: (ws: WorkspaceInfo) => void;
   /** ⌘N — open the new-worktree sheet for this project */
@@ -286,7 +286,7 @@ export function Sidebar({
   } | null>(null);
   const projects = snap?.projects ?? [];
   const groups = snap?.groups ?? [];
-  const termsById = new Map((snap?.terminals ?? []).map((t) => [t.term_id, t]));
+  const termsById = new Map((snap?.panes ?? []).map((t) => [t.pane_id, t]));
   const wsById = new Map(
     (snap?.workspaces ?? []).map((w) => [w.workspace_id, w]),
   );
@@ -296,11 +296,11 @@ export function Sidebar({
   const ungrouped = projects.filter((p) => !groupedIds.has(p.project_id));
 
   /** a workspace's panes in display order — tab order, then pane order */
-  const wsPanes = (ws: WorkspaceInfo): TerminalInfo[] =>
+  const wsPanes = (ws: WorkspaceInfo): PaneInfo[] =>
     ws.tabs
       .flatMap((tid) => tabById.get(tid)?.panes ?? [])
       .map((pid) => termsById.get(pid))
-      .filter((t): t is TerminalInfo => Boolean(t));
+      .filter((t): t is PaneInfo => Boolean(t));
 
   const toggleGroup = (id: string) =>
     setCollapsed((prev) => {

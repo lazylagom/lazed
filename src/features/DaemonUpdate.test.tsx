@@ -19,7 +19,7 @@ const stale = {
   running: true,
   binary_updated: true,
   pid: 10,
-  terms: 0,
+  workspaces: 2,
   capabilities: ["server.stop_if_empty.v1"],
 };
 
@@ -47,7 +47,7 @@ async function clickRestart() {
   await act(async () => host.querySelector("button")?.click());
 }
 
-it("automatically restarts only an empty daemon using the guarded API", async () => {
+it("automatically restarts through the guarded API — panes live in herdr", async () => {
   vi.mocked(lazed.status).mockResolvedValue(stale);
   await render();
   expect(lazed.restartServer).toHaveBeenCalledExactlyOnceWith(true);
@@ -55,23 +55,27 @@ it("automatically restarts only an empty daemon using the guarded API", async ()
   expect(host.textContent).toBe("");
 });
 
-it("polls for builds and waits for confirmation when terminals exist", async () => {
+it("polls for builds and offers a confirmed manual restart when the guard refuses", async () => {
   vi.mocked(lazed.status).mockResolvedValue({
     ...stale,
     binary_updated: false,
   });
   await render();
   expect(host.textContent).toBe("");
-  vi.mocked(lazed.status).mockResolvedValue({ ...stale, terms: 2 });
+  // a removal in flight: the guarded stop refuses, the banner stays
+  vi.mocked(lazed.restartServer).mockRejectedValueOnce("daemon_busy");
+  vi.mocked(lazed.status).mockResolvedValue(stale);
   await act(async () => vi.advanceTimersByTimeAsync(5_000));
-  expect(host.textContent).toContain("2 terminal(s)");
-  expect(lazed.restartServer).not.toHaveBeenCalled();
+  expect(host.textContent).toContain("Daemon update available");
+  expect(host.textContent).toContain("daemon_busy");
+  expect(lazed.restartServer).toHaveBeenCalledExactlyOnceWith(true);
   ask.mockResolvedValueOnce(false);
   await clickRestart();
-  expect(lazed.restartServer).not.toHaveBeenCalled();
+  expect(lazed.restartServer).toHaveBeenCalledTimes(1);
   ask.mockResolvedValueOnce(true);
   await clickRestart();
-  expect(lazed.restartServer).toHaveBeenCalledExactlyOnceWith();
+  expect(lazed.restartServer).toHaveBeenCalledTimes(2);
+  expect(lazed.restartServer).toHaveBeenLastCalledWith();
 });
 
 it("requires manual confirmation for an old daemon without the safety gate", async () => {
@@ -83,16 +87,20 @@ it("requires manual confirmation for an old daemon without the safety gate", asy
 
 it("keeps a raced or failed automatic restart visible without retry loops", async () => {
   vi.mocked(lazed.status).mockResolvedValue(stale);
-  vi.mocked(lazed.restartServer).mockRejectedValue("daemon_has_terminals");
+  vi.mocked(lazed.restartServer).mockRejectedValue("daemon_busy");
   await render();
-  expect(host.textContent).toContain("daemon_has_terminals");
+  expect(host.textContent).toContain("daemon_busy");
   await act(async () => vi.advanceTimersByTimeAsync(15_000));
   expect(lazed.restartServer).toHaveBeenCalledTimes(1);
 });
 
-it("automatically applies the build after the last terminal closes", async () => {
-  vi.mocked(lazed.status).mockResolvedValue({ ...stale, terms: 1 });
+it("applies a build that appears on a later poll", async () => {
+  vi.mocked(lazed.status).mockResolvedValue({
+    ...stale,
+    binary_updated: false,
+  });
   await render();
+  expect(lazed.restartServer).not.toHaveBeenCalled();
   vi.mocked(lazed.status).mockResolvedValue(stale);
   await act(async () => vi.advanceTimersByTimeAsync(5_000));
   expect(lazed.restartServer).toHaveBeenCalledExactlyOnceWith(true);
