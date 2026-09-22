@@ -1,9 +1,15 @@
 //! Durable execution records. A task is not a claim of verified code completion.
+//!
+//! A task = one worktree + one herdr agent + one initial prompt, filed under
+//! a caller-chosen `request_id` so a disconnected client can query status
+//! instead of blindly resending. herdr owns the agent (start, readiness,
+//! lifecycle, names); this module owns the record and the ordering of side
+//! effects around it.
 use crate::{
-    control::{self, str_of},
+    herdr,
     server::Shared,
-    session::Session,
-    term::lock,
+    session::{lock, Session},
+    specs::AgentRegistry,
 };
 use serde_json::{json, Value};
 use std::{
@@ -16,7 +22,31 @@ use std::{
 static ACTIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static BOOT: OnceLock<String> = OnceLock::new();
 fn boot() -> &'static str {
-    BOOT.get_or_init(control::id)
+    BOOT.get_or_init(random_id)
+}
+pub fn random_id() -> String {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut bytes)
+        .unwrap();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+pub fn str_of<'a>(p: &'a Value, key: &str) -> &'a str {
+    p.get(key).and_then(Value::as_str).unwrap_or("")
+}
+pub fn validate_text(text: &str) -> Result<String, String> {
+    let text = text.replace("\r\n", "\n");
+    if text.trim().is_empty() || text.len() > 65536 {
+        return Err("prompt must contain 1..65536 bytes".into());
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err("prompt contains terminal control characters".into());
+    }
+    Ok(text)
 }
 fn directory() -> PathBuf {
     crate::state::state_dir().join("tasks")
@@ -32,6 +62,19 @@ fn key(id: &str) -> Result<&str, String> {
     }
     Ok(id)
 }
+/// The herdr agent name for a task — herdr names match
+/// `[a-z][a-z0-9_-]{0,31}` and are unique among live agents, so the task
+/// id (already unique on disk) is folded into that alphabet.
+pub fn agent_name(task_id: &str) -> String {
+    let body: String = task_id
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' { c } else { '-' })
+        .collect();
+    let mut name = format!("task-{body}");
+    name.truncate(32);
+    name
+}
 fn load(id: &str) -> Result<Value, String> {
     let raw = std::fs::read(directory().join(format!("{}.json", key(id)?)))
         .map_err(|e| format!("task {id}: {e}"))?;
@@ -44,7 +87,7 @@ fn save(record: &Value) -> Result<(), String> {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
     let id = key(str_of(record, "task_id"))?;
-    let tmp = dir.join(format!(".{id}-{}.tmp", control::id()));
+    let tmp = dir.join(format!(".{id}-{}.tmp", random_id()));
     let result = (|| {
         let mut f = std::fs::OpenOptions::new()
             .create_new(true)
@@ -95,6 +138,17 @@ fn git(cwd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
+/// Resolve `spec`/`kind`/`args` into herdr `agent.start` params.
+fn resolve_agent(p: &Value) -> Result<(String, Vec<String>), String> {
+    let (kind, mut args) = AgentRegistry::load().resolve(str_of(p, "spec"), str_of(p, "kind"))?;
+    if let Some(extra) = p.get("args") {
+        for arg in extra.as_array().ok_or("args must be strings")? {
+            args.push(arg.as_str().ok_or("args must be strings")?.to_owned());
+        }
+    }
+    Ok((kind, args))
+}
+
 pub fn handle(session: &Shared, method: &str, p: &Value) -> Result<Value, String> {
     if method == "task.start" {
         return start(session, p);
@@ -106,7 +160,7 @@ pub fn handle(session: &Shared, method: &str, p: &Value) -> Result<Value, String
                 let path = entry.map_err(|e| e.to_string())?.path();
                 if path.extension().is_some_and(|x| x == "json") {
                     let id = path.file_stem().unwrap().to_string_lossy();
-                    records.push(status(session, load(&id)?));
+                    records.push(status(load(&id)?));
                 }
             }
         }
@@ -115,16 +169,20 @@ pub fn handle(session: &Shared, method: &str, p: &Value) -> Result<Value, String
     let id = key(str_of(p, "task_id"))?;
     let mut record = load(id)?;
     match method {
-        "task.status" => Ok(status(session, record)),
+        "task.status" => Ok(status(record)),
         "task.read" => {
-            record = status(session, record);
-            if record["phase"] == "interrupted" || !record["term_id"].is_string() {
+            record = status(record);
+            if record["phase"] == "interrupted" || !record["pane_id"].is_string() {
                 return Ok(record);
             }
-            let term = lock(session).get_terminal(str_of(&record, "term_id"))?;
-            record["screen"] = json!(
-                lock(&term).screen_text(p["lines"].as_u64().unwrap_or(80).min(2000) as usize)
-            );
+            let lines = p["lines"].as_u64().unwrap_or(80).min(2000);
+            // the pane outlives the agent: read by pane so a finished or
+            // exited agent's last screen is still inspectable
+            let read = herdr::call(
+                "pane.read",
+                json!({"pane_id": record["pane_id"], "source": "recent", "lines": lines}),
+            )?;
+            record["screen"] = read.get("text").cloned().unwrap_or(Value::Null);
             Ok(record)
         }
         "task.resume" => {
@@ -136,34 +194,33 @@ pub fn handle(session: &Shared, method: &str, p: &Value) -> Result<Value, String
             if record["phase"] != "awaiting_ready" {
                 return Err("resume only supports a retained launch whose initial prompt was never submitted".into());
             }
-            launch_and_submit(session, &mut record, true)?;
-            Ok(status(session, record))
+            launch_and_submit(&mut record, true)?;
+            Ok(status(record))
         }
         "task.tell" => {
             let _op = Operation::acquire(id)?;
             record = load(id)?;
             let request = key(str_of(p, "request_id"))?;
-            let text = control::validate_text(str_of(p, "text"))?;
+            let text = validate_text(str_of(p, "text"))?;
             if let Some(old) = record["messages"].get(request) {
                 if old["text"] != text {
                     return Err("request_id_conflict".into());
                 }
-                return Ok(status(session, record));
+                return Ok(status(record));
             }
-            record = status(session, record);
+            record = status(record);
             if record["phase"] != "settled" {
                 return Err("task_not_settled: busy, blocked or uncertain tasks cannot receive follow-up text".into());
             }
             record["messages"][request] = json!({"text": text, "state": "submitting"});
             record["phase"] = json!("submitting");
             save(&record)?;
-            let params = json!({"term_id": record["term_id"], "launch_id": record["launch_id"], "text": text});
-            let result = control::handle(session, "agent.prompt", &params);
+            let result = prompt(&record, &text);
             apply_receipt(&mut record, result);
             record["messages"][request]["receipt"] = record["receipt"].clone();
             record["messages"][request]["state"] = record["phase"].clone();
             save(&record)?;
-            Ok(status(session, record))
+            Ok(status(record))
         }
         _ => Err(format!("unknown task method {method}")),
     }
@@ -178,7 +235,7 @@ fn start(session: &Shared, p: &Value) -> Result<Value, String> {
                 if record["request"] != *p {
                     return Err("request_id_conflict".into());
                 }
-                return Ok(status(session, record));
+                return Ok(status(record));
             }
             return Err(e);
         }
@@ -189,10 +246,10 @@ fn start(session: &Shared, p: &Value) -> Result<Value, String> {
         if old["request"] != *p {
             return Err("request_id_conflict".into());
         }
-        return Ok(status(session, old));
+        return Ok(status(old));
     }
-    let text = control::validate_text(str_of(p, "text"))?;
-    let (kind, args, expected) = control::resolve(p)?;
+    let text = validate_text(str_of(p, "text"))?;
+    let (kind, args) = resolve_agent(p)?;
     let cwd = std::fs::canonicalize(str_of(p, "cwd"))
         .map_err(|e| format!("cwd: {e}"))?
         .to_string_lossy()
@@ -234,102 +291,104 @@ fn start(session: &Shared, p: &Value) -> Result<Value, String> {
     if checkout.exists() {
         return Err("task_checkout_already_exists".into());
     }
-    let mut record = json!({"schema": 1, "task_id": id, "request_id": id, "request": p, "boot_id": boot(),
+    // herdr must be reachable before any git side effect — a worktree
+    // nobody can open is a mess the caller would have to clean up by hand
+    herdr::snapshot()?;
+    let mut record = json!({"schema": 2, "task_id": id, "request_id": id, "request": p, "boot_id": boot(),
         "phase": "creating", "repo": repo, "base_commit": commit, "branch": branch,
-        "checkout_path": checkout, "agent_params": {"kind": kind, "args": args, "expected_kind": expected},
+        "checkout_path": checkout, "agent_params": {"kind": kind, "args": args},
+        "agent_name": agent_name(id),
         "text": text, "messages": {}, "verified": false,
         "warnings": if dirty { vec!["uncommitted source changes are excluded"] } else { vec![] }});
     save(&record)?; // durable intent before any Git/process side effect
     let result = (|| {
         std::fs::create_dir_all(crate::state::worktrees_dir()).map_err(|e| e.to_string())?;
-        git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-                checkout.to_str().ok_or("non-UTF8 checkout")?,
-                &commit,
-            ],
-        )?;
-        // Git is deliberately outside the global session lock.
-        let (_, repo_key) = Session::resolve_repo(&repo);
+        let checkout_str = checkout.to_str().ok_or("non-UTF8 checkout")?.to_string();
+        git(&repo, &["worktree", "add", "-b", &branch, &checkout_str, &commit])?;
+        // open the checkout in herdr, then file it under the repo's project.
+        // Git and herdr are deliberately outside the session lock.
+        let (ws, tab, pane) = herdr::workspace_create(&checkout_str, Some(&branch))?;
+        let (repo_root, repo_key) = Session::resolve_repo(&repo);
         let mut s = lock(session);
-        let existing = s
-            .projects
-            .iter()
-            .find(|(_, x)| x.repo_key == repo_key)
-            .map(|(id, _)| id.clone());
-        let project_id = match existing {
-            Some(id) => id,
-            None => s.create_project(&repo, None, None)?["project"]["project_id"]
-                .as_str()
-                .ok_or("missing project ID")?
-                .to_owned(),
-        };
-        let ws = s.create_workspace(
-            &project_id,
-            checkout.to_str().unwrap(),
-            Some(branch.clone()),
-            Some(branch.clone()),
-            false,
-        )?;
+        let project_id = s.ensure_project(&repo_root, &repo_key, None, None)?;
+        s.register_workspace(&ws, &project_id, &checkout_str, None, Some(branch.clone()), false)?;
         record["project_id"] = json!(project_id);
-        record["workspace_id"] = ws["workspace"]["workspace_id"].clone();
-        record["term_id"] = ws["terminal"]["term_id"].clone();
+        record["workspace_id"] = json!(ws);
+        record["tab_id"] = json!(tab);
+        record["pane_id"] = json!(pane);
         record["phase"] = json!("launching");
         s.persist()?;
         drop(s);
         save(&record)?;
-        launch_and_submit(session, &mut record, false)
+        launch_and_submit(&mut record, false)
     })();
     if let Err(error) = result {
         record["error"] = json!(error);
         record["phase"] = json!("failed");
         // Retain resources: never delete a checkout after an ambiguous side
-        // effect or kill a pane that may have started an agent.
+        // effect or close a pane that may have started an agent.
         save(&record)?;
     }
-    Ok(status(session, record))
+    Ok(status(record))
 }
 
-fn launch_and_submit(session: &Shared, record: &mut Value, resume: bool) -> Result<(), String> {
-    let mut params = record["agent_params"].clone();
-    params["term_id"] = record["term_id"].clone();
-    if resume {
-        params["launch_id"] = record["launch_id"].clone();
-    }
-    let ready = control::handle(session, "agent.start", &params);
-    let observed = control::handle(session, "agent.get", &params)?;
-    record["launch_id"] = observed["launch_id"].clone();
-    if let Err(error) = ready {
-        record["phase"] = json!(if observed["launch_id"].is_string() {
-            "awaiting_ready"
-        } else {
-            "failed"
+/// Start the herdr agent in the task's pane and submit the initial prompt.
+/// `resume` skips the start: the agent from an earlier `awaiting_ready`
+/// launch is checked for readiness instead of being launched twice.
+fn launch_and_submit(record: &mut Value, resume: bool) -> Result<(), String> {
+    let name = str_of(record, "agent_name").to_string();
+    if !resume {
+        let params = json!({
+            "name": name,
+            "kind": record["agent_params"]["kind"],
+            "args": record["agent_params"]["args"],
+            "pane_id": record["pane_id"],
+            "timeout_ms": 30_000,
         });
-        record["error"] = json!(error);
-        return save(record);
+        match herdr::call("agent.start", params) {
+            Ok(info) => record["agent"] = info,
+            Err(error) => {
+                // herdr keeps the name for a blocked/slow startup; anything
+                // else means no agent is there to resume
+                let retained = matches!(herdr::call("agent.get", json!({"target": name})), Ok(ref v) if v.get("pane_id").is_some());
+                record["phase"] = json!(if retained { "awaiting_ready" } else { "failed" });
+                record["error"] = json!(error);
+                return save(record);
+            }
+        }
+    } else {
+        let info = herdr::call("agent.get", json!({"target": name}))
+            .map_err(|e| format!("agent_gone: {e}"))?;
+        if !matches!(str_of(&info, "agent_status"), "idle" | "done") {
+            return Err(format!("agent_not_ready: {}", str_of(&info, "agent_status")));
+        }
+        record["agent"] = info;
     }
     record["phase"] = json!("submitting");
     record["error"] = Value::Null;
     save(record)?; // after this point a retry must never auto-submit
-    let prompt = json!({"term_id": record["term_id"], "launch_id": record["launch_id"], "text": record["text"]});
-    let result = control::handle(session, "agent.prompt", &prompt);
+    let text = str_of(record, "text").to_string();
+    let result = prompt(record, &text);
     apply_receipt(record, result);
     save(record)
 }
+
+/// herdr `agent.prompt` — bracketed paste + Enter as one ordered
+/// submission; herdr refuses (`agent_blocked`/`agent_not_ready`) before
+/// writing anything when the agent can't take input.
+fn prompt(record: &Value, text: &str) -> Result<Value, String> {
+    herdr::call(
+        "agent.prompt",
+        json!({"target": record["agent_name"], "text": text}),
+    )
+}
+
 fn apply_receipt(record: &mut Value, result: Result<Value, String>) {
     match result {
         Ok(receipt) => {
-            record["phase"] = json!(if receipt["accepted"] == true {
-                "running"
-            } else {
-                "submission_uncertain"
-            });
-            record["error"] = receipt["error"].clone();
-            record["receipt"] = receipt;
+            record["phase"] = json!("running");
+            record["error"] = Value::Null;
+            record["receipt"] = json!({"accepted": true, "submitted": true, "herdr": receipt});
         }
         Err(error) => {
             record["phase"] = json!("submission_uncertain");
@@ -338,38 +397,38 @@ fn apply_receipt(record: &mut Value, result: Result<Value, String>) {
         }
     }
 }
-fn status(session: &Shared, mut record: Value) -> Value {
+
+/// Live phase from herdr's view of the agent. A name herdr no longer knows
+/// (agent exited, replaced, released) means the task is interrupted.
+fn status(mut record: Value) -> Value {
     if record["boot_id"] != boot() {
         record["previous_phase"] = record["phase"].clone();
         record["phase"] = json!("interrupted");
         return record;
     }
-    if !record["term_id"].is_string() {
+    if !record["agent_name"].is_string() || !record["pane_id"].is_string() {
         return record;
     }
-    let params = json!({"term_id": record["term_id"]});
-    match control::handle(session, "agent.get", &params) {
+    if matches!(str_of(&record, "phase"), "creating" | "launching" | "failed") {
+        return record;
+    }
+    match herdr::call("agent.get", json!({"target": record["agent_name"]})) {
         Ok(observed) => {
-            if record["launch_id"].is_string()
-                && (record["launch_id"] != observed["launch_id"]
-                    || observed["dead"] == true
-                    || observed["agent"].is_null())
-            {
-                record["phase"] = json!("interrupted");
-            } else if matches!(
+            if matches!(
                 str_of(&record, "phase"),
-                "running" | "settled" | "blocked" | "submission_uncertain"
+                "running" | "settled" | "blocked" | "unknown" | "submission_uncertain"
             ) {
-                let active = observed["activity_seq"].as_u64().unwrap_or(0)
-                    > record["receipt"]["after_seq"].as_u64().unwrap_or(u64::MAX);
-                if active {
-                    record["phase"] = json!(match str_of(&observed, "agent_status") {
-                        "working" => "running",
-                        "idle" | "done" => "settled",
-                        "blocked" => "blocked",
-                        _ => "unknown",
-                    });
-                }
+                record["phase"] = json!(match str_of(&observed, "agent_status") {
+                    "working" => "running",
+                    "idle" | "done" => "settled",
+                    "blocked" => "blocked",
+                    _ => "unknown",
+                });
+            } else if record["phase"] == "awaiting_ready"
+                && matches!(str_of(&observed, "agent_status"), "idle" | "done")
+                && observed["launch_pending"] != true
+            {
+                record["ready"] = json!(true);
             }
             record["agent"] = observed;
         }
@@ -429,7 +488,7 @@ mod tests {
 
     #[test]
     fn failed_followup_never_inherits_a_previous_successful_receipt() {
-        let mut record = json!({"phase": "settled", "receipt": {"accepted": true, "after_seq": 1}});
+        let mut record = json!({"phase": "settled", "receipt": {"accepted": true}});
         apply_receipt(&mut record, Err("write failed".into()));
         assert_eq!(record["phase"], "submission_uncertain");
         assert!(record["receipt"].is_null());
@@ -445,9 +504,27 @@ mod tests {
         assert!(public.get("text").is_none());
         assert!(public["messages"]["next"].get("text").is_none());
     }
+
+    #[test]
+    fn agent_names_fit_herdr_rules() {
+        assert_eq!(agent_name("Fix_Login-1"), "task-fix_login-1");
+        let long = agent_name(&"a".repeat(100));
+        assert_eq!(long.len(), 32);
+        assert!(long.starts_with("task-"));
+        assert!(agent_name("x.y").chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn validate_text_rejects_control_and_empty() {
+        assert!(validate_text("  \n").is_err());
+        assert!(validate_text("ok\ttab\nline").is_ok());
+        assert!(validate_text("bad\x1b[2J").is_err());
+        assert_eq!(validate_text("a\r\nb").unwrap(), "a\nb");
+    }
 }
+
 fn cli_run(args: &[String]) -> Result<Value, String> {
-    let help = "usage: lazed task start [--cwd PATH] [--agent SPEC] [--base REF] [--branch NAME] [--request-id ID] [--allow-dirty] [--prompt-file PATH | --stdin | -- TEXT]\n       lazed task status|read|resume TASK_ID\n       lazed task tell TASK_ID [--request-id ID] -- TEXT\n       lazed task list";
+    let help = "usage: lazed task start [--cwd PATH] [--agent SPEC|--kind KIND] [--base REF] [--branch NAME] [--request-id ID] [--allow-dirty] [--prompt-file PATH | --stdin | -- TEXT]\n       lazed task status|read|resume TASK_ID\n       lazed task tell TASK_ID [--request-id ID] -- TEXT\n       lazed task list";
     let command = args.first().map(String::as_str).unwrap_or("--help");
     if matches!(command, "--help" | "-h") {
         return Ok(json!({"usage": help}));
@@ -498,6 +575,7 @@ fn cli_run(args: &[String]) -> Result<Value, String> {
         let field = match option {
             "--cwd" => "cwd",
             "--agent" => "spec",
+            "--kind" => "kind",
             "--base" => "base",
             "--branch" => "branch",
             "--request-id" => "request_id",
@@ -522,11 +600,11 @@ fn cli_run(args: &[String]) -> Result<Value, String> {
         i += 2;
     }
     if matches!(command, "start" | "tell") {
-        params["text"] = json!(control::validate_text(
+        params["text"] = json!(validate_text(
             &prompt.ok_or("provide -- TEXT, --prompt-file PATH or --stdin")?
         )?);
         if params["request_id"].is_null() {
-            params["request_id"] = json!(control::id());
+            params["request_id"] = json!(random_id());
         }
         eprintln!(
             "request_id={} (retain this ID; query status after disconnect, never blindly resend)",

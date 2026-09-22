@@ -381,7 +381,7 @@ pub fn spawn_bridge(session: Arc<Mutex<Session>>) {
                 }
                 StreamEnd::Failed(e) => {
                     if CONNECTED.swap(false, Ordering::Relaxed) {
-                        crate::term::lock(&session)
+                        crate::session::lock(&session)
                             .broadcast_event("herdr.disconnected", json!({"error": e}));
                     }
                     set_error(Some(e));
@@ -430,7 +430,7 @@ fn run_stream(session: &Arc<Mutex<Session>>) -> StreamEnd {
     }
     // always announce — a Restart-driven reconnect carries a fresh snapshot
     // too, and that is exactly when subscribers should reconcile pane state
-    crate::term::lock(session).broadcast_event(
+    crate::session::lock(session).broadcast_event(
         "herdr.connected",
         json!({"session": session_name(), "snapshot": snap}),
     );
@@ -449,7 +449,7 @@ fn run_stream(session: &Arc<Mutex<Session>>) -> StreamEnd {
         let Some(name) = bridge_event_name(&v) else { continue };
         let data = v.get("data").cloned().unwrap_or(Value::Null);
         let is_pane_created = name == "herdr.pane_created";
-        crate::term::lock(session).broadcast_event(&name, data);
+        crate::session::lock(session).broadcast_event(&name, data);
         if is_pane_created {
             return StreamEnd::Restart;
         }

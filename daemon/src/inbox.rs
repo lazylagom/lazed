@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::control::str_of;
+use crate::tasks::str_of;
 use crate::session::Session;
 use crate::state;
 
@@ -148,7 +148,7 @@ pub fn handle(s: &mut Session, method: &str, p: &Value) -> Result<Value, String>
                 }
             }
             let item = InboxItem {
-                id: format!("i{}", &crate::control::id()[..12]),
+                id: format!("i{}", &crate::tasks::random_id()[..12]),
                 source,
                 key,
                 title,

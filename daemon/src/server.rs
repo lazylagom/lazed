@@ -1,5 +1,11 @@
-//! Unix socket server: NDJSON request/response + pushed events + attach
-//! streams. One connection = one client channel (mpsc outbox → writer).
+//! Unix socket server: NDJSON request/response + pushed events. One
+//! connection = one client channel (mpsc outbox → writer).
+//!
+//! Path C: this daemon serves the organization layer (groups, projects,
+//! worktree lifecycle, tasks, inbox) and re-broadcasts herdr's events.
+//! Terminal bytes never pass through here — the app streams frames from
+//! herdr directly, and tab/pane control reaches herdr through the
+//! `herdr.call` passthrough.
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -7,13 +13,13 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::session::Session;
+use crate::herdr;
+use crate::session::{lock, Session};
 use crate::state;
-use crate::term::{lock, PtyTerm};
 
 pub(crate) type Shared = Arc<Mutex<Session>>;
 
-/// Slow readers are disconnected rather than losing diff frames or blocking producers.
+/// Slow readers are disconnected rather than losing events or blocking producers.
 #[derive(Clone)]
 pub struct ClientSender {
     tx: SyncSender<String>,
@@ -49,12 +55,12 @@ static STARTED_AT: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
         .unwrap_or(0)
 });
 
-// Capture the executable before serving requests. Timestamps rounded to
-// seconds miss quick rebuilds; inode + full mtime also detects replacement.
+/// (dev, ino, mtime) of our own binary — a later mismatch means the file
+/// on disk was replaced and a restart would pick up a newer daemon.
 fn binary_stamp() -> Option<(u64, u64, std::time::SystemTime)> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
-    Some((meta.ino(), meta.len(), meta.modified().ok()?))
+    Some((meta.dev(), meta.ino(), meta.modified().ok()?))
 }
 static BINARY_STAMP: std::sync::LazyLock<Option<(u64, u64, std::time::SystemTime)>> =
     std::sync::LazyLock::new(binary_stamp);
@@ -89,15 +95,9 @@ pub fn run() -> std::io::Result<()> {
         });
     }
 
-    // agent detection tick
-    {
-        let s = session.clone();
-        std::thread::spawn(move || Session::agent_watch(s));
-    }
-
     // herdr event bridge — re-broadcasts execution-layer events as
     // `herdr.*`; keeps retrying while herdr is down (degraded mode)
-    crate::herdr::spawn_bridge(session.clone());
+    herdr::spawn_bridge(session.clone());
 
     let listener = UnixListener::bind(&path)?;
     eprintln!("lazed: listening on {}", path.display());
@@ -113,10 +113,7 @@ pub fn run() -> std::io::Result<()> {
     Ok(())
 }
 
-static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 fn handle_conn(stream: UnixStream, session: Shared) {
-    let conn_id = CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let writer_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -140,7 +137,6 @@ fn handle_conn(stream: UnixStream, session: Shared) {
         let _ = socket.shutdown(std::net::Shutdown::Both);
     });
 
-    let mut attached: Option<String> = None;
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let Ok(line) = line else { break };
@@ -151,98 +147,61 @@ fn handle_conn(stream: UnixStream, session: Shared) {
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        // attach-mode commands use {"type": ...}; api calls use {"method": ...}
-        if let Some(m) = msg.get("method").and_then(Value::as_str) {
-            let id = msg.get("id").cloned();
-            let params = msg.get("params").cloned().unwrap_or(json!({}));
-            // agent.wait is a long poll — it must not hold the session lock
-            // while parked, or one unreachable wait wedges every client.
-            let res = if matches!(m, "agent.start" | "agent.prompt" | "agent.get" | "agent.wait" | "agent.read" | "agent.list" | "agent.send_keys" | "agent.release") {
-                crate::named::handle(&session, m, &params)
-            } else if m == "agent.report" {
-                crate::control::handle(&session, m, &params)
-            } else if m == "workspace.create" {
-                workspace_create(&session, &params)
-            } else if m == "workspace.remove" {
-                workspace_remove(&session, &params)
-            } else if m == "worktree.list" {
-                worktree_list(&params)
-            } else if m.starts_with("herdr.") {
-                // socket/process IO — never under the session lock
-                herdr_call(m, &params)
-            } else if m.starts_with("task.") {
-                crate::tasks::handle(&session, m, &params).map(crate::tasks::public)
-            } else if m.starts_with("inbox.") {
-                let mut s = lock(&session);
-                crate::inbox::handle(&mut s, m, &params)
-            } else {
-                let mut jobs = Vec::new();
-                let mut r = {
-                    let mut s = lock(&session);
-                    dispatch(&mut s, m, &params, conn_id, &tx, &mut attached, &mut jobs)
-                };
-                // PTY writes after the session lock drops — a child that
-                // stalls on input must not freeze other clients
-                for (t, bytes) in jobs {
-                    // every job is injected input — snap the view to the
-                    // live edge first so input never lands invisibly while
-                    // the pane is scrolled up
-                    lock(&t).scroll_to(0);
-                    if let Err(e) = term_write(&t, &bytes) { r = Err(e); break; }
-                }
-                r
-            };
-            match res {
-                Ok(res) => {
-                    if let Some(id) = id {
-                        let _ = tx.send(json!({"id": id, "result": res}));
-                    }
-                }
-                Err(e) => {
-                    if let Some(id) = id {
-                        let _ = tx.send(json!({"id": id, "error": e}));
-                    }
+        let Some(m) = msg.get("method").and_then(Value::as_str) else { continue };
+        let id = msg.get("id").cloned();
+        let params = msg.get("params").cloned().unwrap_or(json!({}));
+        // Anything that talks to herdr or git runs without the session lock:
+        // one slow herdr call must not wedge every other client.
+        let res = if m == "session.snapshot" {
+            session_snapshot(&session)
+        } else if m == "project.create" {
+            project_create(&session, &params)
+        } else if m == "project.close" {
+            project_close(&session, &params)
+        } else if m == "workspace.create" {
+            workspace_create(&session, &params)
+        } else if m == "workspace.remove" {
+            workspace_remove(&session, &params)
+        } else if m == "workspace.rename" {
+            workspace_rename(&session, &params)
+        } else if m == "worktree.list" {
+            worktree_list(&params)
+        } else if m.starts_with("herdr.") {
+            herdr_call(m, &params)
+        } else if m.starts_with("task.") {
+            crate::tasks::handle(&session, m, &params).map(crate::tasks::public)
+        } else if m.starts_with("inbox.") {
+            let mut s = lock(&session);
+            crate::inbox::handle(&mut s, m, &params)
+        } else {
+            let mut s = lock(&session);
+            dispatch(&mut s, m, &params, &tx)
+        };
+        match res {
+            Ok(res) => {
+                if let Some(id) = id {
+                    let _ = tx.send(json!({"id": id, "result": res}));
                 }
             }
-        } else if let Some(t) = msg.get("type").and_then(Value::as_str) {
-            let _ = term_command(&session, t, &msg, conn_id, &mut attached);
+            Err(e) => {
+                if let Some(id) = id {
+                    let _ = tx.send(json!({"id": id, "error": e}));
+                }
+            }
         }
     }
-    // connection dropped — detach from any terminal
+    // connection dropped — forget its event subscription
     let mut s = lock(&session);
     s.event_subs.retain(|out| !Arc::ptr_eq(&out.queued, &tx.queued));
-    if let Some(tid) = attached {
-        if let Ok(t) = s.get_terminal(&tid) {
-            lock(&t).unsubscribe(conn_id);
-        }
-    }
 }
 
-/// Write bytes to a terminal's PTY input. The term lock is held only long
-/// enough to clone the writer handle — a child that stops draining input
-/// stalls this write but never the renderer or the session.
-pub(crate) fn term_write(t: &Arc<Mutex<PtyTerm>>, bytes: &[u8]) -> Result<(), String> {
-    let writer = lock(t).writer();
-    let mut w = lock(&writer);
-    {
-        let mut g = lock(t);
-        if g.maintenance { return Err("workspace removal in progress".into()); }
-        g.input_seq = g.input_seq.wrapping_add(1);
-        g.history_reading = false;
-    }
-    w.write_all(bytes).and_then(|_| w.flush()).map_err(|e| format!("pty_write_failed: {e}"))
-}
-
-fn dispatch(
-    s: &mut Session,
-    method: &str,
-    p: &Value,
-    conn_id: u64,
-    tx: &ClientSender,
-    attached: &mut Option<String>,
-    jobs: &mut Vec<(Arc<Mutex<PtyTerm>>, Vec<u8>)>,
-) -> Result<Value, String> {
+/// Lock-held, IO-free methods.
+fn dispatch(s: &mut Session, method: &str, p: &Value, tx: &ClientSender) -> Result<Value, String> {
     let str_of = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("");
+    let opt = |k: &str| {
+        let v = str_of(k).to_string();
+        if v.is_empty() { None } else { Some(v) }
+    };
     match method {
         "session.status" => {
             let exe = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok());
@@ -253,26 +212,29 @@ fn dispatch(
             Ok(json!({
                 "running": true,
                 "version": env!("CARGO_PKG_VERSION"),
-                "capabilities": ["agent.lifecycle.v1", "task.v1", "agent.names.v1", "pane.context.v1", "inbox.v1", "agent.busy_prompt.v1", "agent.history.v1", "server.restart.v1", "server.stop_if_empty.v1"],
+                "capabilities": ["herdr.overlay.v1", "task.v1", "inbox.v1", "server.restart.v1", "server.stop_if_empty.v1"],
                 "exe": exe.map(|p| p.to_string_lossy().to_string()),
                 "pid": std::process::id(),
                 "started_at": *STARTED_AT,
                 "binary_updated": binary_updated,
-                "terms": s.terminals.len(),
+                "herdr": {
+                    "session": herdr::session_name(),
+                    "bridge_connected": herdr::bridge_connected(),
+                },
+                "workspaces": s.workspaces.len(),
                 "projects": s.projects.len(),
             }))
         }
-        "session.snapshot" => Ok(s.snapshot()),
         "session.persist" => {
             s.persist()?;
             Ok(json!({"ok": true}))
         }
         "server.stop_if_empty" => {
-            // Deliberately close the connection without a reply: exit while
-            // holding the session lock, so no concurrent terminal creation
-            // can slip between the emptiness check and process exit.
-            if !s.terminals.is_empty() || !s.removing_workspaces.is_empty() {
-                return Err("daemon_has_terminals: manual restart required".into());
+            // herdr keeps the panes alive; "empty" here means no removal
+            // pipeline is mid-flight. Exit while holding the lock so nothing
+            // slips between the check and the exit.
+            if !s.removing_workspaces.is_empty() {
+                return Err("daemon_busy: worktree removal in progress".into());
             }
             s.persist()?;
             std::process::exit(0);
@@ -287,12 +249,6 @@ fn dispatch(
             Ok(json!({"ok": true}))
         }
 
-        "project.create" => {
-            let cwd = str_of("cwd");
-            let label = p.get("label").and_then(Value::as_str).map(String::from);
-            let group = str_of("group_id");
-            s.create_project(cwd, label, if group.is_empty() { None } else { Some(group) })
-        }
         "project.list" => Ok(json!(
             s.projects.keys().map(|id| s.project_json(id)).collect::<Vec<_>>()
         )),
@@ -307,32 +263,22 @@ fn dispatch(
         }
         "project.rename" => {
             let id = str_of("project_id");
-            let label = str_of("label").to_string();
+            let label = opt("label");
             let proj = s
                 .projects
                 .get_mut(id)
                 .ok_or_else(|| format!("no project {id}"))?;
-            proj.label = if label.is_empty() { None } else { Some(label) };
-            Ok(json!({"ok": true}))
-        }
-        "project.close" => {
-            s.close_project(str_of("project_id"))?;
+            proj.label = label;
+            s.broadcast_event("project.updated", json!({"project_id": id}));
             Ok(json!({"ok": true}))
         }
 
-        "group.create" => {
-            let label = p.get("label").and_then(Value::as_str).map(String::from);
-            Ok(s.create_group(label))
-        }
+        "group.create" => Ok(s.create_group(opt("label"))),
         "group.list" => Ok(json!(
             s.groups.iter().map(|g| s.group_json(g)).collect::<Vec<_>>()
         )),
         "group.rename" => {
-            let label = str_of("label").to_string();
-            s.rename_group(
-                str_of("group_id"),
-                if label.is_empty() { None } else { Some(label) },
-            )?;
+            s.rename_group(str_of("group_id"), opt("label"))?;
             Ok(json!({"ok": true}))
         }
         "group.remove" => {
@@ -340,227 +286,15 @@ fn dispatch(
             Ok(json!({"ok": true}))
         }
         "group.assign" => {
-            let group = str_of("group_id");
-            s.assign_project(
-                str_of("project_id"),
-                if group.is_empty() { None } else { Some(group) },
-            )?;
-            Ok(json!({"ok": true}))
-        }
-
-        // New pane. Placement by ancestry: `tab_id` appends a pane to that
-        // tab (split row); `workspace_id` opens a fresh tab in the
-        // workspace; `project_id` opens a fresh tab in the project's main
-        // workspace.
-        "pane.get" => {
-            s.get_terminal(str_of("term_id"))?;
-            Ok(s.terminal_json(str_of("term_id")))
-        }
-        "pane.split" => {
-            let caller = s.get_terminal(str_of("term_id"))?;
-            let (tab, _, _) = s.term_parents(str_of("term_id"));
-            let tab = tab.ok_or("caller has no tab")?;
-            let (cwd, cols, rows, kind) = {
-                let caller = lock(&caller);
-                let cwd = if str_of("cwd").is_empty() { caller.cwd.clone() } else { str_of("cwd").to_string() };
-                (cwd, caller.cols(), caller.rows(), caller.kind.clone())
-            };
-            let t = s.create_terminal(&tab, &cwd, "", None, &kind, cols, rows)?;
-            let tid = lock(&t).id.clone();
-            Ok(json!({"pane": s.terminal_json(&tid)}))
-        }
-        "terminal.create" => {
-            let tab_id = str_of("tab_id").to_string();
-            let workspace_id = str_of("workspace_id").to_string();
-            let project_id = str_of("project_id").to_string();
-            let command = str_of("command").to_string();
-            let label = p.get("label").and_then(Value::as_str).map(String::from);
-            let cols = p.get("cols").and_then(Value::as_u64).unwrap_or(80) as usize;
-            let rows = p.get("rows").and_then(Value::as_u64).unwrap_or(24) as usize;
-            crate::term::validate_size(cols, rows)?;
-            // resolve the target tab — open a fresh one when the caller
-            // named a workspace or project instead of a tab
-            let tid = if !tab_id.is_empty() {
-                tab_id
-            } else {
-                let ws_id = if !workspace_id.is_empty() {
-                    workspace_id
-                } else {
-                    let pid = if project_id.is_empty() {
-                        return Err(
-                            "terminal.create needs tab_id, workspace_id, or project_id".into(),
-                        );
-                    } else {
-                        project_id
-                    };
-                    s.main_workspace(&pid)
-                        .map(|w| w.id.clone())
-                        .ok_or_else(|| format!("project {pid} has no workspace"))?
-                };
-                s.create_tab(&ws_id, label.clone(), &command)?
-                    .get("tab_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .ok_or("tab.create returned no tab_id")?
-            };
-            if str_of("tab_id").is_empty() {
-                // the fresh tab already carries its first pane
-                let pid = s
-                    .tabs
-                    .get(&tid)
-                    .and_then(|t| t.panes.first().cloned())
-                    .ok_or("new tab has no pane")?;
-                let term = s.get_terminal(&pid)?;
-                lock(&term).resize(cols, rows)?;
-                return Ok(s.terminal_json(&pid));
-            }
-            let dir = {
-                let cwd = str_of("cwd");
-                if cwd.is_empty() {
-                    s.tabs
-                        .get(&tid)
-                        .and_then(|t| s.workspaces.get(&t.workspace_id))
-                        .map(|w| w.path.clone())
-                        .unwrap_or_else(|| ".".into())
-                } else {
-                    cwd.to_string()
-                }
-            };
-            let kind = s
-                .tabs
-                .get(&tid)
-                .and_then(|t| s.workspaces.get(&t.workspace_id))
-                .map(|w| if w.is_main { "plain" } else { "worktree" })
-                .unwrap_or("plain")
-                .to_string();
-            let t = s.create_terminal(&tid, &dir, &command, label, &kind, cols, rows)?;
-            let term_id = lock(&t).id.clone();
-            Ok(s.terminal_json(&term_id))
-        }
-        "terminal.list" => Ok(json!(
-            s.terminals.keys().map(|id| s.terminal_json(id)).collect::<Vec<_>>()
-        )),
-        "terminal.close" => {
-            s.close_terminal(str_of("term_id"))?;
-            Ok(json!({"ok": true}))
-        }
-        "terminal.input" => {
-            let t = s.get_terminal(str_of("term_id"))?;
-            lock(&t).user_scrolled = false;
-            jobs.push((t, str_of("text").as_bytes().to_vec()));
-            Ok(json!({"ok": true}))
-        }
-        "terminal.send_keys" => {
-            let t = s.get_terminal(str_of("term_id"))?;
-            let keys = p
-                .get("keys")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let mut out = String::new();
-            for k in keys.iter().filter_map(Value::as_str) {
-                out.push_str(match k {
-                    "enter" | "return" => "\r",
-                    "tab" => "\t",
-                    "escape" | "esc" => "\x1b",
-                    "backspace" => "\x7f",
-                    "space" => " ",
-                    "up" => "\x1bOA",
-                    "down" => "\x1bOB",
-                    "right" => "\x1bOC",
-                    "left" => "\x1bOD",
-                    other => other,
-                });
-            }
-            jobs.push((t, out.into_bytes()));
-            Ok(json!({"ok": true}))
-        }
-        "terminal.read" => {
-            let t = s.get_terminal(str_of("term_id"))?;
-            let lines = p.get("lines").and_then(Value::as_u64).unwrap_or(40) as usize;
-            Ok(json!({"text": lock(&t).screen_text(lines)}))
-        }
-        "terminal.resize" => {
-            let t = s.get_terminal(str_of("term_id"))?;
-            let cols = p.get("cols").and_then(Value::as_u64).unwrap_or(80) as usize;
-            let rows = p.get("rows").and_then(Value::as_u64).unwrap_or(24) as usize;
-            lock(&t).resize(cols, rows)?;
-            Ok(json!({"ok": true}))
-        }
-        "terminal.attach" => {
-            let id = str_of("term_id").to_string();
-            let t = s.get_terminal(&id)?;
-            let cols = p.get("cols").and_then(Value::as_u64).unwrap_or(80) as usize;
-            let rows = p.get("rows").and_then(Value::as_u64).unwrap_or(24) as usize;
-            {
-                let mut g = lock(&t);
-                g.resize(cols, rows)?;
-            }
-            if let Some(old) = attached.take() {
-                if let Ok(old) = s.get_terminal(&old) { lock(&old).unsubscribe(conn_id); }
-            }
-            {
-                let mut g = lock(&t);
-                g.subscribe(conn_id, tx.clone());
-            }
-            *attached = Some(id.clone());
-            Ok(json!({"attached": id}))
-        }
-        "terminal.detach" => {
-            if let Some(id) = attached.take() {
-                if let Ok(t) = s.get_terminal(&id) {
-                    lock(&t).unsubscribe(conn_id);
-                }
-            }
+            let group = opt("group_id");
+            s.assign_project(str_of("project_id"), group.as_deref())?;
             Ok(json!({"ok": true}))
         }
 
         "workspace.list" => Ok(json!(
             s.workspaces.keys().map(|id| s.workspace_json(id)).collect::<Vec<_>>()
         )),
-        "workspace.rename" => {
-            let id = str_of("workspace_id");
-            let label = str_of("label").to_string();
-            let ws = s
-                .workspaces
-                .get_mut(id)
-                .ok_or_else(|| format!("no workspace {id}"))?;
-            ws.label = if label.is_empty() { None } else { Some(label) };
-            s.broadcast_event("workspace.updated", json!({"workspace_id": id}));
-            Ok(json!({"ok": true}))
-        }
-
-        "tab.create" => {
-            let ws = str_of("workspace_id");
-            if ws.is_empty() {
-                return Err("tab.create needs workspace_id".into());
-            }
-            let label = p.get("label").and_then(Value::as_str).map(String::from);
-            let command = str_of("command");
-            s.create_tab(ws, label, command)
-        }
-        "tab.list" => Ok(json!(
-            s.tabs.keys().map(|id| s.tab_json(id)).collect::<Vec<_>>()
-        )),
-        "tab.close" => {
-            s.close_tab(str_of("tab_id"))?;
-            Ok(json!({"ok": true}))
-        }
-
-
-        "agent.specs" => {
-            let reg = crate::agent::AgentRegistry::load();
-            let specs: serde_json::Map<String, Value> = reg
-                .specs
-                .iter()
-                .map(|(n, sp)| (n.clone(), json!({"kind": sp.kind, "args": sp.args})))
-                .collect();
-            Ok(json!({
-                "default": reg.default,
-                "specs": Value::Object(specs),
-                "config": crate::state::agents_path(),
-            }))
-        }
+        "agent.specs" => Ok(crate::specs::AgentRegistry::load().json()),
         "events.subscribe" => {
             s.event_subs.retain(|out| !Arc::ptr_eq(&out.queued, &tx.queued));
             s.event_subs.push(tx.clone());
@@ -571,138 +305,141 @@ fn dispatch(
     }
 }
 
-/// Commands on an attached connection (control stream, no method envelope).
-/// The session lock is held only to resolve the terminal — term locks and
-/// PTY writes happen after it drops, so control traffic can't stall API
-/// clients.
-fn term_command(
-    session: &Shared,
-    ty: &str,
-    msg: &Value,
-    conn_id: u64,
-    attached: &mut Option<String>,
-) -> Result<(), String> {
-    let tid = attached.clone().or_else(|| {
-        msg.get("term_id").and_then(Value::as_str).map(String::from)
-    });
-    let tid = tid.ok_or("no attached terminal")?;
-    let t = lock(session).get_terminal(&tid)?;
-    match ty {
-        "input" => {
-            lock(&t).user_scrolled = false;
-            lock(&t).scroll_to(0);
-            term_write(&t, msg.get("text").and_then(Value::as_str).unwrap_or("").as_bytes())?;
-        }
-        "input_b64" => {
-            lock(&t).user_scrolled = false;
-            if let Some(b) = msg.get("bytes").and_then(Value::as_str) {
-                let bytes = base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    b,
-                )
-                .unwrap_or_default();
-                lock(&t).scroll_to(0);
-                term_write(&t, &bytes)?;
-            }
-        }
-        "resize" => {
-            let cols = msg.get("cols").and_then(Value::as_u64).unwrap_or(80) as usize;
-            let rows = msg.get("rows").and_then(Value::as_u64).unwrap_or(24) as usize;
-            lock(&t).resize(cols, rows)?;
-        }
-        "scroll" => {
-            {
-                let mut g = lock(&t);
-                g.user_scrolled = true;
-                g.input_seq = g.input_seq.wrapping_add(1);
-                g.history_reading = false;
-            }
-            let col = msg.get("column").and_then(Value::as_u64).unwrap_or(1) as u16;
-            let row = msg.get("row").and_then(Value::as_u64).unwrap_or(1) as u16;
-            let mods = msg.get("modifiers").and_then(Value::as_u64).unwrap_or(0) as u8;
-            let payload = {
-                let mut g = lock(&t);
-                if let Some(d) = msg.get("delta_px").and_then(Value::as_f64) {
-                    let cell = msg.get("cell_px").and_then(Value::as_f64).unwrap_or(14.0);
-                    g.scroll_px(d, cell, col, row, mods)
-                } else if let Some(d) = msg.get("delta_lines").and_then(Value::as_f64) {
-                    g.scroll_lines(d, col, row, mods)
-                } else if let Some(o) = msg.get("offset_from_bottom").and_then(Value::as_u64) {
-                    g.scroll_to(o as usize);
-                    None
-                } else {
-                    None
-                }
-            };
-            if let Some(bytes) = payload {
-                term_write(&t, &bytes)?;
-            }
-        }
-        "detach" => {
-            lock(&t).unsubscribe(conn_id);
-            *attached = None;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// POSIX single-quote escaping for one argv element — safe for arbitrary
-/// text (embedded quotes, newlines, utf-8). Commanders pass `args` arrays
-/// instead of hand-quoting a shell line inside JSON.
-pub(crate) fn shell_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "@%_+=:,./-".contains(c))
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shell_quote;
-
-    #[test]
-    fn shell_quote_cases() {
-        assert_eq!(shell_quote("--provider"), "--provider");
-        assert_eq!(shell_quote("gpt-5.6-luna"), "gpt-5.6-luna");
-        assert_eq!(
-            shell_quote("분석해줘. \"따옴표\"와 '작은따옴표'\n개행 포함"),
-            "'분석해줘. \"따옴표\"와 '\\''작은따옴표'\\''\n개행 포함'"
-        );
-        assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("a b"), "'a b'");
-    }
-}
-
-/// `workspace.create` — git worktree add + a workspace (tab + pane) under
-/// the repo's project. Params: repo (path) or project_id, branch, base?,
-/// label?, path? — default checkout is ~/.lazed/worktrees/<repo>/<branch-
-/// slug>; a taken dir or branch bumps both to a `-N` suffix (response
-/// carries the actual branch/checkout).
 /// `herdr.*` passthrough: `herdr.status` (adapter + server health),
-/// `herdr.snapshot`, and `herdr.call {method, params}` for anything else.
-/// The app uses status/snapshot; `call` is the escape hatch while Step B
-/// (herdr-backed terminals) lands and for debugging.
+/// `herdr.snapshot`, and `herdr.call {method, params}` for tab/pane control
+/// and anything else the app or a script needs from herdr.
 fn herdr_call(method: &str, p: &Value) -> Result<Value, String> {
     match method {
-        "herdr.status" => Ok(crate::herdr::status_json()),
-        "herdr.snapshot" => crate::herdr::snapshot(),
+        "herdr.status" => Ok(herdr::status_json()),
+        "herdr.snapshot" => herdr::snapshot(),
         "herdr.call" => {
             let inner = p
                 .get("method")
                 .and_then(Value::as_str)
                 .ok_or("herdr.call needs method")?;
             let params = p.get("params").cloned().unwrap_or_else(|| json!({}));
-            crate::herdr::call(inner, params)
+            herdr::call(inner, params)
         }
         other => Err(format!("unknown method {other}")),
     }
 }
 
+/// Fetch herdr's snapshot (no lock), reconcile annotations against it,
+/// adopt workspaces opened outside lazed, then build the merged snapshot.
+/// herdr down → degraded snapshot from annotations alone.
+fn session_snapshot(session: &Shared) -> Result<Value, String> {
+    let herdr_snap = herdr::snapshot().ok();
+    if let Some(h) = &herdr_snap {
+        reconcile(session, h);
+    }
+    Ok(lock(session).snapshot_json(herdr_snap.as_ref()))
+}
+
+/// Reconcile + adopt. git IO for unknown workspaces happens between the
+/// two lock scopes.
+pub(crate) fn reconcile(session: &Shared, herdr_snap: &Value) {
+    let unknown = lock(session).reconcile(herdr_snap);
+    if unknown.is_empty() {
+        return;
+    }
+    let resolved: Vec<_> = unknown
+        .into_iter()
+        .map(|(id, cwd)| {
+            let (root, key) = Session::resolve_repo(&cwd);
+            let branch = Session::detect_branch(&cwd);
+            (id, cwd, root, key, branch)
+        })
+        .collect();
+    let mut s = lock(session);
+    for (id, cwd, root, key, branch) in resolved {
+        if let Err(e) = s.adopt_workspace(&id, &cwd, &root, &key, branch) {
+            eprintln!("lazed: adopt {id}: {e}");
+        }
+    }
+}
+
+/// `project.create {cwd, label?, group_id?}` — file the repo as a project
+/// and open its main checkout as a herdr workspace. With herdr down the
+/// project is still registered (degraded); the workspace opens on the
+/// first snapshot after herdr is back, via adoption of whatever the user
+/// opens, or explicitly with another project.create.
+fn project_create(session: &Shared, p: &Value) -> Result<Value, String> {
+    let cwd = p.get("cwd").and_then(Value::as_str).ok_or("project.create needs cwd")?;
+    let label = p.get("label").and_then(Value::as_str).map(String::from);
+    let group = p.get("group_id").and_then(Value::as_str).filter(|g| !g.is_empty()).map(String::from);
+    let (repo_root, repo_key) = Session::resolve_repo(cwd);
+    let branch = Session::detect_branch(&repo_root);
+    let project_id = lock(session).ensure_project(&repo_root, &repo_key, label, group.as_deref())?;
+    let has_main = lock(session).main_workspace(&project_id).is_some();
+    let mut opened = Value::Null;
+    if !has_main {
+        match herdr::workspace_create(&repo_root, project_label(&repo_root).as_deref()) {
+            Ok((ws, tab, pane)) => {
+                let mut s = lock(session);
+                s.register_workspace(&ws, &project_id, &repo_root, None, branch, true)?;
+                opened = json!({"workspace_id": ws, "tab_id": tab, "pane_id": pane});
+            }
+            Err(e) if e.starts_with("herdr_not_running") || e.starts_with("herdr_not_installed") => {
+                opened = json!({"error": e});
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let s = lock(session);
+    Ok(json!({
+        "project": s.project_json(&project_id),
+        "workspace": s.main_workspace(&project_id).map(|w| s.workspace_json(&w.id)),
+        "opened": opened,
+    }))
+}
+
+fn project_label(repo_root: &str) -> Option<String> {
+    std::path::Path::new(repo_root)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+}
+
+/// `project.close` — drop the project and close its herdr workspaces
+/// (panes included). Checkouts on disk are untouched.
+fn project_close(session: &Shared, p: &Value) -> Result<Value, String> {
+    let id = p.get("project_id").and_then(Value::as_str).unwrap_or("");
+    let workspaces = lock(session).close_project(id)?;
+    let mut failed = Vec::new();
+    for ws in &workspaces {
+        if let Err(e) = herdr::call("workspace.close", json!({"workspace_id": ws})) {
+            failed.push(json!({"workspace_id": ws, "error": e}));
+        }
+    }
+    Ok(json!({"ok": true, "closed": workspaces, "herdr_failed": failed}))
+}
+
+/// `workspace.rename` — the label lives on both sides: herdr shows it in
+/// its TUI/tabs, lazed keeps it for degraded mode.
+fn workspace_rename(session: &Shared, p: &Value) -> Result<Value, String> {
+    let id = p.get("workspace_id").and_then(Value::as_str).unwrap_or("");
+    let label = p.get("label").and_then(Value::as_str).unwrap_or("").to_string();
+    {
+        let mut s = lock(session);
+        let ws = s
+            .workspaces
+            .get_mut(id)
+            .ok_or_else(|| format!("no workspace {id}"))?;
+        ws.label = if label.is_empty() { None } else { Some(label.clone()) };
+        s.broadcast_event("workspace.updated", json!({"workspace_id": id}));
+    }
+    if !label.is_empty() {
+        let _ = herdr::call("workspace.rename", json!({"workspace_id": id, "label": label}));
+    }
+    Ok(json!({"ok": true}))
+}
+
+/// `workspace.create` — git worktree add + open the checkout as a herdr
+/// workspace under the repo's project. Params: repo (path) or project_id,
+/// branch, base?, label?, path? — default checkout is
+/// ~/.lazed/worktrees/<repo>/<branch-slug>; a taken dir or branch bumps
+/// both to a `-N` suffix (response carries the actual branch/checkout).
+/// The result carries the herdr workspace/tab/pane ids — agents start
+/// with `herdr agent start … --pane <pane_id>`.
 fn workspace_create(session: &Shared, p: &Value) -> Result<Value, String> {
     let repo = p
         .get("repo")
@@ -796,39 +533,23 @@ fn workspace_create(session: &Shared, p: &Value) -> Result<Value, String> {
         ));
     }
 
-    // find (or implicitly create) the project owning this repo
-    let mut s = lock(session);
-    let project_id = s
-        .projects
-        .iter()
-        .find(|(_, x)| x.repo_key == repo_key)
-        .map(|(id, _)| id.clone())
-        .or_else(|| {
-            s.create_project(&repo_root, None, None)
-                .ok()
-                .and_then(|v| {
-                    v.get("project")
-                        .and_then(|x| x.get("project_id"))
-                        .and_then(Value::as_str)
-                        .map(String::from)
-                })
-        })
-        .ok_or("no project for repo")?;
+    // open the checkout in herdr — a failure here leaves the git worktree
+    // in place (the caller can open it later); never silently delete it
+    let checkout_str = checkout.to_string_lossy().to_string();
+    let ws_label = label.clone().unwrap_or_else(|| branch_name.clone());
+    let (ws, tab, pane) = herdr::workspace_create(&checkout_str, Some(&ws_label))
+        .map_err(|e| format!("worktree added at {checkout_str} but herdr could not open it: {e}"))?;
 
-    let ws = s.create_workspace(
-        &project_id,
-        &checkout.to_string_lossy(),
-        label,
-        Some(branch_name.clone()),
-        false,
-    )?;
+    let mut s = lock(session);
+    let project_id = s.ensure_project(&repo_root, &repo_key, None, None)?;
+    s.register_workspace(&ws, &project_id, &checkout_str, label, Some(branch_name.clone()), false)?;
     Ok(json!({
-        "checkout_path": checkout.to_string_lossy(),
+        "checkout_path": checkout_str,
         "branch": branch_name,
         "project_id": project_id,
-        "workspace_id": ws.get("workspace").and_then(|w| w.get("workspace_id")),
-        "tab_id": ws.get("tab_id"),
-        "terminal": ws.get("terminal"),
+        "workspace_id": ws,
+        "tab_id": tab,
+        "pane_id": pane,
         "base_commit": if strict { Some(&resolved_base) } else { None },
         "warnings": warnings,
     }))
@@ -1328,65 +1049,66 @@ fn remove_checkout(
 /// (project.close handles it). `kill_agents` is the caller's explicit
 /// authorization to kill panes that still host an agent process.
 fn workspace_remove(session: &Shared, p: &Value) -> Result<Value, String> {
-    let mut s = lock(session);
     let wid = p.get("workspace_id").and_then(Value::as_str).unwrap_or("");
     let force = p.get("force").and_then(Value::as_bool).unwrap_or(false);
     let kill_agents = p.get("kill_agents").and_then(Value::as_bool).unwrap_or(false);
     let keep_branch = p.get("keep_branch").and_then(Value::as_bool).unwrap_or(false);
-    let ws = s
-        .workspaces
-        .get(wid)
-        .ok_or_else(|| format!("no workspace {wid}"))?;
-    if ws.is_main {
-        return Err("cannot remove the main workspace — close the project instead".into());
-    }
-    let path = ws.path.clone();
-    let ws_branch = ws.branch.clone();
-    if s.removing_workspaces.contains(wid) { return Err("workspace removal in progress".into()); }
-    let mut terms = Vec::new();
-    // The project's git-common-dir reaches the worktree admin data even
-    // after the main checkout itself is deleted — `-C repo_root` would
-    // permanently fail in that case. repo_key may hold a plain path for
-    // non-repo projects; those never host worktree workspaces anyway.
-    let repo_key = s
-        .projects
-        .get(&ws.project_id)
-        .map(|x| x.repo_key.clone())
-        .filter(|k| !k.is_empty());
-    // A failed git remove must leave panes intact. Refuse live agents
-    // unless the caller explicitly authorized killing them — a settled
-    // screen is not proof that it is safe to kill the process.
-    for tab in &ws.tabs {
-        if let Some(tab) = s.tabs.get(tab) {
-            for tid in &tab.panes {
-                if let Ok(term) = s.get_terminal(tid) {
-                    let mut term = lock(&term);
-                    term.detect_agent();
-                    if !kill_agents && term.agent_kind.is_some() {
-                        return Err("workspace_has_agent: stop the agent explicitly before removal, or pass kill_agents/--kill-agents".into());
-                    }
-                    drop(term);
-                    terms.push(s.get_terminal(tid)?);
-                }
+    let (path, ws_branch, repo_key) = {
+        let mut s = lock(session);
+        let ws = s
+            .workspaces
+            .get(wid)
+            .ok_or_else(|| format!("no workspace {wid}"))?;
+        if ws.is_main {
+            return Err("cannot remove the main workspace — close the project instead".into());
+        }
+        if s.removing_workspaces.contains(wid) { return Err("workspace removal in progress".into()); }
+        // The project's git-common-dir reaches the worktree admin data even
+        // after the main checkout itself is deleted — `-C repo_root` would
+        // permanently fail in that case. repo_key may hold a plain path for
+        // non-repo projects; those never host worktree workspaces anyway.
+        let repo_key = s
+            .projects
+            .get(&ws.project_id)
+            .map(|x| x.repo_key.clone())
+            .filter(|k| !k.is_empty());
+        let out = (ws.path.clone(), ws.branch.clone(), repo_key);
+        s.removing_workspaces.insert(wid.to_owned());
+        out
+    };
+    let finish = |session: &Shared| { lock(session).removing_workspaces.remove(wid); };
+    // Refuse live agents unless the caller explicitly authorized killing
+    // them — herdr's agent list is the truth about who lives in the panes.
+    // herdr down → nothing to kill, panes are already gone with it.
+    match herdr::snapshot() {
+        Ok(snap) => {
+            let agents: Vec<String> = snap
+                .get("agents")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter(|x| x.get("workspace_id").and_then(Value::as_str) == Some(wid))
+                        .filter(|x| x.get("agent").is_some_and(|k| !k.is_null()))
+                        .filter_map(|x| x.get("pane_id").and_then(Value::as_str).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !agents.is_empty() && !kill_agents {
+                finish(session);
+                return Err(format!(
+                    "workspace_has_agent: panes {} host agents; stop them explicitly before removal, or pass kill_agents/--kill-agents",
+                    agents.join(", ")
+                ));
             }
         }
+        Err(e) if e.starts_with("herdr_not_running") || e.starts_with("herdr_not_installed") => {}
+        Err(e) => {
+            finish(session);
+            return Err(e);
+        }
     }
-    let controls: Vec<_> = terms.iter().map(|t| lock(t).agent_control.clone()).collect();
-    let _guards: Vec<_> = controls.iter().map(|c| c.try_lock().map_err(|_| "agent_control_busy"))
-        .collect::<Result<_, _>>()?;
-    let writers: Vec<_> = terms.iter().map(|t| lock(t).writer()).collect();
-    let _writers: Vec<_> = writers.iter().map(|w| w.try_lock().map_err(|_| "terminal_input_busy"))
-        .collect::<Result<_, _>>()?;
-    for t in &terms {
-        let mut g = lock(t);
-        g.detect_agent();
-        if !kill_agents && g.agent_kind.is_some() { return Err("workspace_has_agent".into()); }
-    }
-    s.removing_workspaces.insert(wid.to_owned());
-    for t in &terms { lock(t).maintenance = true; }
-    drop(s);
-    // A failed removal must leave panes intact — the workspace only closes
-    // after the checkout (and its git registration) is really gone.
+    // A failed removal must leave the herdr workspace intact — it only
+    // closes after the checkout (and its git registration) is really gone.
     let removal = remove_checkout(
         repo_key.as_deref(),
         &path,
@@ -1394,19 +1116,22 @@ fn workspace_remove(session: &Shared, p: &Value) -> Result<Value, String> {
         keep_branch,
         ws_branch.as_deref(),
     );
-    let mut s = lock(session);
-    s.removing_workspaces.remove(wid);
-    for t in &terms { lock(t).maintenance = false; }
+    finish(session);
     let mut result = removal?;
+    let herdr_close = herdr::call("workspace.close", json!({"workspace_id": wid}));
+    let mut s = lock(session);
     if s.workspaces.contains_key(wid) { s.close_workspace(wid)?; }
     result["ok"] = json!(true);
     result["removed"] = json!(path);
+    if let Err(e) = herdr_close {
+        result["herdr_close_error"] = json!(e);
+    }
     Ok(result)
 }
 
 fn worktree_list(p: &Value) -> Result<Value, String> {
     let out = std::process::Command::new("git")
-        .args(["-C", crate::control::str_of(p, "repo"), "worktree", "list", "--porcelain"])
+        .args(["-C", p.get("repo").and_then(Value::as_str).unwrap_or(""), "worktree", "list", "--porcelain"])
         .output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("git worktree list failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -1418,31 +1143,6 @@ fn worktree_list(p: &Value) -> Result<Value, String> {
 mod reliability_tests {
     use super::*;
     use std::io::Read;
-
-    #[test]
-    fn reattach_removes_old_and_duplicate_subscriptions() {
-        let mut session = Session::new();
-        let mut readers = Vec::new();
-        for id in ["t1", "t2"] {
-            let (term, reader) = PtyTerm::spawn(id, "/tmp", "", None, "plain", 80, 24, "w1").unwrap();
-            readers.push(reader);
-            session.terminals.insert(id.into(), Arc::new(Mutex::new(term)));
-        }
-        let (socket, _peer) = UnixStream::pair().unwrap();
-        let (tx, rx) = sync_channel(128);
-        let sender = ClientSender { tx, queued: Arc::new(AtomicUsize::new(0)), socket: Arc::new(socket) };
-        let mut attached = None;
-        for id in ["t1", "t2", "t2"] {
-            dispatch(&mut session, "terminal.attach", &json!({"term_id": id}), 1, &sender, &mut attached, &mut Vec::new()).unwrap();
-        }
-        while rx.try_recv().is_ok() {}
-        lock(&session.terminals["t1"]).emit_frame(true);
-        assert!(rx.try_recv().is_err());
-        lock(&session.terminals["t2"]).emit_frame(true);
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
-        for term in session.terminals.values() { lock(term).kill(); }
-    }
 
     #[test]
     fn full_outbox_disconnects_instead_of_growing() {
