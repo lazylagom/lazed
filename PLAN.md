@@ -1,4 +1,4 @@
-# Lazed — Product & Architecture Plan (v2)
+# Lazed — Product & Architecture Plan (v3)
 
 > herdr(런타임·도메인 모델 그대로 사용) + Tauri GUI(Orca UX 패턴)
 > 작성일: 2026-09-14 / 상태: draft v2.1 — **Phase 0-4 완료 + §7 백로그 대부분 처리**
@@ -6,6 +6,9 @@
 > - pane opaque ID(w1:p1…)는 서버 재시작 후에도 유지됨 (스냅샷 복원 시 동일 ID/cwd)
 > v1→v2 변경: 자체 데몬 재구현(Path A) 폐기 → herdr 바이너리를 런타임으로 사용(Path B).
 > laze 도메인 모델(Workspace/Action/Project) 폐기 → herdr의 workspace/tab/pane 그대로 사용.
+> v2→v3 변경 (2026-09-22): 2026-09-16 자체 데몬(Path A) 회귀로 코드가 herdr를 완전히 대체한 상태.
+> 이를 **Path C — 2-데몬 분리**로 재정의: herdr = 실행층(PTY·상태 감지·복원·원격), lazed 데몬 = 조직층
+> (트리·worktree·Inbox·Automations·Tasks·install). 서로 독립 실행, 같은 객체를 양쪽이 소유하지 않음. 상세 §3b.
 
 ---
 
@@ -59,6 +62,78 @@ worktree fan-out, diff 주석 회송, blocked 인박스. TUI prefix 키와의 �
 - **도메인 모델 = herdr 것 그대로**: workspace/tab/pane + agent 상태(blocked/working/done/idle/unknown). lazed 자체 store는 UI 설정, fan-out 그룹핑 메타 등 최소한만.
 - **데몬 생명주기**: herdr의 auto-detect-launch 패턴 — 앱 부팅 시 실행 중인 서버에 attach, 없으면 spawn. 앱 종료 = detach (에이전트 생존).
 - **진화 옵션 유지**: herdr 한계에 닿으면 `RuntimeClient` 구현체만 자체 데몬(v1 계획의 lazedd)으로 교체 가능하도록 경계 유지. v1 문서의 Phase 1-3이 그 설계 초안.
+
+---
+
+## 3b. v3 목표 아키텍처 — Path C: 2-데몬 분리
+
+### 배경
+
+- v2(Path B)는 herdr를 유일한 런타임으로 썼고 §7의 herdr 번들·socket API 전환·원격 attach까지 구현됨.
+- 2026-09-16 `77a6636`부터 자체 데몬(Path A)으로 회귀 — `daemon/` ~7,700줄이 PTY·세션·상태 감지까지 전부 재구현하고,
+  그 위에 5일간 GTD Inbox·Automations·Tasks·데몬 자체 업데이트·worktree 제거 파이프라인이 쌓임.
+  이 시점에서 herdr 코드(`fetch-herdr`, `check_herdr_schema.py`, `perf_stream.py`, `NOTICE`)는 실행되지 않는 잔재가 됨.
+- 회귀 결과 herdr에만 있는 기능 3개를 잃음: **매니페스트 기반 22종 상태 감지**(현재 `agent.rs`는 claude/codex 화면 패턴 매칭),
+  **네이티브 세션 복원**(`claude --resume`), **원격 SSH attach**(데몬에 ssh 코드 없음).
+- 반대로 lazed 데몬에만 있는 기능도 있음: Inbox/Automations/Tasks, group>project 조직 트리, worktree 제거 파이프라인, install/update.
+- 결론: 어느 한쪽으로 몰지 않고 **층으로 자른다.** herdr는 업스트림 그대로(패치 없음), lazed 데몬은 터미널 바이트를 만지지 않는다.
+
+### 역할 분류
+
+| 층 | 소유자 | 내용 |
+|---|---|---|
+| **실행층** — 터미널 안에서 벌어지는 일 | **herdr** | PTY, 프레임 스트림, pane 상태 감지(22종), 네이티브 세션 복원, 원격 SSH attach, herdr 자체 workspace/tab/pane |
+| **조직층** — 터미널을 어디에 배치하고 무엇을 시킬지 | **lazed 데몬** | group > project > workspace > tab 트리, 네임드 에이전트, worktree 생성·fan-out·제거 파이프라인, GTD Inbox, Automations, Tasks, 알림, install/update |
+| **표현층** | **lazed 앱** | 사이드바·xterm 렌더·모달. 조직 정보는 lazed 소켓에서, 터미널 바이트는 herdr 스트림에서 |
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ lazed 앱 (Tauri v2 — React + xterm.js)                    │
+│  조직 트리·Inbox·Automations UI      xterm 렌더·입력       │
+└──────────┬───────────────────────────────────┬───────────┘
+           │ lazed socket                      │ herdr terminal session control
+           │ (group/project/workspace/tab,     │ (NDJSON ANSI 프레임 — v2 파이프라인 부활)
+           │  inbox/automation/task, worktree) │
+┌──────────▼──────────────────┐   ┌────────────▼───────────────┐
+│ lazed 데몬 (조직층)          │   │ herdr server (실행층)       │
+│  tab.terminal = herdr pane  │──▶│  PTY·상태 감지·복원·원격     │
+│  id 참조만                   │◀──│  events.subscribe           │
+│  Inbox/Automations/Tasks     │   │  (pane 상태 → lazed 트리거)  │
+└─────────────────────────────┘   └────────────┬───────────────┘
+   각자 소켓, 각자 생명주기, 서로 스폰하지 않음        PTY → claude / codex / shell …
+```
+
+### 경계 규칙
+
+1. **lazed 데몬은 PTY 바이트를 만지지 않는다.** terminal 노드는 `herdr_pane_id` 하나로만 pane을 참조. 프레임·입력·리사이즈는 앱↔herdr 직결.
+2. **herdr는 group/project/inbox/automation의 존재를 모른다.** 업스트림 바이너리 그대로, 고정 버전 번들(`fetch-herdr`, `EXPECTED_HERDR_VERSION`).
+3. **pane 상태의 진실은 herdr.** lazed 데몬은 `events.subscribe`로 구독해 Inbox/알림/Tasks를 파생시킬 뿐, 상태를 자체 판정하지 않는다.
+4. **서로 스폰하지 않는다.** 앱이 부팅 시 두 데몬을 각각 auto-detect-launch. 어느 쪽이 죽어도 다른 쪽은 계속 동작.
+5. **어댑터 경계 복원.** herdr 접촉은 lazed 데몬의 `herdr.rs`(이벤트 구독·snapshot reconcile·pane 생성 위임)와 앱의 스트림 클라이언트 두 곳에만 존재. 프론트가 herdr API를 직접 부르는 것은 스트림 채널 하나로 한정.
+
+### 독립 동작의 정의
+
+- **herdr 없이 lazed**: 앱·사이드바·Inbox·Automations·Tasks·worktree 관리 정상. 터미널 영역만 "herdr 미설치/미실행" 안내. 유효한 degraded mode.
+- **lazed 없이 herdr**: 업스트림 그대로. 별도 터미널에서 `herdr` TUI로 같은 세션 attach 가능 (§1의 멀티 클라이언트 전제 유지).
+
+### 코드 영향
+
+| 구분 | 대상 |
+|---|---|
+| **lazed 데몬에서 제거** (~1,700줄) | `term.rs`, `render.rs`, `terminal_protocol.rs`(자체 PTY 경로), `agent.rs`의 화면 패턴 매칭. `session.rs`의 terminal 노드 → `{herdr_pane_id, …}` 참조로 축소 |
+| **lazed 데몬에 추가** | `herdr.rs`: herdr socket 클라이언트 + `events.subscribe` 구독 + 재연결 시 `api snapshot` reconcile + pane 생성/종료 위임. 기존 `working→idle ⇒ done` 승격 로직은 herdr 이벤트 위에서 유지 |
+| **앱에 추가/부활** | herdr `terminal session control` 스트림 클라이언트 (v2 §3 데이터面). 두 데몬 auto-detect-launch. herdr 미실행 시 터미널 영역 placeholder |
+| **되살아나는 파일** | `scripts/fetch-herdr`, `NOTICE`, `scripts/check_herdr_schema.py`, `scripts/perf_stream.py`, `Makefile` `fetch-herdr`/`schema-check`/`perf`, `tauri.bundle.json`에 `bin/herdr` 재추가 |
+| **유지** | `install.rs`(lazed CLI 링크 + `HERDR_LEFTOVERS` 안내), `inbox.rs`, `tasks.rs`, `control.rs`, `cli.rs`, `named.rs`, `history.rs`, `server.rs`의 조직층 API |
+
+### 리스크
+
+| 항목 | 메모 |
+|---|---|
+| 이벤트 유실 | herdr 재시작·소켓 단절 시 lazed가 blocked 전이를 놓침 → 재연결 시 `api snapshot` 기준 **전체 reconcile 필수**. `check_herdr_schema.py`가 의존 필드 검증 담당 |
+| pane id 네임스페이스 | herdr 세션이 여럿(로컬+원격)이면 `w1:p1` 충돌 — lazed 쪽 참조는 `{session, pane_id}` 쌍으로 저장 (§7 동시 멀티 원격 항목과 동일 경고) |
+| 회귀 이유 재발 | 9/16 Path A 회귀의 원인이 저장소에 기록되어 있지 않음. herdr 프레임 스트림을 다시 쓰기 전에 원인을 확인하고 이 표에 추가할 것 (후보: 한글 IME `0a7587f`, pane 색상 `b327442`, 성능 `84926f8`) |
+| 두 데몬 버전 어긋남 | lazed 업데이트(`install.rs` 자체 업데이트)와 herdr 핀 버전이 독립 → 부팅 시 `compat_warning()` 재검사 유지 |
 
 ---
 
@@ -186,6 +261,16 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 ---
 
 ## 7. 오픈 이슈 & 다음 작업
+
+### v3 마이그레이션 (Path C)
+
+- [ ] **회귀 원인 확인** — 9/16 Path A 회귀 이유를 §3b 리스크 표에 기록. herdr 스트림 재사용 전 재발 방지 항목 확정.
+- [ ] **herdr 어댑터** — `daemon/src/herdr.rs`: socket 클라이언트, `events.subscribe`, 재연결 reconcile(`api snapshot`), pane 생성/종료 위임. `agent.rs` 패턴 매칭 → herdr 상태 이벤트로 교체(done 승격 로직 유지).
+- [ ] **세션 모델 축소** — `session.rs` terminal 노드를 `{session, herdr_pane_id}` 참조로. session.json 마이그레이션(`#[serde(default)]`).
+- [ ] **자체 PTY 제거** — `term.rs`/`render.rs`/`terminal_protocol.rs` 삭제, `server.rs`의 터미널 스트림 메서드 제거.
+- [ ] **앱 스트림 클라이언트 부활** — v2 `terminal session control` 파이프라인. 두 데몬 auto-detect-launch, herdr 부재 시 placeholder.
+- [ ] **빌드/번들 복구** — `dist` = `stage-lazed` + `fetch-herdr`, `tauri.bundle.json`에 `bin/herdr`, `NOTICE`·About 표기 사실 확인.
+- [ ] **검증** — `check_herdr_schema.py` 통과, `perf_stream.py` 재측정, herdr kill → lazed degraded mode → 재기동 후 reconcile 확인.
 
 ### 검증
 
