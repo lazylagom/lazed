@@ -379,6 +379,16 @@ body,
   color: var(--text-4);
 }
 
+.agent-icon {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  mask-size: contain;
+  mask-position: center;
+  mask-repeat: no-repeat;
+}
+
 .side-pane.focused .side-ico,
 .side-tab-head.active .side-ico,
 .side-ws-head.focused .side-ico {

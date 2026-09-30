@@ -1,7 +1,6 @@
 import {
   ArrowDown01Icon,
   ArrowRight01Icon,
-  BotIcon,
   Delete01Icon,
   Folder01Icon,
   FolderPlusIcon,
@@ -12,11 +11,11 @@ import {
   PencilEdit01Icon,
   PlusIcon,
   SparklesIcon,
-  TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
+import { AgentIcon } from "../components/AgentIcon";
 import type {
   AgentStatus,
   GroupInfo,
@@ -119,12 +118,7 @@ function PaneRow({
         title={t.cwd ?? undefined}
       >
         <span className={`dot ${t.agent_status ?? "unknown"}`} />
-        <HugeiconsIcon
-          icon={t.agent ? BotIcon : TerminalIcon}
-          size={12}
-          strokeWidth={1.5}
-          className="side-ico"
-        />
+        <AgentIcon agent={t.agent ?? t.display_agent} />
         <span className={`side-ws-name ${statusClass(t.agent_status)}`}>
           {name}
         </span>
