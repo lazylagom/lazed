@@ -87,10 +87,14 @@ herdr agent start <name> --kind <kind> --pane <pane-id>
 **Prompt.** One message containing, in this order:
 
 1. The stage role paragraph from `crew.md`.
-2. `Goal: <the user's request>`
-3. `Inputs:` the result files of all earlier stages, as absolute paths.
+2. `Do this stage yourself in this pane. Do not spawn subagents or
+   background agents.` — the crew already gives each stage its own agent
+   in a visible tab; hidden subagents duplicate that and return summaries
+   instead of first-hand reads.
+3. `Goal: <the user's request>`
+4. `Inputs:` the result files of all earlier stages, as absolute paths.
    Pass paths only, never paste their contents or terminal output.
-4. `Write your complete result to <absolute result path>. The first line
+5. `Write your complete result to <absolute result path>. The first line
    must be exactly "verdict: pass" or "verdict: fail". Then reply "done".`
 
 ```sh
