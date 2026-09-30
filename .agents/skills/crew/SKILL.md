@@ -43,28 +43,57 @@ herdr agent get "$HERDR_PANE_ID"    # use the agent kind it reports
 If a named kind is not installed (`command -v <kind>` fails), tell the user
 before starting and ask which kind to use instead.
 
-## 1. Confirm the run
+## 1. Pick the checkout
+
+Run the crew where the work already is, when it is somewhere. Check from
+the orchestrator's cwd:
+
+```sh
+top=$(git rev-parse --show-toplevel)
+branch=$(git branch --show-current)
+linked=$([ "$(git rev-parse --path-format=absolute --git-dir)" != \
+           "$(git rev-parse --path-format=absolute --git-common-dir)" ] && echo yes)
+default=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+```
+
+If `default` is empty, treat `main` and `master` as default.
+
+- **Reuse** when `linked` is `yes` (a worktree the user made), or when
+  `branch` is set and is not the default branch. The checkout is `top`, the
+  branch is `branch`, and the workspace is `$HERDR_WORKSPACE_ID`.
+- **New worktree** otherwise: on the default branch, or on a detached HEAD
+  in the main checkout.
+
+## 2. Confirm the run
 
 Pick a short slug from the goal (`[a-z0-9-]`, at most 16 chars). Show the
-user, in one short message: the goal, branch `crew/<slug>`, and the stage
-list with resolved kinds and gates. Start only after they agree.
+user, in one short message: the goal, the checkout choice, and the stage
+list with resolved kinds and gates. For the checkout choice, say one of:
 
-## 2. Worktree and handoff directory
+- **Reuse:** "in the current checkout `<top>` on `<branch>`". Add that the
+  coding stage edits this checkout, so the user should not edit it while
+  the crew runs.
+- **New worktree:** "new worktree on branch `crew/<slug>`". Add that
+  uncommitted changes are not copied, if `git status --porcelain` is
+  non-empty.
+
+Start only after they agree. If they ask for the other choice, use it.
+
+**New worktree.** Create it after the user agrees:
 
 ```sh
 herdr worktree create --cwd "$PWD" --branch crew/<slug> --label crew-<slug> --no-focus
 ```
 
 From the JSON take the workspace ID, the root pane ID and the checkout path.
-Uncommitted changes in the source checkout are not copied — mention it if
-`git status --porcelain` is non-empty.
 
-Results go to `<checkout>/.crew/<slug>/NN-<stage-id>.md` (NN = 01, 02, … in
-stage order). Keep them out of commits:
+**Handoff directory.** Results go to `<checkout>/.crew/<slug>/NN-<stage-id>.md`
+(NN = 01, 02, … in stage order). Keep them out of commits:
 
 ```sh
 mkdir -p <checkout>/.crew/<slug>
-echo '.crew/' >> "$(git -C <checkout> rev-parse --git-common-dir)/info/exclude"
+ex="$(git -C <checkout> rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+grep -qxF '.crew/' "$ex" 2>/dev/null || echo '.crew/' >> "$ex"
 ```
 
 ## 3. Run each stage
@@ -73,8 +102,10 @@ echo '.crew/' >> "$(git -C <checkout> rev-parse --git-common-dir)/info/exclude"
 `parallel` group. The stages of a group share one tab, split side by side,
 so the user can watch them together.
 
-- The first step uses the worktree's root pane. Every later step gets a new
-  tab, labelled with the stage id, or with the group name for a group:
+- With a new worktree, the first step uses its root pane. Every other step
+  gets a new tab. When reusing the checkout, every step gets a new tab,
+  because the workspace's panes belong to the user and to you. Label the
+  tab with the stage id, or with the group name for a group:
 
   ```sh
   herdr tab create --workspace <ws> --cwd <checkout> --label <stage-id|group> --no-focus
