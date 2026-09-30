@@ -627,6 +627,19 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            // Initialize before any notification can take the library's
+            // fallback path, which asks AppleScript to find "use_default".
+            #[cfg(target_os = "macos")]
+            {
+                let identifier = if tauri::is_dev() {
+                    "com.apple.Terminal"
+                } else {
+                    &app.config().identifier
+                };
+                if let Err(err) = notify_rust::set_application(identifier) {
+                    eprintln!("[lazed] notification sender initialization failed: {err}");
+                }
+            }
             // Prefer a bundled lazed binary when the package ships one
             // (bundle.resources → src-tauri/bin/lazed). Dev runs register
             // nothing → PATH lookup finds ~/.local/bin/lazed.
