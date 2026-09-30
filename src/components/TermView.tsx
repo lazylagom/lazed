@@ -377,6 +377,7 @@ export const TermView = memo(function TermView({
   return (
     <div
       className={`pane-cell ${focused ? "focused" : ""}`}
+      data-agent-status={term.agent_status ?? "unknown"}
       onMouseDown={() => onFocus(term.pane_id)}
       role="presentation"
     >

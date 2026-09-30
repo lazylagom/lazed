@@ -908,8 +908,37 @@ body,
 }
 
 .pane-cell.focused {
-  border-color: rgb(var(--accent) / 0.55);
-  box-shadow: 0 0 0 1px rgb(var(--accent) / 0.55);
+  box-shadow: 0 0 0 1px rgb(var(--accent) / 0.8);
+}
+
+.pane-cell[data-agent-status="working"] {
+  --pane-status: var(--blue);
+}
+
+.pane-cell[data-agent-status="blocked"] {
+  --pane-status: var(--orange);
+}
+
+.pane-cell[data-agent-status="done"] {
+  --pane-status: var(--green);
+}
+
+.pane-cell:is(
+    [data-agent-status="working"],
+    [data-agent-status="blocked"],
+    [data-agent-status="done"]
+  ) {
+  border-color: rgb(var(--pane-status) / 0.55);
+  --pane-label-color: rgb(var(--pane-status));
+  --pane-header-tint: rgb(var(--pane-status) / 0.08);
+}
+
+.pane-cell[data-agent-status="idle"] {
+  --pane-label-color: var(--text-3);
+}
+
+.pane-cell[data-agent-status="unknown"] {
+  --pane-label-color: var(--text-4);
 }
 
 .pane-header {
@@ -919,7 +948,10 @@ body,
   padding: 4px 10px;
   font-size: 11px;
   color: var(--text-3);
-  background: var(--bg-1);
+  background: linear-gradient(
+      var(--pane-header-tint, transparent),
+      var(--pane-header-tint, transparent)
+    ), var(--bg-1);
   border-bottom: 1px solid var(--line);
   user-select: none;
 }
@@ -956,7 +988,7 @@ body,
 
 .pane-label {
   font-weight: 600;
-  color: var(--text-2);
+  color: var(--pane-label-color, var(--text-2));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
