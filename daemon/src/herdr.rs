@@ -159,36 +159,74 @@ pub fn parse_response(line: &str) -> Result<Value, String> {
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
 
-fn call_once(method: &str, params: &Value) -> Result<Value, String> {
-    let mut sock = connect()?;
-    let _ = sock.set_read_timeout(Some(Duration::from_secs(30)));
-    let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
+enum CallError {
+    Connection(String),
+    Uncertain(String),
+    Remote(String),
+}
+
+fn read_only(method: &str) -> bool {
+    matches!(method, "session.snapshot" | "session.status" | "workspace.list" | "workspace.get"
+        | "tab.list" | "tab.get" | "pane.list" | "pane.get" | "pane.read"
+        | "agent.list" | "agent.get" | "agent.read" | "agent.wait" | "worktree.list")
+}
+
+fn request_timeout(method: &str, params: &Value) -> Duration {
+    if method == "agent.wait" {
+        Duration::from_millis(params["timeout_ms"].as_u64().unwrap_or(30_000).saturating_add(5_000))
+    } else if method == "agent.start" {
+        Duration::from_secs(45)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
+fn exchange(mut sock: UnixStream, method: &str, params: &Value) -> Result<Value, CallError> {
+    sock.set_read_timeout(Some(request_timeout(method, params)))
+        .and_then(|_| sock.set_write_timeout(Some(Duration::from_secs(5))))
+        .map_err(|e| CallError::Connection(e.to_string()))?;
     let req = json!({"id": format!("lazed:{method}"), "method": method, "params": params});
-    sock.write_all(serde_json::to_string(&req).map_err(|e| e.to_string())?.as_bytes())
+    sock.write_all(serde_json::to_string(&req).map_err(|e| CallError::Remote(e.to_string()))?.as_bytes())
         .and_then(|_| sock.write_all(b"\n"))
         .and_then(|_| sock.flush())
         .map_err(|e| {
-            forget_socket();
-            format!("herdr_not_running: write failed: {e}")
+            CallError::Uncertain(format!("write failed: {e}"))
         })?;
     let mut line = String::new();
     BufReader::new(sock)
         .read_line(&mut line)
-        .map_err(|e| format!("herdr_not_running: read failed: {e}"))?;
+        .map_err(|e| CallError::Uncertain(format!("read failed: {e}")))?;
     if line.trim().is_empty() {
-        return Err("herdr_not_running: server closed the connection without a response".into());
+        return Err(CallError::Uncertain("server closed the connection without a response".into()));
     }
-    parse_response(&line)
+    parse_response(&line).map_err(CallError::Remote)
 }
 
-/// One herdr API call. A transport failure re-resolves the socket (the
-/// server may have restarted on a new path) and retries once; a server
-/// `error` response is returned as-is.
-pub fn call(method: &str, params: Value) -> Result<Value, String> {
-    match call_once(method, &params) {
-        Err(e) if e.starts_with("herdr_not_running") => call_once(method, &params),
-        r => r,
+fn call_with(method: &str, mut attempt: impl FnMut() -> Result<Value, CallError>) -> Result<Value, String> {
+    let mut result = attempt();
+    if matches!(result, Err(CallError::Connection(_) | CallError::Uncertain(_))) {
+        forget_socket();
+        if read_only(method) {
+            result = attempt();
+        }
     }
+    result.map_err(|e| match e {
+        CallError::Connection(e) => format!("herdr_not_running: {e}"),
+        CallError::Uncertain(e) => {
+            forget_socket();
+            format!("herdr_submission_uncertain: {e}; inspect state before retrying")
+        }
+        CallError::Remote(e) => e,
+    })
+}
+
+/// Only reads can be replayed after a transport failure. A request id is
+/// correlation metadata, not a server-side idempotency guarantee.
+pub fn call(method: &str, params: Value) -> Result<Value, String> {
+    call_with(method, || {
+        let sock = connect().map_err(CallError::Connection)?;
+        exchange(sock, method, &params)
+    })
 }
 
 /// `session.snapshot` → the inner `snapshot` object
@@ -278,6 +316,37 @@ fn str_at(v: &Value, pointer: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| format!("herdr_bad_response: missing {pointer} in {v}"))
+}
+
+// ---------------------------------------------------------------------------
+// worktree primitives — the checkout lifecycle is herdr's; lazed calls it
+// only from task.start and keeps no checkout code of its own. Removal and
+// listing are invoked by callers straight through `herdr.call`.
+
+/// `worktree.create` — git worktree add + open as a herdr workspace, in one
+/// herdr call. herdr picks the checkout location; lazed records what came
+/// back. Returns (workspace_id, tab_id, pane_id, checkout_path).
+pub fn worktree_create(
+    cwd: &str,
+    branch: &str,
+    base: Option<&str>,
+    label: Option<&str>,
+) -> Result<(String, String, String, String), String> {
+    let r = call(
+        "worktree.create",
+        json!({"cwd": cwd, "branch": branch, "base": base, "label": label}),
+    )?;
+    let checkout = r
+        .pointer("/worktree/checkout_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("herdr_bad_response: missing worktree path in {r}"))?
+        .to_string();
+    Ok((
+        str_at(&r, "/workspace/workspace_id")?,
+        str_at(&r, "/tab/tab_id")?,
+        str_at(&r, "/root_pane/pane_id")?,
+        checkout,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -529,4 +598,43 @@ mod tests {
         let flag = session_flag();
         assert!(flag.is_empty() || (flag.len() == 2 && flag[0] == "--session"));
     }
+}
+#[cfg(test)]
+mod reliability_regressions {
+    use super::*;
+    #[test]
+    fn lost_mutation_response_is_never_replayed() {
+        let mut calls = 0;
+        let result = call_with("agent.prompt", || {
+            calls += 1;
+            let (client, peer) = UnixStream::pair().unwrap();
+            let server = std::thread::spawn(move || {
+                let mut line = String::new();
+                BufReader::new(peer).read_line(&mut line).unwrap();
+                assert!(line.contains("agent.prompt"));
+                // Received the submission, then lost the reply.
+            });
+            let reply = exchange(client, "agent.prompt", &json!({"text": "once"}));
+            server.join().unwrap();
+            reply
+        });
+        assert_eq!(calls, 1);
+        assert!(result.unwrap_err().starts_with("herdr_submission_uncertain"));
+    }
+
+    #[test]
+    fn lost_read_response_can_be_retried_but_server_refusal_cannot() {
+        let mut calls = 0;
+        let result = call_with("session.snapshot", || {
+            calls += 1;
+            if calls == 1 { Err(CallError::Uncertain("EOF".into())) } else { Ok(json!({"panes": []})) }
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+        calls = 0;
+        let result = call_with("session.snapshot", || { calls += 1; Err(CallError::Remote("denied".into())) });
+        assert_eq!(result.unwrap_err(), "denied");
+        assert_eq!(calls, 1);
+    }
+
 }

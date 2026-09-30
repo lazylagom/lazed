@@ -8,11 +8,10 @@
 //! doesn't already define — ambient env always wins).
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -27,52 +26,10 @@ static LOGIN_ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 /// Spawn `cmd` with a deadline. stdout/stderr are drained on threads so a
 /// noisy command can't deadlock against a full pipe.
 pub fn capture(cmd: &mut Command, timeout_secs: u64) -> Result<String, String> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout
-            .as_mut()
-            .map(|o| o.read_to_string(&mut s));
-        s
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr
-            .as_mut()
-            .map(|o| o.read_to_string(&mut s));
-        s
-    });
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {
-                if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = out_t.join();
-                    let _ = err_t.join();
-                    return Err(format!("timed out after {timeout_secs}s"));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = out_t.join();
-                let _ = err_t.join();
-                return Err(format!("wait failed: {e}"));
-            }
-        }
-    };
-    let out = out_t.join().unwrap_or_default();
-    let err = err_t.join().unwrap_or_default();
+    let output = crate::process::capture(cmd, Duration::from_secs(timeout_secs), 8 * 1024 * 1024, 1024 * 1024)?;
+    let status = output.status;
+    let out = String::from_utf8_lossy(&output.stdout).into_owned();
+    let err = String::from_utf8_lossy(&output.stderr);
     if status.success() {
         Ok(out)
     } else {

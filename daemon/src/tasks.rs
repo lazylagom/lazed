@@ -278,40 +278,27 @@ fn start(session: &Shared, p: &Value) -> Result<Value, String> {
     } else {
         str_of(p, "branch").to_owned()
     };
-    git(&repo, &["check-ref-format", "--branch", &branch])?;
-    if git(
-        &repo,
-        &["show-ref", "--verify", &format!("refs/heads/{branch}")],
-    )
-    .is_ok()
-    {
-        return Err("branch_already_exists".into());
-    }
-    let checkout = crate::state::worktrees_dir().join(id);
-    if checkout.exists() {
-        return Err("task_checkout_already_exists".into());
-    }
-    // herdr must be reachable before any git side effect — a worktree
-    // nobody can open is a mess the caller would have to clean up by hand
+    // herdr must be reachable before the record's first side effect —
+    // a worktree nobody can open is a mess the caller would have to
+    // clean up by hand. The checkout itself is herdr's job: the
+    // `worktree.create` call below runs `git worktree add` and opens the
+    // workspace in one shot (herdr picks the checkout location).
     herdr::snapshot()?;
     let mut record = json!({"schema": 2, "task_id": id, "request_id": id, "request": p, "boot_id": boot(),
         "phase": "creating", "repo": repo, "base_commit": commit, "branch": branch,
-        "checkout_path": checkout, "agent_params": {"kind": kind, "args": args},
+        "agent_params": {"kind": kind, "args": args},
         "agent_name": agent_name(id),
         "text": text, "messages": {}, "verified": false,
         "warnings": if dirty { vec!["uncommitted source changes are excluded"] } else { vec![] }});
     save(&record)?; // durable intent before any Git/process side effect
     let result = (|| {
-        std::fs::create_dir_all(crate::state::worktrees_dir()).map_err(|e| e.to_string())?;
-        let checkout_str = checkout.to_str().ok_or("non-UTF8 checkout")?.to_string();
-        git(&repo, &["worktree", "add", "-b", &branch, &checkout_str, &commit])?;
-        // open the checkout in herdr, then file it under the repo's project.
-        // Git and herdr are deliberately outside the session lock.
-        let (ws, tab, pane) = herdr::workspace_create(&checkout_str, Some(&branch))?;
+        let (ws, tab, pane, checkout) =
+            herdr::worktree_create(&repo, &branch, Some(&commit), Some(&branch))?;
         let (repo_root, repo_key) = Session::resolve_repo(&repo);
         let mut s = lock(session);
         let project_id = s.ensure_project(&repo_root, &repo_key, None, None)?;
-        s.register_workspace(&ws, &project_id, &checkout_str, None, Some(branch.clone()), false)?;
+        s.register_workspace(&ws, &project_id, &checkout, None, Some(branch.clone()), false)?;
+        record["checkout_path"] = json!(checkout);
         record["project_id"] = json!(project_id);
         record["workspace_id"] = json!(ws);
         record["tab_id"] = json!(tab);
@@ -412,18 +399,27 @@ fn status(mut record: Value) -> Value {
     if matches!(str_of(&record, "phase"), "creating" | "launching" | "failed") {
         return record;
     }
-    match herdr::call("agent.get", json!({"target": record["agent_name"]})) {
+    let observed = herdr::call("agent.get", json!({"target": record["agent_name"]}));
+    observe(record, observed)
+}
+
+fn observe(mut record: Value, observed: Result<Value, String>) -> Value {
+    match observed {
         Ok(observed) => {
             if matches!(
                 str_of(&record, "phase"),
-                "running" | "settled" | "blocked" | "unknown" | "submission_uncertain"
+                "running" | "settled" | "blocked" | "unknown"
             ) {
-                record["phase"] = json!(match str_of(&observed, "agent_status") {
+                record["phase"] = if record.pointer("/receipt/accepted") == Some(&Value::Bool(true)) {
+                    json!(match str_of(&observed, "agent_status") {
                     "working" => "running",
                     "idle" | "done" => "settled",
                     "blocked" => "blocked",
                     _ => "unknown",
-                });
+                    })
+                } else {
+                    json!("submission_uncertain")
+                };
             } else if record["phase"] == "awaiting_ready"
                 && matches!(str_of(&observed, "agent_status"), "idle" | "done")
                 && observed["launch_pending"] != true
@@ -433,8 +429,10 @@ fn status(mut record: Value) -> Value {
             record["agent"] = observed;
         }
         Err(error) => {
-            record["phase"] = json!("interrupted");
-            record["error"] = json!(error);
+            if record["phase"] != "submission_uncertain" {
+                record["phase"] = json!("interrupted");
+                record["error"] = json!(error);
+            }
         }
     }
     record
@@ -621,4 +619,26 @@ fn cli_run(args: &[String]) -> Result<Value, String> {
         return Err("daemon_upgrade_required: running daemon lacks task.v1; finish active panes before restarting (do not stop it automatically)".into());
     }
     crate::api_call(&format!("task.{command}"), params)
+}
+#[cfg(test)]
+mod reliability_regressions {
+    use super::*;
+    #[test]
+    fn uncertain_submission_never_becomes_settled_from_idle() {
+        let record = json!({"phase": "submission_uncertain", "receipt": null, "error": "agent_not_ready"});
+        for agent_status in ["idle", "done", "working", "blocked"] {
+            let observed = observe(record.clone(), Ok(json!({"agent_status": agent_status})));
+            assert_eq!(observed["phase"], "submission_uncertain");
+            assert_eq!(observed["error"], "agent_not_ready");
+        }
+        assert_eq!(observe(record, Err("connection lost".into()))["phase"], "submission_uncertain");
+    }
+
+    #[test]
+    fn accepted_submission_can_settle_but_legacy_missing_receipt_cannot() {
+        let idle = Ok(json!({"agent_status": "idle"}));
+        assert_eq!(observe(json!({"phase": "running", "receipt": {"accepted": true}}), idle.clone())["phase"], "settled");
+        assert_eq!(observe(json!({"phase": "running", "receipt": null}), idle)["phase"], "submission_uncertain");
+    }
+
 }

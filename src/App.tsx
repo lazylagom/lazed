@@ -1,4 +1,8 @@
-import { ArrowShrinkIcon } from "@hugeicons/core-free-icons";
+import {
+  ArrowShrinkIcon,
+  File01Icon,
+  SidebarRightIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -8,19 +12,24 @@ import {
   isPermissionGranted,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ComponentProps,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { deferred } from "./components/Deferred";
 import { TermGrid } from "./components/TermGrid";
 import { AgentPicker } from "./features/AgentPicker";
-import { AutomationEditor } from "./features/AutomationEditor";
-import { Automations } from "./features/Automations";
 import { DaemonUpdate } from "./features/DaemonUpdate";
-import { DiffView } from "./features/DiffView";
 import { Fanout, type FanoutRequest } from "./features/Fanout";
+import { FilesPanel } from "./features/FilesPanel";
 import { ImportProject } from "./features/ImportProject";
 import { NewWorktree, type NewWorktreeRequest } from "./features/NewWorktree";
 import { PromptBar, type PromptTarget } from "./features/PromptBar";
-import { Session } from "./features/Session";
-import { type Section, Settings } from "./features/Settings";
+import type { Section } from "./features/Settings";
 import {
   type Automation,
   type AutomationInput,
@@ -30,20 +39,62 @@ import { type InboxItem, inbox } from "./shared/inbox";
 import {
   type AgentStatus,
   type DoctorReport,
+  type FsGit,
   type LazedEvent,
   type PaneInfo,
   type Snapshot,
   type WorkspaceInfo,
   lazed,
-  normalize,
   subscribeEvents,
 } from "./shared/lazed";
 import { notificationsEnabled } from "./shared/settings";
 import { safeUnlisten } from "./shared/unlisten";
+import { useSessionSnapshot } from "./shared/use-session-snapshot";
 import { InboxPanel } from "./widgets/Inbox";
 import { InboxView } from "./widgets/InboxView";
 import { Rail, type RailView } from "./widgets/Rail";
 import { Sidebar } from "./widgets/Sidebar";
+
+const AutomationEditor = deferred<
+  ComponentProps<typeof import("./features/AutomationEditor").AutomationEditor>
+>(() =>
+  import("./features/AutomationEditor").then((module) => ({
+    default: module.AutomationEditor,
+  })),
+);
+const Automations = deferred<
+  ComponentProps<typeof import("./features/Automations").Automations>
+>(() =>
+  import("./features/Automations").then((module) => ({
+    default: module.Automations,
+  })),
+);
+const DiffView = deferred<
+  ComponentProps<typeof import("./features/DiffView").DiffView>
+>(() =>
+  import("./features/DiffView").then((module) => ({
+    default: module.DiffView,
+  })),
+);
+const FileView = deferred<
+  ComponentProps<typeof import("./features/FileView").FileView>
+>(() =>
+  import("./features/FileView").then((module) => ({
+    default: module.FileView,
+  })),
+);
+const Session = deferred<
+  ComponentProps<typeof import("./features/Session").Session>
+>(() =>
+  import("./features/Session").then((module) => ({ default: module.Session })),
+);
+const Settings = deferred<
+  ComponentProps<typeof import("./features/Settings").Settings>
+>(() =>
+  import("./features/Settings").then((module) => ({
+    default: module.Settings,
+  })),
+);
 
 // event names that mean "the model changed — refetch the snapshot". lazed
 // emits its organization events; herdr's structural events arrive through
@@ -127,18 +178,25 @@ function basename(p?: string | null) {
  * or bypass approval/readiness rules with a second orchestration recipe. */
 function orchestratorPreamble(projectId: string, repoRoot: string): string {
   return [
-    "You orchestrate this project. The `lazed` skill (on top of the `herdr` skill) describes how to orchestrate other terminals — read them if not already loaded.",
+    "You orchestrate this project. The `herdr` skill (`herdr --skill`) describes how to orchestrate other terminals — read it if not already loaded.",
     `Repo root: ${repoRoot}. lazed project id: ${projectId}. Your own herdr pane id is in $HERDR_PANE.`,
     "Use named agents through `herdr agent start/prompt/get/read/wait`. Agent start uses an existing pane and does not choose layout; `herdr pane split --current` makes one.",
-    "Default to a sibling pane in the caller's current checkout and preserve focus. Create a worktree (`lazed worktree create`) only when the user requests isolation or a separate branch/worktree.",
+    "Default to a sibling pane in the caller's current checkout and preserve focus. Create a worktree (`herdr worktree create`) only when the user requests isolation or a separate branch/worktree.",
     "Use `herdr agent prompt NAME TEXT --wait` to wait for a settled state. Read output and verify changes; a settled response is not proof that tests passed.",
     "Inspect trust, login, or permission dialogs and ask the user when approval is required. Never blindly approve, resend an uncertain prompt, merge, or delete workspaces.",
   ].join("\n");
 }
 
 export function App() {
-  const [snap, setSnap] = useState<Snapshot | null>(null);
+  const {
+    snap,
+    patch: setSnap,
+    loadSnapshot,
+    invalidateSnapshot,
+  } = useSessionSnapshot();
   const [error, setError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const statusError = error ?? connectionError;
   const [focusedTermId, setFocusedTermId] = useState<string | null>(null);
   const [focusedWsId, setFocusedWsId] = useState<string | null>(null);
   // pane zoom (⇧⌘Enter) — the focused pane fills the whole workspace area
@@ -154,16 +212,30 @@ export function App() {
   const [showSession, setShowSession] = useState(false);
   const [showAutos, setShowAutos] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  // right-side files panel — the active workspace's checkout tree
+  const [showFiles, setShowFiles] = useState(
+    () => localStorage.getItem("lazed-files") === "1",
+  );
+  // file tabs live in the workspace's tab strip (Orca-style) but are
+  // lazed-owned surfaces — herdr never learns their ids. Scoped to the
+  // checkout root they were opened from: tabs whose root no longer
+  // matches are ignored at render (and restored if it comes back)
+  const [fileTabs, setFileTabs] = useState<{
+    root: string;
+    files: { path: string; git?: FsGit | null; root: string }[];
+    active: string | null;
+  } | null>(null);
   // project id whose "new worktree" (⌘N) sheet is open
   const [newWtProjectId, setNewWtProjectId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // non-null while `lazed doctor` reports missing/broken install links
   const [installReport, setInstallReport] = useState<DoctorReport | null>(null);
-  // left-rail space switch — projects or the GTD inbox; automations and
-  // session are full-screen overlays
-  const [railView, setRailView] = useState<RailView>(() =>
-    localStorage.getItem("lazed-rail") === "inbox" ? "inbox" : "projects",
-  );
+  // left-rail space switch — projects or the GTD inbox;
+  // automations and session are full-screen overlays
+  const [railView, setRailView] = useState<RailView>(() => {
+    const v = localStorage.getItem("lazed-rail");
+    return v === "inbox" ? v : "projects";
+  });
   const [autos, setAutos] = useState<Automation[]>([]);
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
   const [inboxErr, setInboxErr] = useState<string | null>(null);
@@ -197,6 +269,13 @@ export function App() {
     setShowSettings((v) => (s === "settings" ? !v : false));
   }, []);
 
+  const toggleFiles = useCallback(() => {
+    setShowFiles((v) => {
+      localStorage.setItem("lazed-files", v ? "0" : "1");
+      return !v;
+    });
+  }, []);
+
   const loadAutos = useCallback(() => {
     automations
       .list()
@@ -227,7 +306,7 @@ export function App() {
       .then((r) => {
         if (r.ok) {
           setInstallReport(null);
-          flash("lazed CLI + agent skills installed");
+          flash("lazed CLI installed");
         } else {
           setInstallReport(r);
           setError("install incomplete — run `lazed doctor` in a terminal");
@@ -237,11 +316,10 @@ export function App() {
   }, [flash]);
 
   const refresh = useCallback(() => {
-    lazed
-      .snapshot()
-      .then((s) => setSnap(normalize(s)))
-      .catch((e) => setError(String(e)));
-  }, []);
+    loadSnapshot()
+      .then(() => setConnectionError(null))
+      .catch((e) => setConnectionError(String(e)));
+  }, [loadSnapshot]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimer.current !== null) return;
@@ -252,22 +330,26 @@ export function App() {
   }, [refresh]);
 
   useEffect(() => {
+    let disposed = false;
     lazed
       .bootstrap()
       .then((res) => {
-        if (res.snapshot) setSnap(normalize(res.snapshot));
-        else refresh();
+        if (disposed) return;
+        refresh();
         if (res.herdr_error) setError(`herdr: ${res.herdr_error}`);
       })
-      .catch((e) => setError(String(e)));
-    // onboarding: offer `lazed install` when the CLI/skill links are absent
+      .catch((e) => setConnectionError(String(e)));
+    // onboarding: offer `lazed install` when the CLI link is absent
     lazed
       .installStatus()
-      .then((r) => setInstallReport(r.ok ? null : r))
+      .then((r) => {
+        if (!disposed) setInstallReport(r.ok ? null : r);
+      })
       .catch(() => {});
     loadAutos();
     loadInbox();
     subscribeEvents((ev: LazedEvent) => {
+      if (disposed) return;
       const name = ev.event ?? ev.type ?? "";
       if (!name) return;
       if (name === "automation.updated") {
@@ -357,9 +439,29 @@ export function App() {
         }
         return;
       }
-      if (REFRESH_EVENTS.has(name)) scheduleRefresh();
-    }).catch((e) => setError(String(e)));
-  }, [refresh, scheduleRefresh, loadAutos, loadInbox]);
+      if (REFRESH_EVENTS.has(name)) {
+        invalidateSnapshot();
+        scheduleRefresh();
+      }
+    }).catch((e) => {
+      if (!disposed) setError(String(e));
+    });
+    return () => {
+      disposed = true;
+      if (refreshTimer.current !== null)
+        window.clearTimeout(refreshTimer.current);
+      refreshTimer.current = null;
+      if (noticeTimer.current !== null)
+        window.clearTimeout(noticeTimer.current);
+    };
+  }, [
+    refresh,
+    scheduleRefresh,
+    loadAutos,
+    loadInbox,
+    setSnap,
+    invalidateSnapshot,
+  ]);
 
   // while the inbox view is open, poll so expired snoozes resurface even
   // without an inbox.updated event (the daemon flips them lazily on list)
@@ -483,6 +585,57 @@ export function App() {
     [panesOf, activeWorkspace],
   );
 
+  // the files panel/file tabs root — the active checkout, falling back to
+  // the focused pane's cwd or the project root (local paths only)
+  const filesRoot =
+    activeWorkspace?.path ??
+    (focusedInWs?.foreground_cwd || focusedInWs?.cwd) ??
+    focusedProject?.repo_root;
+
+  const shownTabs = fileTabs && fileTabs.root === filesRoot ? fileTabs : null;
+  const openFiles = shownTabs?.files ?? [];
+  const activeFile = shownTabs?.active ?? null;
+
+  const openFile = useCallback(
+    (path: string, git?: FsGit | null, root = filesRoot ?? "") => {
+      setFileTabs((prev) => {
+        const base =
+          prev && filesRoot && prev.root === filesRoot
+            ? prev
+            : { root: filesRoot ?? "", files: [], active: null };
+        return {
+          ...base,
+          files: base.files.some((f) => f.path === path)
+            ? base.files
+            : [...base.files, { path, git, root }],
+          active: path,
+        };
+      });
+    },
+    [filesRoot],
+  );
+
+  const closeFile = useCallback((path: string) => {
+    setFileTabs((prev) => {
+      if (!prev) return prev;
+      const files = prev.files.filter((f) => f.path !== path);
+      return {
+        ...prev,
+        files,
+        active:
+          prev.active === path
+            ? (files[files.length - 1]?.path ?? null)
+            : prev.active,
+      };
+    });
+  }, []);
+
+  const showFile = useCallback(
+    (path: string | null) =>
+      setFileTabs((prev) => (prev ? { ...prev, active: path } : prev)),
+    [],
+  );
+
   // sidebar display order — grouped sections first (members in group
   // order), then ungrouped projects; ⌘N targets this order
   const sidebarProjectIds = useMemo(() => {
@@ -551,10 +704,13 @@ export function App() {
   const selectTab = useCallback(
     (tabId: string) => {
       setZoomed(false);
+      // a herdr tab pick puts terminals back in front — the file view
+      // stays open as a tab but is no longer the shown surface
+      showFile(null);
       const panes = tabById.get(tabId)?.panes ?? [];
       setFocusedTermId(panes[0] ?? null);
     },
-    [tabById],
+    [tabById, showFile],
   );
 
   const focusProject = useCallback(
@@ -592,8 +748,10 @@ export function App() {
       setFocusedTermId(paneId);
       setZoomed(false);
       setInboxOpen(false);
+      // a jump must land somewhere visible — the inbox view hides the grid
+      selectRail("projects");
     },
-    [termsById, wsById],
+    [termsById, wsById, selectRail],
   );
 
   // notification click → raise the window and jump to that terminal
@@ -644,70 +802,90 @@ export function App() {
     [closeTerm],
   );
 
-  /** close a whole workspace — kills its tabs/panes; linked checkouts get
-   * `git worktree remove`d by the daemon. Refusals get an explicit
-   * escalation: agents need killAgents consent, a dirty checkout needs
-   * force. */
-  const removeWorkspace = useCallback(
-    async (ws: WorkspaceInfo, killAgents: boolean) => {
-      const clearFocus = () =>
-        setFocusedWsId((cur) => (cur === ws.workspace_id ? null : cur));
-      let force = false;
-      let kill = killAgents;
-      for (;;) {
-        try {
-          await lazed.workspaceRemove(ws.workspace_id, force, kill);
-          clearFocus();
-          return;
-        } catch (e) {
-          const msg = String(e);
-          if (!kill && msg.includes("workspace_has_agent")) {
-            kill = await ask(
-              "An agent is still running in this workspace. Kill it and remove the workspace?",
-              {
-                title: "Remove Workspace",
-                kind: "warning",
-                okLabel: "Kill & Remove",
-                cancelLabel: "Cancel",
-              },
-            ).catch(() => false);
-            if (kill) continue;
-          } else if (
-            !force &&
-            (msg.includes("use --force") ||
-              msg.includes("modified or untracked"))
-          ) {
-            force = await ask(
-              `"${ws.path}" has modified or untracked files. Force-remove the checkout anyway? Uncommitted work will be lost.`,
-              {
-                title: "Force Remove Workspace",
-                kind: "warning",
-                okLabel: "Force Remove",
-                cancelLabel: "Cancel",
-              },
-            ).catch(() => false);
-            if (force) continue;
-          } else {
-            setError(msg);
-          }
-          return;
+  /** close a whole workspace — herdr `worktree.remove` kills its
+   * tabs/panes and deletes the linked checkout, then the branch the
+   * worktree held is deleted too (herdr leaves it behind). A
+   * dirty-checkout refusal escalates to an explicit force consent, which
+   * also force-deletes the branch; an unmerged branch on an otherwise
+   * clean removal asks once more. */
+  const removeWorkspace = useCallback(async (ws: WorkspaceInfo) => {
+    const clearFocus = () =>
+      setFocusedWsId((cur) => (cur === ws.workspace_id ? null : cur));
+    let force = false;
+    for (;;) {
+      try {
+        await lazed.herdrCall("worktree.remove", {
+          workspace_id: ws.workspace_id,
+          force,
+        });
+        clearFocus();
+        break;
+      } catch (e) {
+        const msg = String(e);
+        if (
+          !force &&
+          (msg.includes("use --force") || msg.includes("modified or untracked"))
+        ) {
+          force = await ask(
+            `"${ws.path}" has modified or untracked files. Force-remove the checkout anyway? Uncommitted work will be lost.`,
+            {
+              title: "Force Remove Workspace",
+              kind: "warning",
+              okLabel: "Force Remove",
+              cancelLabel: "Cancel",
+            },
+          ).catch(() => false);
+          if (force) continue;
+        } else {
+          setError(msg);
         }
+        return;
       }
-    },
-    [],
-  );
+    }
+    const branch = ws.branch;
+    const repo = ws.project_id
+      ? snapRef.current?.projects.find((p) => p.project_id === ws.project_id)
+          ?.repo_root
+      : undefined;
+    if (ws.is_main || !branch || !repo) return;
+    const gone = await lazed
+      .branchDelete(repo, branch, force)
+      .catch((e) => ({ ok: false, output: String(e) }));
+    if (gone.ok) return;
+    if (!force && gone.output.includes("not fully merged")) {
+      const del = await ask(
+        `Branch "${branch}" isn't fully merged. Delete it anyway?`,
+        {
+          title: "Delete Branch",
+          kind: "warning",
+          okLabel: "Delete Branch",
+          cancelLabel: "Keep Branch",
+        },
+      ).catch(() => false);
+      if (!del) return;
+      const retry = await lazed
+        .branchDelete(repo, branch, true)
+        .catch((e) => ({ ok: false, output: String(e) }));
+      if (retry.ok) return;
+      setError(`worktree removed; branch delete failed: ${retry.output}`);
+      return;
+    }
+    setError(`worktree removed; branch kept: ${gone.output}`);
+  }, []);
 
   /** Focus a newly created terminal once it is present in the model. */
-  const focusCreatedTerm = useCallback(async (paneId: string | undefined) => {
-    if (!paneId) return;
-    // Publish the new model and selection together. Selecting an ID before
-    // it exists in the snapshot falls back to the first pane, whose DOM
-    // focus event can overwrite the requested selection.
-    const next = await lazed.snapshot();
-    setSnap(normalize(next));
-    setFocusedTermId(paneId);
-    setZoomed(false);
-  }, []);
+  const focusCreatedTerm = useCallback(
+    async (paneId: string | undefined) => {
+      if (!paneId) return;
+      // Publish the new model and selection together. Selecting an ID before
+      // it exists in the snapshot falls back to the first pane, whose DOM
+      // focus event can overwrite the requested selection.
+      await loadSnapshot();
+      setFocusedTermId(paneId);
+      setZoomed(false);
+    },
+    [loadSnapshot],
+  );
 
   /** ⌘D — split next to the focused pane of the active tab (or open the
    * workspace's first tab when it has none). */
@@ -743,7 +921,7 @@ export function App() {
           // one project per repo: focus instead of duplicating
           const repo = await lazed.resolveRepo(cwd).catch(() => null);
           if (repo?.repo_key) {
-            const live = await lazed.snapshot().catch(() => null);
+            const live = await loadSnapshot().catch(() => null);
             const existing = live?.projects.find(
               (p) => p.repo_key === repo.repo_key,
             );
@@ -771,30 +949,40 @@ export function App() {
         setError(String(e));
       }
     },
-    [focusProject, flash, focusCreatedTerm],
+    [focusProject, flash, focusCreatedTerm, loadSnapshot],
   );
 
-  /** ⌘N — `git worktree add` for the selected project, then focus the new
-   * workspace's first pane. Errors surface inside the sheet. */
+  /** ⌘N — herdr `worktree.create` on the selected project's repo, then
+   * focus the new workspace's first pane. Errors surface inside the sheet. */
   const createWorktree = useCallback(
     async (projectId: string, req: NewWorktreeRequest) => {
-      const res = await lazed.workspaceCreate(
-        projectId,
-        req.branch,
-        req.base,
-        req.label,
-      );
-      lastWsByProject.current.set(projectId, res.workspace_id);
-      await lazed.projectFocus(projectId).catch(() => {});
-      setFocusedWsId(res.workspace_id);
-      await focusCreatedTerm(res.pane_id);
+      const repo = snapRef.current?.projects.find(
+        (p) => p.project_id === projectId,
+      )?.repo_root;
+      if (!repo) throw new Error("unknown project");
+      const res = await lazed.herdrCall<{
+        workspace?: { workspace_id: string };
+        root_pane?: { pane_id: string };
+      }>("worktree.create", {
+        cwd: repo,
+        branch: req.branch,
+        base: req.base,
+        label: req.label,
+      });
+      const wsId = res.workspace?.workspace_id;
+      if (wsId) {
+        lastWsByProject.current.set(projectId, wsId);
+        await lazed.projectFocus(projectId).catch(() => {});
+        setFocusedWsId(wsId);
+      }
+      await focusCreatedTerm(res.root_pane?.pane_id);
     },
     [focusCreatedTerm],
   );
 
   const spawnOrchestrator = useCallback(
     async (projectId: string) => {
-      const live = await lazed.snapshot().catch(() => null);
+      const live = await loadSnapshot().catch(() => null);
       const p = live?.projects.find((x) => x.project_id === projectId);
       if (!p) return;
       // the orchestrator lives in the main checkout workspace
@@ -837,7 +1025,7 @@ export function App() {
         setError(String(e));
       }
     },
-    [flash],
+    [flash, loadSnapshot],
   );
 
   const startAgent = useCallback(
@@ -917,6 +1105,20 @@ export function App() {
       if (!(e.metaKey || e.ctrlKey || e.altKey)) return;
       // physical digit position — Option transforms e.key (⌥1 → "¡")
       const digit = /^Digit([1-9])$/.exec(e.code)?.[1];
+      // ⇧⌘E — files panel toggle; a side panel, not a screen, so it stays
+      // reachable even while a full-screen screen is open
+      if (
+        e.metaKey &&
+        e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        (e.key === "e" || e.key === "E")
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleFiles();
+        return;
+      }
       // a full-screen screen swallows other chords but keeps the rail
       // reachable — ⇧⌘1-4 mirror its buttons, ⌘, toggles settings off
       if (showSettings || showSession || showAutos) {
@@ -946,34 +1148,44 @@ export function App() {
         const i = Math.max(0, list.indexOf(cur ?? ""));
         return list[(i + d + list.length) % list.length];
       };
+      // workspace chords belong to the projects space — on the inbox
+      // rails a bound key is still swallowed (an unhandled ⌘W would close
+      // the window, ⌃N would reach the PTY) but fires nothing until those
+      // views get chords of their own
+      const onProjects = railView === "projects";
       if (e.metaKey && !e.shiftKey && e.key === "d") {
         e.preventDefault();
         e.stopPropagation();
-        newPane();
+        if (onProjects) newPane();
       } else if (e.metaKey && e.shiftKey && (e.key === "d" || e.key === "D")) {
         e.preventDefault();
         e.stopPropagation();
-        newPane();
+        if (onProjects) newPane();
       } else if (e.metaKey && !e.shiftKey && e.key === "w") {
         e.preventDefault();
         e.stopPropagation();
+        if (onProjects && activeFile) {
+          // a file tab is showing — ⌘W closes it, not the terminal
+          closeFile(activeFile);
+          return;
+        }
         const t = effectiveFocusedTerm
           ? termsById.get(effectiveFocusedTerm)
           : undefined;
-        if (t) closeTerm(t);
+        if (onProjects && t) closeTerm(t);
       } else if (e.metaKey && !e.shiftKey && e.key === "t") {
         e.preventDefault();
         e.stopPropagation();
-        newTab();
+        if (onProjects) newTab();
       } else if (e.metaKey && !e.shiftKey && e.key === "n") {
         // ⌘N — new git worktree in the selected project
         e.preventDefault();
         e.stopPropagation();
-        if (focusedProjectId) setNewWtProjectId(focusedProjectId);
+        if (onProjects && focusedProjectId) setNewWtProjectId(focusedProjectId);
       } else if (e.metaKey && e.shiftKey && (e.key === "n" || e.key === "N")) {
         e.preventDefault();
         e.stopPropagation();
-        setShowImport(true);
+        if (onProjects) setShowImport(true);
       } else if (e.metaKey && e.shiftKey && e.key === "]") {
         e.preventDefault();
         e.stopPropagation();
@@ -982,7 +1194,7 @@ export function App() {
           activeWorkspace?.workspace_id,
           1,
         );
-        if (next) selectWorkspace(next);
+        if (onProjects && next) selectWorkspace(next);
       } else if (e.metaKey && e.shiftKey && e.key === "[") {
         e.preventDefault();
         e.stopPropagation();
@@ -991,40 +1203,41 @@ export function App() {
           activeWorkspace?.workspace_id,
           -1,
         );
-        if (prev) selectWorkspace(prev);
+        if (onProjects && prev) selectWorkspace(prev);
       } else if (e.metaKey && !e.shiftKey && e.key === "]") {
         // ⌘] — next pane in the active tab
         e.preventDefault();
         e.stopPropagation();
         const next = step(paneIds, effectiveFocusedTerm ?? undefined, 1);
-        if (next) setFocusedTermId(next);
+        if (onProjects && next) setFocusedTermId(next);
       } else if (e.metaKey && !e.shiftKey && e.key === "[") {
         // ⌘[ — previous pane in the active tab
         e.preventDefault();
         e.stopPropagation();
         const prev = step(paneIds, effectiveFocusedTerm ?? undefined, -1);
-        if (prev) setFocusedTermId(prev);
+        if (onProjects && prev) setFocusedTermId(prev);
       } else if (e.metaKey && e.shiftKey && e.key === "Enter") {
         // ⇧⌘Enter — zoom the focused pane to fill the workspace (toggle)
         e.preventDefault();
         e.stopPropagation();
-        if (effectiveFocusedTerm) setZoomed((z) => !z);
+        if (onProjects && effectiveFocusedTerm) setZoomed((z) => !z);
       } else if (e.metaKey && !e.shiftKey && e.key === "k") {
         e.preventDefault();
         e.stopPropagation();
-        setShowPrompt(true);
+        if (onProjects) setShowPrompt(true);
       } else if (e.metaKey && e.shiftKey && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
         e.stopPropagation();
-        setShowPicker(true);
+        if (onProjects) setShowPicker(true);
       } else if (e.metaKey && e.shiftKey && (e.key === "i" || e.key === "I")) {
+        // ⇧⌘I — the attention panel floats above any rail view
         e.preventDefault();
         e.stopPropagation();
         setInboxOpen((o) => !o);
       } else if (e.metaKey && e.shiftKey && (e.key === "f" || e.key === "F")) {
         e.preventDefault();
         e.stopPropagation();
-        setShowFanout(true);
+        if (onProjects) setShowFanout(true);
       } else if (e.metaKey && !e.shiftKey && e.key === ",") {
         e.preventDefault();
         e.stopPropagation();
@@ -1051,7 +1264,7 @@ export function App() {
         e.preventDefault();
         e.stopPropagation();
         const wid = sidebarWorkspaceIds[Number(digit) - 1];
-        if (wid) selectWorkspace(wid);
+        if (onProjects && wid) selectWorkspace(wid);
       } else if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && digit) {
         // ⌃1-9 — switch tab inside the active workspace. Unmapped digits
         // are still swallowed so the chord never reaches the PTY (⌃6
@@ -1059,7 +1272,7 @@ export function App() {
         e.preventDefault();
         e.stopPropagation();
         const tab = workspaceTabs[Number(digit) - 1];
-        if (tab) selectTab(tab.tab_id);
+        if (onProjects && tab) selectTab(tab.tab_id);
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -1076,35 +1289,110 @@ export function App() {
     showSettings,
     showSession,
     showAutos,
+    railView,
     focusedProjectId,
     newPane,
     newTab,
     closeTerm,
     selectRail,
     toggleScreen,
+    toggleFiles,
+    activeFile,
+    closeFile,
   ]);
 
-  const allTerms = [...termsById.values()];
-  const attentionItems = allTerms
-    .filter(
-      (t) =>
-        (t.agent_status === "blocked" || t.agent_status === "done") &&
-        !dismissed.has(t.pane_id),
-    )
-    .sort((a, b) =>
-      a.agent_status === b.agent_status
-        ? 0
-        : a.agent_status === "blocked"
-          ? -1
-          : 1,
-    )
-    .map((term) => {
-      const pid = wsById.get(term.workspace_id)?.project_id;
-      const proj = projects.find((p) => p.project_id === pid);
-      return { term, project: proj?.label ?? basename(proj?.repo_root) };
-    });
+  const allTerms = useMemo(() => [...termsById.values()], [termsById]);
+  const attentionItems = useMemo(
+    () =>
+      allTerms
+        .filter(
+          (t) =>
+            (t.agent_status === "blocked" || t.agent_status === "done") &&
+            !dismissed.has(t.pane_id),
+        )
+        .sort((a, b) =>
+          a.agent_status === b.agent_status
+            ? 0
+            : a.agent_status === "blocked"
+              ? -1
+              : 1,
+        )
+        .map((term) => {
+          const pid = wsById.get(term.workspace_id)?.project_id;
+          const proj = pid ? projById.get(pid) : undefined;
+          return { term, project: proj?.label ?? basename(proj?.repo_root) };
+        }),
+    [allTerms, dismissed, wsById, projById],
+  );
   const agentCount = workspacePanes.filter((t) => t.agent).length;
-  const openInboxCount = inboxItems.filter((i) => i.status === "open").length;
+  const openInboxCount = useMemo(
+    () => inboxItems.filter((i) => i.status === "open").length,
+    [inboxItems],
+  );
+  // stable term list for the memoized TermGrid — [zoomedTerm] would be a
+  // fresh array every render otherwise
+  const gridTerms = useMemo(
+    () => (zoomedTerm ? [zoomedTerm] : tabPanes),
+    [zoomedTerm, tabPanes],
+  );
+
+  // ── stable props for memoized children (Sidebar/Rail/InboxPanel) ──
+  const openImport = useCallback(() => setShowImport(true), []);
+  const openAutomations = useCallback(
+    () => toggleScreen("autos"),
+    [toggleScreen],
+  );
+  const openSession = useCallback(
+    () => toggleScreen("session"),
+    [toggleScreen],
+  );
+  const openSettings = useCallback(
+    () => toggleScreen("settings"),
+    [toggleScreen],
+  );
+  const createGroup = useCallback(
+    () =>
+      lazed
+        .groupCreate()
+        .then((g) => g?.group_id ?? null)
+        .catch((e) => {
+          setError(String(e));
+          return null;
+        }),
+    [],
+  );
+  const closeProjectById = useCallback((id: string) => {
+    lazed.projectClose(id).catch((e) => setError(String(e)));
+  }, []);
+  const renameProject = useCallback((id: string, label: string) => {
+    lazed.projectRename(id, label).catch((e) => setError(String(e)));
+  }, []);
+  const renameGroupById = useCallback((id: string, label: string) => {
+    lazed.groupRename(id, label).catch((e) => setError(String(e)));
+  }, []);
+  const removeGroupById = useCallback((id: string) => {
+    lazed.groupRemove(id).catch((e) => setError(String(e)));
+  }, []);
+  const assignProjectGroup = useCallback((pid: string, gid: string | null) => {
+    lazed.groupAssign(pid, gid).catch((e) => setError(String(e)));
+  }, []);
+  const jumpToAttention = useCallback(
+    (t: PaneInfo) => jumpToTerm(t.pane_id),
+    [jumpToTerm],
+  );
+  const dismissAttention = useCallback(
+    (id: string) => setDismissed((prev) => new Set(prev).add(id)),
+    [],
+  );
+  const dismissAllAttention = useCallback(
+    () =>
+      setDismissed(
+        (prev) =>
+          new Set([...prev, ...attentionItems.map((i) => i.term.pane_id)]),
+      ),
+    [attentionItems],
+  );
+  const closeInbox = useCallback(() => setInboxOpen(false), []);
 
   // dock badge = undismissed attention count (blocked/finished agents plus
   // untriaged inbox items)
@@ -1129,8 +1417,8 @@ export function App() {
       >
         <span className="title">LAZED</span>
         <span className="status">
-          {error
-            ? `error: ${error}`
+          {statusError
+            ? `error: ${statusError}`
             : notice
               ? notice
               : snap
@@ -1138,12 +1426,20 @@ export function App() {
                 : "connecting…"}
         </span>
         <span className="tagline">STAY LAZY, ACT CRAZY</span>
+        <button
+          type="button"
+          className={`titlebar-btn ${showFiles ? "sel" : ""}`}
+          title="files panel (⇧⌘E)"
+          onClick={toggleFiles}
+        >
+          <HugeiconsIcon icon={SidebarRightIcon} size={14} strokeWidth={1.5} />
+        </button>
       </div>
       <DaemonUpdate />
       {installReport && (
         <div className="install-banner">
           <span>
-            lazed CLI + agent skills aren't linked into ~/
+            lazed CLI isn't linked into ~/
             {installReport.missing.length > 0 &&
               ` — missing: ${installReport.missing.join(", ")}`}
           </span>
@@ -1164,18 +1460,10 @@ export function App() {
       {inboxOpen && (
         <InboxPanel
           items={attentionItems}
-          onJump={(t) => jumpToTerm(t.pane_id)}
-          onDismiss={(id) => setDismissed((prev) => new Set(prev).add(id))}
-          onDismissAll={() =>
-            setDismissed(
-              (prev) =>
-                new Set([
-                  ...prev,
-                  ...attentionItems.map((i) => i.term.pane_id),
-                ]),
-            )
-          }
-          onClose={() => setInboxOpen(false)}
+          onJump={jumpToAttention}
+          onDismiss={dismissAttention}
+          onDismissAll={dismissAllAttention}
+          onClose={closeInbox}
         />
       )}
       {showPicker && (
@@ -1287,9 +1575,9 @@ export function App() {
         <Rail
           active={railView}
           onSelect={selectRail}
-          onAutomations={() => toggleScreen("autos")}
-          onSession={() => toggleScreen("session")}
-          onSettings={() => toggleScreen("settings")}
+          onAutomations={openAutomations}
+          onSession={openSession}
+          onSettings={openSettings}
           automationsOpen={showAutos}
           sessionOpen={showSession}
           settingsOpen={showSettings}
@@ -1319,31 +1607,13 @@ export function App() {
             onFocusProject={focusProject}
             onFocusWorkspace={selectWorkspace}
             onJumpTerm={jumpToTerm}
-            onNewProject={() => setShowImport(true)}
-            onNewGroup={() =>
-              lazed
-                .groupCreate()
-                .then((g) => g?.group_id ?? null)
-                .catch((e) => {
-                  setError(String(e));
-                  return null;
-                })
-            }
-            onCloseProject={(id) =>
-              lazed.projectClose(id).catch((e) => setError(String(e)))
-            }
-            onRenameProject={(id, label) =>
-              lazed.projectRename(id, label).catch((e) => setError(String(e)))
-            }
-            onRenameGroup={(id, label) =>
-              lazed.groupRename(id, label).catch((e) => setError(String(e)))
-            }
-            onRemoveGroup={(id) =>
-              lazed.groupRemove(id).catch((e) => setError(String(e)))
-            }
-            onAssignProject={(pid, gid) =>
-              lazed.groupAssign(pid, gid).catch((e) => setError(String(e)))
-            }
+            onNewProject={openImport}
+            onNewGroup={createGroup}
+            onCloseProject={closeProjectById}
+            onRenameProject={renameProject}
+            onRenameGroup={renameGroupById}
+            onRemoveGroup={removeGroupById}
+            onAssignProject={assignProjectGroup}
             onCloseTerm={closeTerm}
             onRemoveWorkspace={removeWorkspace}
             onDiff={setDiffWs}
@@ -1351,97 +1621,162 @@ export function App() {
             onOrchestrate={spawnOrchestrator}
           />
         )}
-        <div className="main">
-          {activeWorkspace ? (
-            <div className="ws">
-              {workspaceTabs.length > 0 && (
-                <div className="ws-tabs">
-                  {workspaceTabs.map((tab, i) => {
-                    const panes = tab.panes
-                      .map((pid) => termsById.get(pid))
-                      .filter((t): t is PaneInfo => Boolean(t));
-                    const sole = panes.length === 1 ? panes[0] : undefined;
-                    const name =
-                      tab.label ??
-                      (sole
-                        ? (sole.label ??
-                          sole.agent_name ??
-                          sole.agent ??
-                          basename(sole.cwd))
-                        : `${panes.length} panes`) ??
-                      `tab ${i + 1}`;
-                    return (
-                      <button
-                        key={tab.tab_id}
-                        type="button"
-                        className={`ws-tab ${activeTabId === tab.tab_id ? "active" : ""}`}
-                        onClick={() => selectTab(tab.tab_id)}
-                        title={`${sole?.cwd ?? tab.tab_id} (⌃${i + 1})`}
-                      >
-                        <span
-                          className={`dot ${worst(panes.map((t) => t.agent_status))}`}
-                        />
-                        <span className="ws-tab-name">{name}</span>
-                        {panes.length > 1 && (
-                          <span className="ws-tab-count">{panes.length}</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                  <button
-                    type="button"
-                    className="ws-tab ws-tab-add"
-                    title="new tab (⌘T)"
-                    onClick={newTab}
-                  >
-                    +
-                  </button>
-                  {zoomedTerm && (
+        {railView === "projects" && (
+          <div className="main">
+            {activeWorkspace ? (
+              <div className="ws">
+                {(workspaceTabs.length > 0 || openFiles.length > 0) && (
+                  <div className="ws-tabs">
+                    {workspaceTabs.map((tab, i) => {
+                      const panes = tab.panes
+                        .map((pid) => termsById.get(pid))
+                        .filter((t): t is PaneInfo => Boolean(t));
+                      const sole = panes.length === 1 ? panes[0] : undefined;
+                      const name =
+                        tab.label ??
+                        (sole
+                          ? (sole.label ??
+                            sole.agent_name ??
+                            sole.agent ??
+                            basename(sole.cwd))
+                          : `${panes.length} panes`) ??
+                        `tab ${i + 1}`;
+                      return (
+                        <button
+                          key={tab.tab_id}
+                          type="button"
+                          className={`ws-tab ${!activeFile && activeTabId === tab.tab_id ? "active" : ""}`}
+                          onClick={() => selectTab(tab.tab_id)}
+                          title={`${sole?.cwd ?? tab.tab_id} (⌃${i + 1})`}
+                        >
+                          <span
+                            className={`dot ${worst(panes.map((t) => t.agent_status))}`}
+                          />
+                          <span className="ws-tab-name">{name}</span>
+                          {panes.length > 1 && (
+                            <span className="ws-tab-count">{panes.length}</span>
+                          )}
+                        </button>
+                      );
+                    })}
                     <button
                       type="button"
-                      className="ws-zoom"
-                      title="restore split (⇧⌘Enter)"
-                      onClick={() => setZoomed(false)}
+                      className="ws-tab ws-tab-add"
+                      title="new tab (⌘T)"
+                      onClick={newTab}
                     >
-                      <HugeiconsIcon
-                        icon={ArrowShrinkIcon}
-                        size={11}
-                        strokeWidth={1.5}
-                      />
-                      zoomed
+                      +
                     </button>
+                    {zoomedTerm && (
+                      <button
+                        type="button"
+                        className="ws-zoom"
+                        title="restore split (⇧⌘Enter)"
+                        onClick={() => setZoomed(false)}
+                      >
+                        <HugeiconsIcon
+                          icon={ArrowShrinkIcon}
+                          size={11}
+                          strokeWidth={1.5}
+                        />
+                        zoomed
+                      </button>
+                    )}
+                    {/* file tabs — lazed surfaces, never herdr tabs */}
+                    {openFiles.map((f) => (
+                      <div
+                        key={f.path}
+                        className={`ws-tab ws-file-tab ${f.git && f.git !== "!" ? `s-${f.git}` : ""} ${activeFile === f.path ? "active" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          className="ws-file-open"
+                          title={f.path}
+                          onClick={() => showFile(f.path)}
+                        >
+                          <HugeiconsIcon
+                            icon={File01Icon}
+                            size={11}
+                            strokeWidth={1.5}
+                          />
+                          <span className="ws-tab-name">
+                            {basename(f.path)}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="ws-file-x"
+                          title="close file (⌘W)"
+                          onClick={() => closeFile(f.path)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="ws-body">
+                  {tabPanes.length > 0 ? (
+                    <TermGrid
+                      terms={gridTerms}
+                      focusedTerm={effectiveFocusedTerm}
+                      onFocusTerm={setFocusedTermId}
+                      onCloseTerm={handleCloseTerm}
+                    />
+                  ) : (
+                    <div className="empty">
+                      <span>no terminals in this workspace</span>
+                      <button type="button" onClick={newPane}>
+                        new terminal (⌘D)
+                      </button>
+                      {error && <span role="alert">failed: {error}</span>}
+                    </div>
+                  )}
+                  {activeFile && filesRoot && (
+                    <FileView
+                      root={
+                        openFiles.find((f) => f.path === activeFile)?.root ??
+                        filesRoot
+                      }
+                      path={activeFile}
+                      git={openFiles.find((f) => f.path === activeFile)?.git}
+                      onClose={() => closeFile(activeFile)}
+                    />
                   )}
                 </div>
-              )}
-              {tabPanes.length > 0 ? (
-                <TermGrid
-                  terms={zoomedTerm ? [zoomedTerm] : tabPanes}
-                  focusedTerm={effectiveFocusedTerm}
-                  onFocusTerm={setFocusedTermId}
-                  onCloseTerm={handleCloseTerm}
-                />
-              ) : (
-                <div className="empty">
-                  <span>no terminals in this workspace</span>
-                  <button type="button" onClick={newPane}>
-                    new terminal (⌘D)
-                  </button>
-                  {error && <span role="alert">failed: {error}</span>}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="empty">
-              {error
-                ? `failed: ${error}`
-                : snap
-                  ? projects.length === 0
-                    ? "import a project to begin — ⇧⌘N"
-                    : "no panes in this workspace — ⌘T for a tab"
-                  : "connecting to lazed…"}
-            </div>
-          )}
-        </div>
+              </div>
+            ) : (
+              <div className="empty">
+                {statusError
+                  ? `failed: ${statusError}`
+                  : snap
+                    ? projects.length === 0
+                      ? "import a project to begin — ⇧⌘N"
+                      : "no panes in this workspace — ⌘T for a tab"
+                    : "connecting to lazed…"}
+              </div>
+            )}
+          </div>
+        )}
+        {showFiles && railView === "projects" && (
+          <FilesPanel
+            root={filesRoot}
+            label={
+              activeWorkspace
+                ? (activeWorkspace.label ??
+                  activeWorkspace.branch ??
+                  basename(activeWorkspace.path))
+                : undefined
+            }
+            branch={activeWorkspace?.branch}
+            paneCount={workspacePanes.length}
+            onClose={() => setShowFiles(false)}
+            onOpenDiff={
+              activeWorkspace ? () => setDiffWs(activeWorkspace) : undefined
+            }
+            onOpenFile={openFile}
+          />
+        )}
       </div>
     </div>
   );

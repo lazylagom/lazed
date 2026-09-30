@@ -7,8 +7,10 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
 
 use crate::env;
@@ -60,31 +62,97 @@ fn lazed_bin() -> Result<String, String> {
     Ok("lazed".to_string())
 }
 
-/// One request/response call over the socket.
+/// Why a call failed: a transport break means the daemon may have been
+/// replaced (possibly by an older build) — cached capability answers are
+/// dropped; a remote error is the daemon's own reply and says nothing
+/// about which build answered.
+enum CallError {
+    Transport(String),
+    Remote(String),
+}
+
+/// `herdr.overlay.v1`, checked once per daemon lifetime. Cleared whenever
+/// a gated call hits a transport failure or an "unknown method" reply —
+/// either can mean the daemon was restarted to an older build.
+static OVERLAY_CAPABLE: AtomicBool = AtomicBool::new(false);
+
+const UPGRADE_REQUIRED: &str = "daemon_upgrade_required: the running lazed daemon predates the herdr overlay; restart it (herdr keeps the panes alive)";
+
+fn overlay_capable() -> Result<bool, String> {
+    let status = api_call("session.status", json!({}))?;
+    let ok = status["capabilities"].as_array().is_some_and(|caps| caps.iter().any(|c| c == "herdr.overlay.v1"));
+    if ok {
+        OVERLAY_CAPABLE.store(true, Ordering::Relaxed);
+    }
+    Ok(ok)
+}
+
+/// One request/response call over the socket. `herdr.*`/`task.start` are
+/// gated on the daemon's herdr.overlay.v1 capability so an old daemon
+/// fails fast with an upgrade hint instead of a parse error; the check is
+/// cached after first success and re-run whenever a call hints the daemon
+/// process changed underneath us.
 pub fn api_call(method: &str, params: Value) -> Result<Value, String> {
-    if method == "task.start" || method.starts_with("herdr.") {
-        let status = api_call("session.status", json!({}))?;
-        if !status["capabilities"].as_array().is_some_and(|caps| caps.iter().any(|c| c == "herdr.overlay.v1")) {
-            return Err("daemon_upgrade_required: the running lazed daemon predates the herdr overlay; restart it (herdr keeps the panes alive)".into());
+    let gated = method == "task.start" || method.starts_with("herdr.");
+    if gated && !OVERLAY_CAPABLE.load(Ordering::Relaxed) && !overlay_capable()? {
+        return Err(UPGRADE_REQUIRED.into());
+    }
+    match socket_call(method, params) {
+        Ok(v) => Ok(v),
+        Err(CallError::Transport(e)) => {
+            if gated {
+                OVERLAY_CAPABLE.store(false, Ordering::Relaxed);
+            }
+            Err(e)
+        }
+        Err(CallError::Remote(e)) => {
+            // an older daemon answers "unknown method" where a new one has
+            // the method — re-check so the caller still gets the designed
+            // upgrade error rather than an opaque method name
+            if gated && e.contains("unknown method") {
+                OVERLAY_CAPABLE.store(false, Ordering::Relaxed);
+                if matches!(overlay_capable(), Ok(false)) {
+                    return Err(UPGRADE_REQUIRED.into());
+                }
+            }
+            Err(e)
         }
     }
-    let mut s = UnixStream::connect(sock_path())
-        .map_err(|e| format!("cannot connect {}: {e}", sock_path().display()))?;
-    s.set_read_timeout(Some(Duration::from_secs(660))).map_err(|e| e.to_string())?;
-    let req = json!({"id": 1, "method": method, "params": params});
-    writeln!(s, "{}", serde_json::to_string(&req).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    s.flush().map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    let bytes = BufReader::new(s.try_clone().map_err(|e| e.to_string())?)
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    if bytes == 0 {
-        return Err("daemon_disconnected".into());
+}
+
+fn rpc_timeout(method: &str, params: &Value) -> Duration {
+    if matches!(method, "session.status" | "herdr.status") { return Duration::from_secs(5); }
+    if method == "task.start" { return Duration::from_secs(180); }
+    if method == "herdr.call" {
+        if params["method"] == "agent.start" { return Duration::from_secs(45); }
+        if params["method"] == "agent.wait" {
+            return Duration::from_millis(params["params"]["timeout_ms"].as_u64().unwrap_or(30_000).saturating_add(5_000));
+        }
     }
-    let v: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+    Duration::from_secs(30)
+}
+
+/// Socket round-trip: connect, write the request, read one reply line.
+fn socket_call(method: &str, params: Value) -> Result<Value, CallError> {
+    let transport = |e: String| CallError::Transport(e);
+    let mut s = UnixStream::connect(sock_path())
+        .map_err(|e| transport(format!("cannot connect {}: {e}", sock_path().display())))?;
+    s.set_read_timeout(Some(rpc_timeout(method, &params))).map_err(|e| transport(e.to_string()))?;
+    s.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| transport(e.to_string()))?;
+    let req = json!({"id": 1, "method": method, "params": params});
+    writeln!(s, "{}", serde_json::to_string(&req).map_err(|e| transport(e.to_string()))?)
+        .map_err(|e| transport(e.to_string()))?;
+    s.flush().map_err(|e| transport(e.to_string()))?;
+    let mut line = String::new();
+    let bytes = BufReader::new(s.try_clone().map_err(|e| transport(e.to_string()))?)
+        .read_line(&mut line)
+        .map_err(|e| transport(e.to_string()))?;
+    if bytes == 0 {
+        return Err(transport("daemon_disconnected".into()));
+    }
+    let v: Value = serde_json::from_str(line.trim()).map_err(|e| transport(e.to_string()))?;
     if let Some(e) = v.get("error") {
-        return Err(e.as_str().unwrap_or("daemon error").to_string());
+        return Err(CallError::Remote(e.as_str().unwrap_or("daemon error").to_string()));
     }
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
@@ -165,9 +233,11 @@ pub fn restart_server(only_if_empty: bool) -> Result<Value, String> {
     api_call("session.status", json!({}))
 }
 
-/// An attached terminal's control stream — the socket half kept for
-/// {"type": ...} commands. Closing/shutdown unsubscribes server-side.
-pub fn run_event_stream(on_event: impl Fn(&Value) -> bool) -> String {
+/// The daemon's event stream — `{"event":…,"data":…}` lines forwarded as
+/// raw JSON (no Value DOM round-trip per event; the webview parses once).
+/// Returns why the stream ended; the caller decides whether to reconnect.
+/// Closing/shutdown unsubscribes server-side.
+pub fn run_event_stream(on_event: impl Fn(Box<RawValue>) -> bool) -> String {
     let conn = match UnixStream::connect(sock_path()) {
         Ok(c) => c,
         Err(e) => return format!("connect failed: {e}"),
@@ -193,8 +263,8 @@ pub fn run_event_stream(on_event: impl Fn(&Value) -> bool) -> String {
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-                    if !on_event(&v) {
+                if let Ok(v) = serde_json::from_str::<Box<RawValue>>(trimmed) {
+                    if !on_event(v) {
                         return "stopped".to_string();
                     }
                 }
@@ -203,7 +273,7 @@ pub fn run_event_stream(on_event: impl Fn(&Value) -> bool) -> String {
     }
 }
 
-/// `lazed doctor --json` — CLI/skill link state for the onboarding banner.
+/// `lazed doctor --json` — CLI link state for the onboarding banner.
 /// doctor exits 1 when checks fail; the JSON is still valid, so parse
 /// whatever it printed.
 pub fn doctor_report() -> Result<Value, String> {

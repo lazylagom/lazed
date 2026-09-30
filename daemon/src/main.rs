@@ -2,16 +2,16 @@
 //!
 //!   lazed server [--foreground]       start the daemon
 //!   lazed api <method> [params-json]  one-shot API call over the socket
-//!   lazed worktree create|list|remove worktree lifecycle (agents' CLI)
 //!   lazed task | inbox                durable tasks, GTD inbox
 //!   lazed herdr status|snapshot|call <method> [params-json]
 //!                                     herdr adapter — talks to the herdr
 //!                                     server directly, no lazed daemon needed
 //!   lazed install | uninstall | doctor
-//!                                     manage the CLI/skill links on $HOME
+//!                                     manage the CLI link on $HOME
 //!   lazed status | stop | restart     convenience wrappers
-mod cli;
 mod herdr;
+#[path = "../../shared/repo.rs"]
+mod repo;
 mod inbox;
 mod install;
 mod server;
@@ -31,10 +31,9 @@ fn main() {
         Some("api") => cmd_api(&args[1..]),
         Some("task") => tasks::cli(&args[1..]),
         Some("inbox") => inbox::cli(&args[1..]),
-        Some("worktree") => cli::run(&args[1..]),
-        Some(group @ ("agent" | "pane")) => {
+        Some(group @ ("agent" | "pane" | "worktree")) => {
             eprintln!(
-                "lazed {group}: pane and agent control moved to herdr — use `herdr {group} …` (see `herdr --skill`)"
+                "lazed {group}: moved to herdr — use `herdr {group} …` (see `herdr --skill`)"
             );
             2
         }
@@ -71,8 +70,7 @@ USAGE:
   lazed api <method> [params]     one-shot API call (params = JSON)
   lazed task <start|status|list|read|tell|resume> [options]
   lazed inbox <add|list|done|reopen|snooze|remove>
-  lazed worktree <create|list|remove>
-  (pane/agent control: `herdr pane …`, `herdr agent …`)
+  (pane/agent/worktree control: `herdr pane …`, `herdr agent …`, `herdr worktree …`)
   lazed herdr <status|snapshot|call <method> [params]>
                                   herdr execution-layer adapter (PLAN §3b)
   lazed install | uninstall | doctor

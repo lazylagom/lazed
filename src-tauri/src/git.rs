@@ -95,36 +95,28 @@ pub fn worktree_merge(repo: &str, branch: &str) -> Result<Value, String> {
     }
 }
 
+/// Delete the branch a removed worktree was on — herdr's `worktree.remove`
+/// leaves it behind by design. `-d` refuses to drop unmerged work; `force`
+/// switches to `-D`. A missing branch is success: "no such branch" is the
+/// goal state either way.
+pub fn branch_delete(repo: &str, branch: &str, force: bool) -> Result<Value, String> {
+    let flag = if force { "-D" } else { "-d" };
+    match git(repo, &["branch", flag, branch]) {
+        Ok(out) => Ok(json!({"ok": true, "output": out})),
+        Err(e) if e.contains("not found") || e.contains("no such branch") => {
+            Ok(json!({"ok": true, "output": e}))
+        }
+        Err(e) => Ok(json!({"ok": false, "output": e})),
+    }
+}
+
 /// Resolve a directory's repo identity for project grouping/import dedupe.
 /// `repo_key` = the shared git dir (for a linked worktree it resolves to the
 /// main repo's .git, so importing a worktree path maps to the same project).
 /// `repo_root` = the main checkout root. Ok(None) for non-repo paths.
 pub fn resolve_repo(dir: &str) -> Result<Option<Value>, String> {
-    let common = match git_ok(
-        dir,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    ) {
-        Some(c) => c,
-        None => return Ok(None),
-    };
-    let key = if common.starts_with('/') {
-        common
-    } else {
-        format!("{}/{}", dir.trim_end_matches('/'), common)
-    };
-    // `<root>/.git` → the main checkout root; anything else (bare repo,
-    // odd layout) falls back to this dir's own toplevel
-    let root = key
-        .strip_suffix("/.git")
-        .map(str::to_string)
-        .or_else(|| git_ok(dir, &["rev-parse", "--show-toplevel"]));
-    let name = root
-        .as_deref()
-        .and_then(|r| r.rsplit('/').next())
-        .map(str::to_string);
-    Ok(Some(json!({
-        "repo_key": key,
-        "repo_root": root,
-        "name": name,
-    })))
+    let Some(repo) = crate::repo::resolve(dir) else { return Ok(None) };
+    let root = repo.main.unwrap_or(repo.checkout);
+    let name = std::path::Path::new(&root).file_name().map(|s| s.to_string_lossy().into_owned());
+    Ok(Some(json!({"repo_key": repo.key, "repo_root": root, "name": name})))
 }

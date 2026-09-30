@@ -6,39 +6,54 @@ const SIDE_MAX = 560;
 const SIDE_DEFAULT = 288;
 const SIDE_KEY = "sidebar-width";
 
-function loadSideWidth() {
-  const v = Number(localStorage.getItem(SIDE_KEY));
-  if (!Number.isFinite(v) || v <= 0) return SIDE_DEFAULT;
+interface PanelWidthOpts {
+  storageKey?: string;
+  /** which window edge the panel sits on — right-side handles invert drag delta */
+  side?: "left" | "right";
+  defaultWidth?: number;
+}
+
+function loadSideWidth(key: string, fallback: number) {
+  const v = Number(localStorage.getItem(key));
+  if (!Number.isFinite(v) || v <= 0) return fallback;
   return Math.min(SIDE_MAX, Math.max(SIDE_MIN, v));
 }
 
-/** The sidebar-space width is shared by every rail view (projects, inbox…):
- * one localStorage key, one drag handle contract, one reset event. */
-export function useSidebarWidth() {
-  const [width, setWidth] = useState(loadSideWidth);
+/** Resizable panel width — one drag-handle contract shared by the left
+ * sidebar and the right files panel; each keeps its own localStorage key.
+ * Dragging the right panel's left edge inverts the delta. */
+export function useSidebarWidth({
+  storageKey = SIDE_KEY,
+  side = "left",
+  defaultWidth = SIDE_DEFAULT,
+}: PanelWidthOpts = {}) {
+  const [width, setWidth] = useState(() =>
+    loadSideWidth(storageKey, defaultWidth),
+  );
   const sideRef = useRef<HTMLDivElement>(null);
 
   const onResizeDown = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startW = sideRef.current?.getBoundingClientRect().width ?? width;
+    const sign = side === "right" ? -1 : 1;
     const clamp = (v: number) => Math.min(SIDE_MAX, Math.max(SIDE_MIN, v));
     const onMove = (ev: MouseEvent) =>
-      setWidth(clamp(startW + ev.clientX - startX));
+      setWidth(clamp(startW + sign * (ev.clientX - startX)));
     const onUp = (ev: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
-      const w = Math.round(clamp(startW + ev.clientX - startX));
-      localStorage.setItem(SIDE_KEY, String(w));
+      const w = Math.round(clamp(startW + sign * (ev.clientX - startX)));
+      localStorage.setItem(storageKey, String(w));
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
 
   const resetWidth = useCallback(() => {
-    setWidth(SIDE_DEFAULT);
-    localStorage.setItem(SIDE_KEY, String(SIDE_DEFAULT));
-  }, []);
+    setWidth(defaultWidth);
+    localStorage.setItem(storageKey, String(defaultWidth));
+  }, [storageKey, defaultWidth]);
 
   useEffect(() => {
     window.addEventListener(SIDEBAR_RESET_EVENT, resetWidth);

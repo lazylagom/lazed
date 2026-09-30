@@ -41,6 +41,7 @@ test: ## vitest + cargo test
 	$(CARGO) test --manifest-path daemon/Cargo.toml
 	$(CARGO) build --manifest-path daemon/Cargo.toml
 	python3 scripts/test_daemon_update.py
+	python3 scripts/test_daemon_reliability.py
 
 format: ## biome format --write
 	$(BUN) run format

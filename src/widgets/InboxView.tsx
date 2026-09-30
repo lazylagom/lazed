@@ -14,7 +14,6 @@ import {
   type ProjectInfo,
   lazed,
 } from "../shared/lazed";
-import { useSidebarWidth } from "./sidebar-width";
 
 function relTime(at: number): string {
   const s = Math.max(0, Math.floor(Date.now() / 1000) - at);
@@ -87,7 +86,6 @@ export function InboxView({
   onFlash: (msg: string) => void;
   onError: (msg: string) => void;
 }) {
-  const { width, sideRef, onResizeDown, resetWidth } = useSidebarWidth();
   const [draft, setDraft] = useState("");
   const [menu, setMenu] = useState<Menu | null>(null);
   const [showSnoozed, setShowSnoozed] = useState(false);
@@ -150,8 +148,10 @@ export function InboxView({
         branch: "",
         request_id: `inbox-${item.id}`,
       });
-      if (res.error) {
-        onError(`task ${res.task_id}: ${res.error}`);
+      if (res.error || res.receipt?.accepted !== true) {
+        onError(
+          `task ${res.task_id}: ${res.error ?? res.phase}; inspect this task before retrying`,
+        );
       } else {
         onFlash(`delegated — task ${res.task_id} (${delegateKind})`);
         await inbox.update(item.id, { status: "done" });
@@ -254,71 +254,67 @@ export function InboxView({
   );
 
   return (
-    <div ref={sideRef} className="sidebar" style={{ width }}>
-      <div className="side-head">
-        <span className="side-head-label">
-          Inbox{open.length > 0 ? ` · ${open.length}` : ""}
-        </span>
-        <button
-          type="button"
-          className="side-head-btn"
-          title="capture"
-          onClick={() => addRef.current?.focus()}
-        >
-          <HugeiconsIcon icon={InboxIcon} size={17} strokeWidth={1.5} />
-        </button>
-      </div>
-      <div className="ibx-add">
-        <input
-          ref={addRef}
-          className="ibx-add-input"
-          placeholder="capture… (⏎ adds)"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") capture();
-          }}
-        />
-      </div>
-      <div className="side-scroll">
-        {error ? (
-          <div className="ibx-empty">
-            inbox unavailable: {error}
-            <br />
-            <span className="ibx-empty-sub">
-              an older daemon may be running — restart it after rebuilding
-            </span>
-          </div>
-        ) : (
-          open.length === 0 &&
-          snoozed.length === 0 && (
-            <div className="ibx-empty">
-              inbox zero — captured items land here
-              <br />
-              <span className="ibx-empty-sub">
-                lazed inbox add · automation → inbox action
-              </span>
-            </div>
-          )
-        )}
-        {open.map(row)}
-        {snoozed.length > 0 && (
+    <div className="ibx-screen">
+      <div className="ibx-col">
+        <div className="side-head">
+          <span className="side-head-label">
+            Inbox{open.length > 0 ? ` · ${open.length}` : ""}
+          </span>
           <button
             type="button"
-            className="ibx-snoozed-toggle"
-            onClick={() => setShowSnoozed((v) => !v)}
+            className="side-head-btn"
+            title="capture"
+            onClick={() => addRef.current?.focus()}
           >
-            {showSnoozed ? "▾" : "▸"} snoozed ({snoozed.length})
+            <HugeiconsIcon icon={InboxIcon} size={17} strokeWidth={1.5} />
           </button>
-        )}
-        {showSnoozed && snoozed.map(row)}
+        </div>
+        <div className="ibx-add">
+          <input
+            ref={addRef}
+            className="ibx-add-input"
+            placeholder="capture… (⏎ adds)"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") capture();
+            }}
+          />
+        </div>
+        <div className="side-scroll">
+          {error ? (
+            <div className="ibx-empty">
+              inbox unavailable: {error}
+              <br />
+              <span className="ibx-empty-sub">
+                an older daemon may be running — restart it after rebuilding
+              </span>
+            </div>
+          ) : (
+            open.length === 0 &&
+            snoozed.length === 0 && (
+              <div className="ibx-empty">
+                inbox zero — captured items land here
+                <br />
+                <span className="ibx-empty-sub">
+                  lazed inbox add · automation → inbox action
+                </span>
+              </div>
+            )
+          )}
+          {open.map(row)}
+          {snoozed.length > 0 && (
+            <button
+              type="button"
+              className="ibx-snoozed-toggle"
+              onClick={() => setShowSnoozed((v) => !v)}
+            >
+              {showSnoozed ? "▾" : "▸"} snoozed ({snoozed.length})
+            </button>
+          )}
+          {showSnoozed && snoozed.map(row)}
+        </div>
       </div>
-      <div
-        className="divider x side-resize"
-        onMouseDown={onResizeDown}
-        onDoubleClick={resetWidth}
-        title="drag to resize · double-click to reset"
-      />
       {menu && (
         <div className="proj-menu-overlay" onMouseDown={() => setMenu(null)}>
           <div

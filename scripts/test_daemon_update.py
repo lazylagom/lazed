@@ -23,7 +23,11 @@ class DaemonUpdateTests(unittest.TestCase):
         shutil.copy2(ROOT / "daemon/target/debug/lazed", self.binary)
         self.env = dict(os.environ, LAZED_STATE_DIR=str(self.root / "state"),
                         LAZED_CONFIG_DIR=str(self.root / "config"),
-                        LAZED_WORKTREE_DIR=str(self.root / "worktrees"), SHELL="/bin/sh")
+                        LAZED_WORKTREE_DIR=str(self.root / "worktrees"),
+                        # a herdr session nobody runs — keeps the daemon in
+                        # degraded mode even while a real herdr is up
+                        LAZED_HERDR_SESSION=f"lazed-test-{os.getpid()}",
+                        SHELL="/bin/sh")
         self.log = (self.root / "daemon.log").open("w")
         self.addCleanup(self.log.close)
         self.start()

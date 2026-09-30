@@ -1,9 +1,16 @@
 mod automation;
+mod automation_gate;
 mod env;
+mod fs;
+mod fs_watch;
 mod git;
+#[path = "../../shared/repo.rs"]
+mod repo;
 mod herdr;
 mod integrations;
 mod lazed;
+mod process;
+mod state_file;
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -15,20 +22,23 @@ use tauri::ipc::Channel;
 use tauri::{Emitter, Manager, State};
 
 struct AppState {
+    watches: Arc<fs_watch::Watches>,
     /// live herdr terminal streams, by pane id
-    control: Mutex<HashMap<String, herdr::ControlHandle>>,
+    control: Arc<Mutex<HashMap<String, herdr::ControlHandle>>>,
     events_running: Mutex<bool>,
     /// The live webview's event channel. A reload re-invokes
     /// subscribe_events with a fresh Channel — the stream thread must
     /// send to the newest one.
-    events_channel: Arc<Mutex<Option<Channel<Value>>>>,
+    events_channel: Arc<Mutex<Option<Channel<Box<RawValue>>>>>,
 }
 
 /// Boot both daemons (rule 4: the app auto-detect-launches each; they
 /// never spawn one another). herdr failing to start is degraded mode, not
 /// a boot failure — the organization layer still renders.
 #[tauri::command]
-fn bootstrap(state: State<AppState>) -> Result<Value, String> {
+async fn bootstrap(state: State<'_, AppState>) -> Result<Value, String> {
+    let control = state.control.clone();
+    tauri::async_runtime::spawn_blocking(move || {
     let herdr_error = herdr::ensure_server().err();
     if let Some(e) = &herdr_error {
         eprintln!("[lazed] herdr unavailable: {e}");
@@ -45,7 +55,7 @@ fn bootstrap(state: State<AppState>) -> Result<Value, String> {
                 .collect()
         })
         .unwrap_or_default();
-    if let Ok(mut map) = state.control.lock() {
+    if let Ok(mut map) = control.lock() {
         let stale: Vec<String> = map
             .keys()
             .filter(|id| !live.contains(id))
@@ -58,22 +68,33 @@ fn bootstrap(state: State<AppState>) -> Result<Value, String> {
         }
     }
     Ok(json!({"snapshot": snap, "herdr_error": herdr_error}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// herdr adapter + server health, as the daemon sees it.
 #[tauri::command]
-fn herdr_status() -> Result<Value, String> {
+async fn herdr_status() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("herdr.status", json!({}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn session_snapshot() -> Result<Value, String> {
+async fn session_snapshot() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("session.snapshot", json!({}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn session_status() -> Result<Value, String> {
+async fn session_status() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("session.status", json!({}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -134,7 +155,7 @@ fn pane_attach(
 
 /// Serialize a Value into a channel payload — json! output is always
 /// valid JSON so validation cannot fail.
-fn raw_json(v: &Value) -> Box<RawValue> {
+pub(crate) fn raw_json(v: &Value) -> Box<RawValue> {
     RawValue::from_string(v.to_string()).expect("serialized json! is valid")
 }
 
@@ -183,73 +204,98 @@ fn detach_pane_internal(state: &State<AppState>, pane_id: &str) {
 // ── model methods ──────────────────────────────────────────────────
 
 #[tauri::command]
-fn project_create(
+async fn project_create(
     cwd: String,
     label: Option<String>,
     group_id: Option<String>,
 ) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call(
         "project.create",
         json!({"cwd": cwd, "label": label, "group_id": group_id}),
     )
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn project_focus(project_id: String) -> Result<Value, String> {
+async fn project_focus(project_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("project.focus", json!({"project_id": project_id}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn project_close(project_id: String) -> Result<Value, String> {
+async fn project_close(project_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("project.close", json!({"project_id": project_id}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn project_rename(project_id: String, label: String) -> Result<Value, String> {
+async fn project_rename(project_id: String, label: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call(
         "project.rename",
         json!({"project_id": project_id, "label": label}),
     )
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 // ── groups (named project collections, Orca-style sidebar sections) ──
 
 #[tauri::command]
-fn group_create(label: Option<String>) -> Result<Value, String> {
+async fn group_create(label: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("group.create", json!({"label": label}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn group_rename(group_id: String, label: String) -> Result<Value, String> {
+async fn group_rename(group_id: String, label: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call(
         "group.rename",
         json!({"group_id": group_id, "label": label}),
     )
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn group_remove(group_id: String) -> Result<Value, String> {
+async fn group_remove(group_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("group.remove", json!({"group_id": group_id}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Move a project into a group — `group_id: null` ungroups it.
 #[tauri::command]
-fn group_assign(project_id: String, group_id: Option<String>) -> Result<Value, String> {
+async fn group_assign(project_id: String, group_id: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call(
         "group.assign",
         json!({"project_id": project_id, "group_id": group_id}),
     )
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// New pane — `target_pane_id` splits next to an existing pane (herdr
 /// `pane.split`), otherwise `workspace_id` opens a fresh tab with its root
 /// pane. Both return the new herdr pane under `pane`.
 #[tauri::command]
-fn pane_create(
+async fn pane_create(
     target_pane_id: Option<String>,
     workspace_id: Option<String>,
     cwd: Option<String>,
 ) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     if let Some(target) = target_pane_id {
         let r = lazed::herdr_call(
             "pane.split",
@@ -260,75 +306,148 @@ fn pane_create(
     let ws = workspace_id.ok_or("pane_create needs target_pane_id or workspace_id")?;
     let r = lazed::herdr_call("tab.create", json!({"workspace_id": ws, "cwd": cwd}))?;
     Ok(json!({"pane": r.get("root_pane").cloned().unwrap_or(Value::Null), "tab": r.get("tab").cloned().unwrap_or(Value::Null)}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn pane_close(pane_id: String, state: State<AppState>) -> Result<(), String> {
-    detach_pane_internal(&state, &pane_id);
-    lazed::herdr_call("pane.close", json!({"pane_id": pane_id})).map(|_| ())
+async fn pane_close(pane_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let control = state.control.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let handle = control.lock().map_err(|e| e.to_string())?.remove(&pane_id);
+        if let Some(handle) = handle { handle.close(); }
+        lazed::herdr_call("pane.close", json!({"pane_id": pane_id})).map(|_| ())
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Generic herdr API passthrough — worktree create/remove and any other
+/// herdr method reach herdr's socket from the UI as `{method, params}`;
+/// no lazed-side reimplementation of herdr features.
+#[tauri::command]
+async fn herdr_call(method: String, params: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    lazed::herdr_call(&method, params)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 // ── workspaces (one checkout each) & tabs (pane rows inside them) ──
 
 #[tauri::command]
-fn workspace_create(
-    project_id: String,
-    branch: String,
-    base: Option<String>,
-    label: Option<String>,
-) -> Result<Value, String> {
-    lazed::api_call(
-        "workspace.create",
-        json!({"project_id": project_id, "branch": branch, "base": base, "label": label}),
-    )
-}
-
-#[tauri::command]
-fn workspace_remove(
-    workspace_id: String,
-    force: bool,
-    kill_agents: bool,
-    keep_branch: Option<bool>,
-) -> Result<Value, String> {
-    lazed::api_call(
-        "workspace.remove",
-        json!({"workspace_id": workspace_id, "force": force, "kill_agents": kill_agents, "keep_branch": keep_branch.unwrap_or(false)}),
-    )
-}
-
-#[tauri::command]
-fn workspace_rename(workspace_id: String, label: String) -> Result<Value, String> {
+async fn workspace_rename(workspace_id: String, label: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call(
         "workspace.rename",
         json!({"workspace_id": workspace_id, "label": label}),
     )
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn tab_create(workspace_id: String, label: Option<String>) -> Result<Value, String> {
+async fn tab_create(workspace_id: String, label: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::herdr_call("tab.create", json!({"workspace_id": workspace_id, "label": label}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn tab_close(tab_id: String) -> Result<Value, String> {
+async fn tab_close(tab_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::herdr_call("tab.close", json!({"tab_id": tab_id}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn worktree_diff(checkout: String, base: Option<String>) -> Result<Value, String> {
+async fn worktree_diff(checkout: String, base: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     git::worktree_diff(&checkout, base.as_deref())
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn worktree_merge(repo: String, branch: String) -> Result<Value, String> {
+async fn worktree_merge(repo: String, branch: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     git::worktree_merge(&repo, &branch)
+
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Delete a branch in `repo` — the second half of worktree removal, which
+/// herdr's `worktree.remove` deliberately leaves behind.
+#[tauri::command]
+async fn branch_delete(repo: String, branch: String, force: bool) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    git::branch_delete(&repo, &branch, force)
+
+    }).await.map_err(|e| e.to_string())?
+}
+
+// ── files panel (right sidebar — checkout tree, badges, search) ────
+
+/// Checkout file tree for the files panel: tracked + untracked with git
+/// badges; ignored dirs appear collapsed and flagged.
+#[tauri::command]
+async fn fs_tree(root: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || fs::tree(&root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn fs_watch(root: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    let watches = state.watches.clone();
+    tauri::async_runtime::spawn_blocking(move || watches.add(&root, move |event| { let _ = app.emit("fs.changed", event); }))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn fs_unwatch(watch_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let watches = state.watches.clone();
+    tauri::async_runtime::spawn_blocking(move || watches.remove(&watch_id)).await.map_err(|e| e.to_string())?
+}
+
+/// Text content for the peek overlay (capped; binary flagged, not sent).
+#[tauri::command]
+async fn fs_read(path: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || fs::read_file(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Content search across the checkout — rg when installed, else git grep.
+#[tauri::command]
+async fn fs_search(root: String, query: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || fs::search(&root, &query))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// One file's diff vs HEAD — staged + unstaged; empty for clean files.
+#[tauri::command]
+async fn fs_diff(root: String, path: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || fs::file_diff(&root, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Open a file in the desktop's default app.
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    fs::open_path(&path)
 }
 
 /// Repo identity for a path ({repo_key, repo_root, name} or null) — powers
 /// project dedupe in the import flow.
 #[tauri::command]
-fn resolve_repo(cwd: String) -> Result<Value, String> {
+async fn resolve_repo(cwd: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     Ok(git::resolve_repo(&cwd)?.unwrap_or(Value::Null))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 // ── agents (herdr's — names, readiness, lifecycle) ─────────────────
@@ -373,8 +492,11 @@ async fn task_start(params: Value) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn agent_get(pane_id: String) -> Result<Value, String> {
+async fn agent_get(pane_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::herdr_call("agent.get", json!({"target": pane_id}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Installed agent CLIs (Settings → Agents). Local `which` probe.
@@ -385,7 +507,7 @@ async fn agent_detect() -> Result<Value, String> {
         .map_err(|e| e.to_string())
 }
 
-/// CLI/skill link state — the onboarding banner polls this on boot.
+/// CLI link state — the onboarding banner polls this on boot.
 #[tauri::command]
 async fn install_status() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(lazed::doctor_report)
@@ -393,7 +515,7 @@ async fn install_status() -> Result<Value, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Link `~/.local/bin/lazed` + the agent-skill dirs. Runs the bundled (or
+/// Link `~/.local/bin/lazed`. Runs the bundled (or
 /// installed) binary; user consent is the banner button itself.
 #[tauri::command]
 async fn install_cli() -> Result<Value, String> {
@@ -405,19 +527,25 @@ async fn install_cli() -> Result<Value, String> {
 /// Type a line into a shell pane without a stream (prompt fan-out to
 /// panes that aren't attached). Text + Enter as one ordered submission.
 #[tauri::command]
-fn pane_send(pane_id: String, text: String) -> Result<Value, String> {
+async fn pane_send(pane_id: String, text: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::herdr_call(
         "pane.send_input",
         json!({"pane_id": pane_id, "text": text, "keys": ["enter"]}),
     )
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn pane_read(pane_id: String, lines: Option<u32>) -> Result<Value, String> {
+async fn pane_read(pane_id: String, lines: Option<u32>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::herdr_call(
         "pane.read",
         json!({"pane_id": pane_id, "source": "visible", "lines": lines.unwrap_or(50)}),
     )
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Agent status notification with click-to-jump. The notification plugin's
@@ -454,26 +582,37 @@ fn notify_agent(
 // ── inbox (daemon-owned GTD capture queue) ─────────────────────────
 
 #[tauri::command]
-fn inbox_list(all: Option<bool>) -> Result<Value, String> {
+async fn inbox_list(all: Option<bool>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("inbox.list", json!({"all": all.unwrap_or(false)}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn inbox_add(params: Value) -> Result<Value, String> {
+async fn inbox_add(params: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("inbox.add", params)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn inbox_update(params: Value) -> Result<Value, String> {
+async fn inbox_update(params: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("inbox.update", params)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn inbox_remove(id: String) -> Result<Value, String> {
+async fn inbox_remove(id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call("inbox.remove", json!({"id": id}))
+
+    }).await.map_err(|e| e.to_string())?
 }
 
-/// Open an item's source link in the desktop browser — http(s) only.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -493,33 +632,48 @@ fn open_url(url: String) -> Result<(), String> {
 // ── automations ────────────────────────────────────────────────────
 
 #[tauri::command]
-fn automation_list() -> Result<Value, String> {
+async fn automation_list() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     automation::list()
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn automation_save(input: Value) -> Result<Value, String> {
+async fn automation_save(input: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     automation::save(input)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn automation_delete(id: String) -> Result<(), String> {
+async fn automation_delete(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
     automation::delete(&id)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn automation_set_enabled(id: String, enabled: bool) -> Result<(), String> {
+async fn automation_set_enabled(id: String, enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
     automation::set_enabled(&id, enabled)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn automation_run_now(id: String) {
+fn automation_run_now(id: String) -> Result<(), String> {
     automation::run_now(id)
 }
 
 #[tauri::command]
-fn automation_reset_seen(id: String) -> Result<(), String> {
+async fn automation_reset_seen(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
     automation::reset_seen(&id)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Fire one item's action — the agent path blocks for seconds, so it
@@ -551,18 +705,27 @@ async fn deps_check(input: Value) -> Result<Value, String> {
 // ── integrations (connected accounts → env vars for spawned shells) ──
 
 #[tauri::command]
-fn integration_list() -> Result<Value, String> {
+async fn integration_list() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     integrations::list()
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn integration_save(input: Value) -> Result<Value, String> {
+async fn integration_save(input: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
     integrations::save(&input)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn integration_delete(provider: String, site: String) -> Result<(), String> {
+async fn integration_delete(provider: String, site: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
     integrations::delete(&provider, &site)
+
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Probe a stored site's credentials — network call, off the IPC thread.
@@ -585,15 +748,15 @@ async fn integration_probe(input: Value) -> Result<Value, String> {
 // ── events ─────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn subscribe_events(on_event: Channel<Value>, state: State<AppState>) -> Result<(), String> {
+fn subscribe_events(on_event: Channel<Box<RawValue>>, state: State<AppState>) -> Result<(), String> {
     // always swap in the caller's channel — after a webview reload the old
     // channel is dead, and without this the stream keeps sending into it
     let chan_slot = state.events_channel.clone();
     *chan_slot.lock().map_err(|e| e.to_string())? = Some(on_event);
-    let send = move |v: &Value| {
+    let send = move |v: Box<RawValue>| {
         if let Ok(g) = chan_slot.lock() {
             if let Some(c) = g.as_ref() {
-                let _ = c.send(v.clone());
+                let _ = c.send(v);
             }
         }
     };
@@ -611,7 +774,7 @@ fn subscribe_events(on_event: Channel<Value>, state: State<AppState>) -> Result<
             true
         });
         eprintln!("[lazed] event stream ended: {err}; reconnecting");
-        send(&json!({"event": "events.reconnect", "type": "events.reconnect"}));
+        send(raw_json(&json!({"event": "events.reconnect", "type": "events.reconnect"})));
         std::thread::sleep(std::time::Duration::from_millis(800));
         let _ = lazed::ensure_server();
     });
@@ -621,7 +784,7 @@ fn subscribe_events(on_event: Channel<Value>, state: State<AppState>) -> Result<
 pub fn run() {
     // One channel slot shared by the daemon event stream and the automation
     // engine — subscribe_events writes the live Channel into it.
-    let events_slot: Arc<Mutex<Option<Channel<Value>>>> = Arc::new(Mutex::new(None));
+    let events_slot: Arc<Mutex<Option<Channel<Box<RawValue>>>>> = Arc::new(Mutex::new(None));
     let events_for_setup = events_slot.clone();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -675,7 +838,8 @@ pub fn run() {
             Ok(())
         })
         .manage(AppState {
-            control: Mutex::new(HashMap::new()),
+            watches: Arc::new(fs_watch::Watches::default()),
+            control: Arc::new(Mutex::new(HashMap::new())),
             events_running: Mutex::new(false),
             events_channel: events_slot,
         })
@@ -703,13 +867,20 @@ pub fn run() {
             group_rename,
             group_remove,
             group_assign,
-            workspace_create,
-            workspace_remove,
+            herdr_call,
             workspace_rename,
             tab_create,
             tab_close,
             worktree_diff,
             worktree_merge,
+            branch_delete,
+            fs_tree,
+            fs_watch,
+            fs_unwatch,
+            fs_read,
+            fs_search,
+            fs_diff,
+            open_path,
             resolve_repo,
             agent_start,
             task_start,
@@ -748,6 +919,7 @@ pub fn run() {
         if let tauri::RunEvent::Exit = event {
             // stop the herdr stream children — panes live on in herdr
             if let Some(state) = handle.try_state::<AppState>() {
+                state.watches.clear();
                 if let Ok(mut map) = state.control.lock() {
                     for (_, h) in map.drain() {
                         h.close();

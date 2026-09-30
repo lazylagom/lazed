@@ -12,6 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
 use tauri::Manager;
@@ -115,7 +116,7 @@ fn default_interval() -> u64 {
     300
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Store {
     #[serde(default)]
     automations: Vec<Automation>,
@@ -126,7 +127,7 @@ static STORE_PATH: OnceLock<PathBuf> = OnceLock::new();
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 /// Shared slot for the webview's event channel — the same cell lib.rs's
 /// AppState owns, so automation updates ride the existing event stream.
-pub type EventSlot = std::sync::Arc<Mutex<Option<Channel<Value>>>>;
+pub type EventSlot = std::sync::Arc<Mutex<Option<Channel<Box<RawValue>>>>>;
 static EVENTS: OnceLock<EventSlot> = OnceLock::new();
 
 fn now_secs() -> u64 {
@@ -140,7 +141,7 @@ fn emit(name: &str, data: Value) {
     if let Some(slot) = EVENTS.get() {
         if let Ok(g) = slot.lock() {
             if let Some(c) = g.as_ref() {
-                let _ = c.send(json!({ "event": name, "type": name, "data": data }));
+                let _ = c.send(crate::raw_json(&json!({ "event": name, "type": name, "data": data })));
             }
         }
     }
@@ -155,19 +156,32 @@ fn load_store(path: &PathBuf) -> Store {
 
 fn save_store(store: &Store) -> Result<(), String> {
     let path = STORE_PATH.get().ok_or("automation store not initialized")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let body = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    let body = serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?;
+    crate::state_file::write(path, &body)
+
 }
 
 fn with_store<R>(f: impl FnOnce(&mut Store) -> R) -> Result<R, String> {
     let mutex = STORE.get().ok_or("automation store not initialized")?;
     let mut g = mutex.lock().map_err(|e| e.to_string())?;
     Ok(f(&mut g))
+}
+
+fn commit_with<R>(store: &mut Store, edit: impl FnOnce(&mut Store) -> Result<R, String>, write: impl FnOnce(&Store) -> Result<(), String>) -> Result<R, String> {
+    let mut candidate = store.clone();
+    let result = edit(&mut candidate)?;
+    write(&candidate)?;
+    *store = candidate;
+    Ok(result)
+}
+
+fn edit_store<R>(edit: impl FnOnce(&mut Store) -> Result<R, String>) -> Result<R, String> {
+    with_store(|store| commit_with(store, edit, save_store))?
+}
+
+static RUNS: OnceLock<std::sync::Arc<crate::automation_gate::Gate>> = OnceLock::new();
+fn run_permit(id: &str) -> Result<crate::automation_gate::Permit, String> {
+    RUNS.get_or_init(Default::default).acquire(id)
 }
 
 /// An automation reduced to its public shape — `seen` is internal state and
@@ -355,18 +369,19 @@ fn mark_error(id: &str, err: String) {
         }
     });
     if let Some(s) = STORE.get().and_then(|m| m.lock().ok()) {
-        let _ = save_store(&s);
+        if let Err(error) = save_store(&s) { eprintln!("[lazed] automation error state could not be persisted: {error}"); }
     }
     emit("automation.updated", json!({}));
 }
 
 /// One poll cycle: collect new items, then run the action for each.
 /// `force` (run-now) ignores `enabled` and the interval; seen/seeded still apply.
-fn run_automation(id: &str, _force: bool) {
+fn run_automation(id: &str, force: bool) {
     let cmd = match with_store(|s| {
         s.automations
             .iter()
             .find(|a| a.id == id)
+            .filter(|a| force || a.enabled)
             .map(|a| a.command.clone())
     }) {
         Ok(Some(v)) => v,
@@ -381,10 +396,11 @@ fn run_automation(id: &str, _force: bool) {
     };
     // Merge results under the lock: unseen ids → fire list. First successful
     // poll only seeds — everything it returns is recorded, nothing fires.
-    let (to_fire, auto_snapshot) = match with_store(|s| {
+    let (to_fire, auto_snapshot) = match edit_store(|s| {
         let Some(a) = s.automations.iter_mut().find(|a| a.id == id) else {
-            return None;
+            return Ok(None);
         };
+        if a.command != cmd || (!force && !a.enabled) { return Ok(None); }
         a.last_ok_at = Some(now_secs());
         a.last_error = None;
         let mut fire = Vec::new();
@@ -408,10 +424,11 @@ fn run_automation(id: &str, _force: bool) {
             a.seen.retain(|i| keep.contains(i));
         }
         a.last_items.truncate(MAX_KEPT_ITEMS);
-        Some((fire, a.clone()))
+        Ok(Some((fire, a.clone())))
     }) {
         Ok(Some(v)) => v,
-        _ => return,
+        Ok(None) => return,
+        Err(error) => { mark_error(id, error); return; }
     };
     for item in to_fire {
         let result = run_action(&auto_snapshot, &item);
@@ -434,31 +451,24 @@ fn run_automation(id: &str, _force: bool) {
             eprintln!("[lazed] automation {id} action failed: {e}");
         }
     }
-    let _ = with_store(|s| {
-        let _ = save_store(s);
-    });
+    if let Err(error) = with_store(|s| save_store(s)).and_then(|result| result) {
+        mark_error(id, format!("action state persistence failed: {error}; inspect before retrying"));
+    }
     emit("automation.updated", json!({}));
 }
 
 fn tick() {
     let due: Vec<String> = with_store(|s| {
         let now = now_secs();
-        let mut due = Vec::new();
-        for a in s.automations.iter_mut() {
-            if !a.enabled || a.command.trim().is_empty() {
-                continue;
-            }
-            let elapsed = a.last_run_at.map(|t| now.saturating_sub(t));
-            if elapsed.map(|e| e >= a.interval_secs).unwrap_or(true) {
-                a.last_run_at = Some(now);
-                due.push(a.id.clone());
-            }
-        }
-        due
-    })
-    .unwrap_or_default();
+        s.automations.iter().filter(|a| a.enabled && !a.command.trim().is_empty()
+            && a.last_run_at.map(|t| now.saturating_sub(t) >= a.interval_secs).unwrap_or(true))
+            .map(|a| a.id.clone()).collect()
+    }).unwrap_or_default();
     for id in due {
-        run_automation(&id, false);
+        if let Ok(permit) = run_permit(&id) {
+            let _ = with_store(|s| { if let Ok(a) = find(s, &id) { a.last_run_at = Some(now_secs()); } });
+            std::thread::spawn(move || { let _permit = permit; run_automation(&id, false); });
+        }
     }
 }
 
@@ -497,7 +507,7 @@ pub fn list() -> Result<Value, String> {
 /// Upsert: empty/absent id mints a new automation; existing id merges the
 /// editable fields and preserves run state.
 pub fn save(input: Value) -> Result<Value, String> {
-    let out = with_store(|s| -> Result<Value, String> {
+    let out = edit_store(|s| -> Result<Value, String> {
         let id = input
             .get("id")
             .and_then(Value::as_str)
@@ -543,7 +553,6 @@ pub fn save(input: Value) -> Result<Value, String> {
                 a.preset = p.as_str().filter(|p| !p.is_empty()).map(str::to_string);
             }
             let out = public(a);
-            let _ = save_store(s);
             return Ok(out);
         }
         let a = Automation {
@@ -580,53 +589,54 @@ pub fn save(input: Value) -> Result<Value, String> {
         };
         s.automations.push(a);
         let out = public(s.automations.last().unwrap());
-        let _ = save_store(s);
         Ok(out)
-    })??;
+    })?;
     emit("automation.updated", json!({}));
     Ok(out)
 }
 
 pub fn delete(id: &str) -> Result<(), String> {
-    with_store(|s| {
+    edit_store(|s| {
         s.automations.retain(|a| a.id != id);
-        let _ = save_store(s);
+        Ok(())
     })?;
     emit("automation.updated", json!({}));
     Ok(())
 }
 
 pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
-    with_store(|s| -> Result<(), String> {
+    edit_store(|s| -> Result<(), String> {
         find(s, id)?.enabled = enabled;
-        let _ = save_store(s);
         Ok(())
-    })??;
+    })?;
     emit("automation.updated", json!({}));
     Ok(())
 }
 
 /// Immediate poll on a worker thread — the command path stays responsive.
-pub fn run_now(id: String) {
-    std::thread::spawn(move || run_automation(&id, true));
+pub fn run_now(id: String) -> Result<(), String> {
+    let permit = run_permit(&id)?;
+    with_store(|s| { find(s, &id)?.last_run_at = Some(now_secs()); Ok::<_, String>(()) })??;
+    std::thread::spawn(move || { let _permit = permit; run_automation(&id, true); });
+    Ok(())
 }
 
 /// Forget seen ids — the next poll treats current items as new and fires.
 pub fn reset_seen(id: &str) -> Result<(), String> {
-    with_store(|s| -> Result<(), String> {
+    edit_store(|s| -> Result<(), String> {
         let a = find(s, id)?;
         a.seen.clear();
         a.seeded = false;
         a.last_items.clear();
-        let _ = save_store(s);
         Ok(())
-    })??;
+    })?;
     emit("automation.updated", json!({}));
     Ok(())
 }
 
 /// Manually fire the action for one collected item.
 pub fn fire(id: &str, item_id: &str) -> Result<(), String> {
+    let _permit = run_permit(id)?;
     let (auto, item) = with_store(|s| -> Result<(Automation, AutomationItem), String> {
         let a = find(s, id)?;
         let item = a
@@ -644,8 +654,12 @@ pub fn fire(id: &str, item_id: &str) -> Result<(), String> {
             if let Some(i) = a.last_items.iter_mut().find(|i| i.id == item_id) {
                 i.fired = true;
             }
-            let _ = save_store(s);
         }
+        save_store(s)
+    })?.map_err(|error| {
+        let message = format!("action completed; persistence failed: {error}; inspect before retrying");
+        mark_error(id, message.clone());
+        message
     })?;
     emit("automation.updated", json!({}));
     Ok(())
@@ -706,5 +720,39 @@ mod tests {
             "fix 'it'\\''s here'"
         );
         assert_eq!(render("{id}: {text}", &item, false), "A-1: it's here");
+    }
+}
+
+#[cfg(test)]
+mod persistence_regressions {
+    use super::*;
+    #[test]
+    fn failed_save_retains_previous_configuration_and_invalid_edits_do_not_write() {
+        let mut store = Store::default();
+        let result = commit_with(&mut store, |candidate| {
+            candidate.automations = serde_json::from_value(json!([{"id":"a1", "name":"candidate"}])).unwrap();
+            Ok(())
+        }, |_| Err("disk full".into()));
+        assert_eq!(result.unwrap_err(), "disk full");
+        assert!(store.automations.is_empty());
+        let result = commit_with(&mut store, |_| Err::<(), String>("invalid configuration".into()), |_| panic!("invalid edit must not write"));
+        assert!(result.is_err());
+        assert!(store.automations.is_empty());
+    }
+    #[test]
+    fn failed_atomic_replace_leaves_the_previous_file_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 { return; }
+        let fixture = crate::repo::tests::fixture();
+        let directory = fixture.root.join("private-state");
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("state.json");
+        crate::state_file::write(&target, b"previous").unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = crate::state_file::write(&target, b"candidate");
+        let previous = std::fs::read(&target);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+        assert_eq!(previous.unwrap(), b"previous");
     }
 }

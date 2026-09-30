@@ -150,24 +150,36 @@ export function normalize(snap: Snapshot): Snapshot {
     ...p,
     agent_name: nameByPane.get(p.pane_id) ?? p.agent_name ?? null,
   }));
+  // one pass over panes/tabs — a per-tab filter is O(panes×tabs)
+  const panesByTab = new Map<string, string[]>();
+  for (const p of normPanes) {
+    const list = panesByTab.get(p.tab_id);
+    if (list) list.push(p.pane_id);
+    else panesByTab.set(p.tab_id, [p.pane_id]);
+  }
   const normTabs = [...tabs].sort(byNumber).map((t) => {
-    const inTab = normPanes
-      .filter((p) => p.tab_id === t.tab_id)
-      .map((p) => p.pane_id);
+    const inTab = panesByTab.get(t.tab_id) ?? [];
     const order = layoutOrder.get(t.tab_id);
-    const ordered = order
-      ? [
-          ...order.filter((id) => inTab.includes(id)),
-          ...inTab.filter((id) => !order.includes(id)),
-        ]
-      : inTab;
-    return { ...t, panes: ordered };
+    if (!order) return { ...t, panes: inTab };
+    const inTabSet = new Set(inTab);
+    const orderSet = new Set(order);
+    return {
+      ...t,
+      panes: [
+        ...order.filter((id) => inTabSet.has(id)),
+        ...inTab.filter((id) => !orderSet.has(id)),
+      ],
+    };
   });
+  const tabsByWs = new Map<string, string[]>();
+  for (const t of normTabs) {
+    const list = tabsByWs.get(t.workspace_id);
+    if (list) list.push(t.tab_id);
+    else tabsByWs.set(t.workspace_id, [t.tab_id]);
+  }
   const normWs = workspaces.map((w) => ({
     ...w,
-    tabs: normTabs
-      .filter((t) => t.workspace_id === w.workspace_id)
-      .map((t) => t.tab_id),
+    tabs: tabsByWs.get(w.workspace_id) ?? [],
   }));
   return { ...snap, panes: normPanes, tabs: normTabs, workspaces: normWs };
 }
@@ -233,6 +245,41 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
+// ── files panel ────────────────────────────────────────────────────
+
+/** git badge on a tree entry: M modified, D deleted, U untracked, ! ignored. */
+export type FsGit = "M" | "D" | "U" | "!";
+
+export interface FsEntry {
+  /** repo-relative path, "/" separators */
+  path: string;
+  kind: "file" | "dir";
+  git?: FsGit | null;
+  /** dir the backend didn't enumerate — ignored dir or embedded repo;
+   * row is informational, not expandable */
+  collapsed?: boolean;
+}
+
+export interface FsTree {
+  /** resolved root (repo toplevel) the entries are relative to */
+  root: string;
+  git: boolean;
+  truncated?: boolean;
+  entries: FsEntry[];
+}
+
+export interface FsRead {
+  content?: string;
+  truncated?: boolean;
+  binary?: boolean;
+}
+
+export interface FsHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
 export const lazed = {
   bootstrap: () => invoke<BootstrapResult>("bootstrap"),
   installStatus: () => invoke<DoctorReport>("install_status"),
@@ -287,28 +334,15 @@ export const lazed = {
   groupAssign: (projectId: string, groupId?: string | null) =>
     invoke("group_assign", { projectId, groupId: groupId ?? null }),
 
-  // workspaces — one checkout each (main or a linked git worktree)
-  workspaceCreate: (
-    projectId: string,
-    branch: string,
-    base?: string,
-    label?: string,
-  ) =>
-    invoke<{
-      checkout_path: string;
-      branch: string;
-      project_id: string;
-      workspace_id: string;
-      tab_id: string;
-      pane_id: string;
-    }>("workspace_create", { projectId, branch, base, label }),
-  workspaceRemove: (
-    workspaceId: string,
-    force = false,
-    killAgents = false,
-    keepBranch?: boolean,
-  ) =>
-    invoke("workspace_remove", { workspaceId, force, killAgents, keepBranch }),
+  /**
+   * Generic herdr API call straight to the herdr socket — worktree
+   * create/remove and any other execution-layer method; lazed keeps no
+   * duplicate of what herdr already provides.
+   */
+  herdrCall: <T = Record<string, unknown>>(
+    method: string,
+    params?: Record<string, unknown>,
+  ) => invoke<T>("herdr_call", { method, params: params ?? {} }),
   workspaceRename: (workspaceId: string, label: string) =>
     invoke("workspace_rename", { workspaceId, label }),
 
@@ -334,11 +368,34 @@ export const lazed = {
       repo,
       branch,
     }),
+  /** delete the branch a removed worktree was on (herdr leaves it behind);
+   * `force` maps to `git branch -D` */
+  branchDelete: (repo: string, branch: string, force?: boolean) =>
+    invoke<{ ok: boolean; output: string }>("branch_delete", {
+      repo,
+      branch,
+      force: force ?? false,
+    }),
   resolveRepo: (cwd: string) =>
     invoke<{ repo_key: string; repo_root?: string; name?: string } | null>(
       "resolve_repo",
       { cwd },
     ),
+
+  // files panel — checkout tree, peek, search (local fs, git-aware)
+  fsWatch: (root: string) =>
+    invoke<{ watch_id: string; root: string }>("fs_watch", { root }),
+  fsUnwatch: (watchId: string) => invoke("fs_unwatch", { watchId }),
+  fsTree: (root: string) => invoke<FsTree>("fs_tree", { root }),
+  fsRead: (path: string) => invoke<FsRead>("fs_read", { path }),
+  fsSearch: (root: string, query: string) =>
+    invoke<{ results: FsHit[]; truncated?: boolean }>("fs_search", {
+      root,
+      query,
+    }),
+  fsDiff: (root: string, path: string) =>
+    invoke<{ diff: string }>("fs_diff", { root, path }),
+  fsOpen: (path: string) => invoke("open_path", { path }),
 
   // agents (herdr's) + lazed tasks
   taskStart: (params: {
@@ -357,6 +414,7 @@ export const lazed = {
       agent_name?: string;
       phase: string;
       error?: string;
+      receipt?: { accepted?: boolean; submitted?: boolean } | null;
     }>("task_start", { params }),
   agentStart: (paneId: string, kind: string) =>
     invoke("agent_start", { paneId, kind }),
@@ -376,11 +434,6 @@ export interface DetectedAgent {
 export interface AgentDetectResult {
   context: string;
   agents: DetectedAgent[];
-}
-
-/** POSIX single-quote escaping for shell command strings. */
-export function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Agent kinds offered in the picker — a subset of herdr's manifests. */

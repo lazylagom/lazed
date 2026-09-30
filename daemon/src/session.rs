@@ -92,7 +92,6 @@ pub struct Session {
     pub workspaces: HashMap<String, Workspace>,
     /// ordered groups — display order in the sidebar
     pub groups: Vec<Group>,
-    pub removing_workspaces: std::collections::HashSet<String>,
     next_project: u64,
     next_group: u64,
     pub focused_project_id: Option<String>,
@@ -112,7 +111,6 @@ impl Session {
             projects: HashMap::new(),
             workspaces: HashMap::new(),
             groups: Vec::new(),
-            removing_workspaces: Default::default(),
             next_project: 1,
             next_group: 1,
             focused_project_id: None,
@@ -137,10 +135,10 @@ impl Session {
     /// to the same project as its main checkout. Falls back to cwd itself
     /// for non-repo dirs. Spawns git — call outside the session lock.
     pub fn resolve_repo(cwd: &str) -> (String, String) {
-        let root = git_out(cwd, &["rev-parse", "--show-toplevel"]).unwrap_or_else(|| cwd.to_string());
-        let key = git_out(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .unwrap_or_else(|| root.clone());
-        (root, key)
+        match crate::repo::resolve(cwd) {
+            Some(repo) => (repo.main.unwrap_or(repo.checkout), repo.key),
+            None => (cwd.to_string(), cwd.to_string()),
+        }
     }
 
     /// Current branch of a checkout (None when detached / not a repo).
@@ -164,7 +162,9 @@ impl Session {
         group_id: Option<&str>,
     ) -> Result<String, String> {
         if let Some(p) = self.project_by_repo_key(repo_key) {
-            return Ok(p.id.clone());
+            let id = p.id.clone();
+            self.projects.get_mut(&id).unwrap().repo_root = repo_root.to_string();
+            return Ok(id);
         }
         if let Some(gid) = group_id {
             if !self.groups.iter().any(|g| g.id == gid) {
@@ -306,28 +306,30 @@ impl Session {
         let gone: Vec<String> = self
             .workspaces
             .keys()
-            .filter(|id| !live.contains_key(*id) && !self.removing_workspaces.contains(*id))
+            .filter(|id| !live.contains_key(*id))
             .cloned()
             .collect();
         for id in gone {
             let _ = self.close_workspace(&id);
         }
         let mut unknown = Vec::new();
+        // ws → first pane cwd, built once instead of a full panes scan per
+        // unknown workspace
+        let mut pane_cwd: HashMap<&str, &str> = HashMap::new();
+        for p in herdr.get("panes").and_then(Value::as_array).into_iter().flatten() {
+            if let (Some(ws), Some(cwd)) = (
+                p.get("workspace_id").and_then(Value::as_str),
+                p.get("cwd").and_then(Value::as_str),
+            ) {
+                pane_cwd.entry(ws).or_insert(cwd);
+            }
+        }
         for id in live.keys() {
             if self.workspaces.contains_key(id) {
                 continue;
             }
-            let cwd = herdr
-                .get("panes")
-                .and_then(Value::as_array)
-                .and_then(|ps| {
-                    ps.iter()
-                        .filter(|p| p.get("workspace_id").and_then(Value::as_str) == Some(id))
-                        .find_map(|p| p.get("cwd").and_then(Value::as_str))
-                })
-                .map(str::to_string);
-            if let Some(cwd) = cwd {
-                unknown.push((id.clone(), cwd));
+            if let Some(cwd) = pane_cwd.get(id.as_str()) {
+                unknown.push((id.clone(), (*cwd).to_string()));
             }
         }
         unknown
@@ -528,8 +530,13 @@ impl Session {
     // ── events / persistence ──────────────────────────────────────────────
 
     pub fn broadcast_event(&mut self, name: &str, data: Value) {
-        let msg = json!({"event": name, "data": data});
-        self.event_subs.retain(|s| s.send(msg.clone()).is_ok());
+        // serialize once — subscribers share one buffer, so fan-out is a
+        // refcount bump rather than a Value clone + serialize per client
+        let mut line = serde_json::to_string(&json!({"event": name, "data": data}))
+            .unwrap_or_else(|_| "{}".to_string());
+        line.push('\n');
+        let line: std::sync::Arc<str> = line.into();
+        self.event_subs.retain(|s| s.send_line(line.clone()).is_ok());
     }
 
     pub fn persist(&self) -> Result<(), String> {
@@ -550,7 +557,11 @@ impl Session {
     /// Restore annotations. herdr restores the panes themselves; the first
     /// `reconcile` after boot drops annotations for workspaces herdr lost.
     pub fn restore(&mut self) {
-        let Ok(raw) = std::fs::read_to_string(state::session_path()) else {
+        self.restore_path(&state::session_path());
+    }
+
+    fn restore_path(&mut self, path: &std::path::Path) {
+        let Ok(raw) = std::fs::read_to_string(path) else {
             return;
         };
         let Ok(p) = serde_json::from_str::<Persisted>(&raw) else {
@@ -577,6 +588,25 @@ impl Session {
             proj.workspaces.retain(|wid| self.workspaces.contains_key(wid));
         }
         self.workspaces.retain(|_, w| self.projects.contains_key(&w.project_id));
+        // Repair v3 annotations produced when a linked checkout was mistaken
+        // for the main repo. IDs, groups, labels and focus remain unchanged.
+        for project in self.projects.values_mut() {
+            let Some(repo) = crate::repo::resolve(&project.repo_root) else { continue };
+            if repo.key != project.repo_key { continue; }
+            let main = repo.main;
+            if let Some(root) = &main { project.repo_root = root.clone(); }
+            let mut has_main = false;
+            for id in &project.workspaces {
+                if let Some(ws) = self.workspaces.get_mut(id) {
+                    if let Some(checkout) = crate::repo::resolve(&ws.path) {
+                        ws.path = checkout.checkout;
+                    }
+                    ws.is_main = !has_main && main.as_ref().is_some_and(|root| same_path(root, &ws.path));
+                    has_main |= ws.is_main;
+                }
+            }
+            project.workspaces.sort_by_key(|id| !self.workspaces.get(id).is_some_and(|ws| ws.is_main));
+        }
     }
 }
 
@@ -638,15 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_keeps_workspaces_mid_removal() {
-        let (mut s, pid) = with_project();
-        s.register_workspace("w1", &pid, "/repo", None, None, true).unwrap();
-        s.removing_workspaces.insert("w1".into());
-        s.reconcile(&json!({"workspaces": [], "panes": []}));
-        assert!(s.workspaces.contains_key("w1"));
-    }
-
-    #[test]
     fn adopt_files_under_repo_project() {
         let mut s = Session::new();
         s.adopt_workspace("w1", "/tmp", "/tmp", "/tmp", None).unwrap();
@@ -688,5 +709,34 @@ mod tests {
         let ws = s.close_project(&pid).unwrap();
         assert_eq!(ws, vec!["w1", "w2"]);
         assert!(s.workspaces.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod restore_regressions {
+    use super::*;
+    #[test]
+    fn repairs_old_worktree_metadata_without_changing_organization_ids() {
+        let fixture = crate::repo::tests::fixture();
+        let repo = crate::repo::resolve(fixture.linked.to_str().unwrap()).unwrap();
+        let path = fixture.root.join("session.json");
+        let old = Persisted {
+            version: SESSION_VERSION, next_project: 2, next_group: 2,
+            focused_project_id: Some("p1".into()),
+            projects: vec![Project { id: "p1".into(), label: Some("keep project".into()), repo_root: fixture.linked.to_string_lossy().into_owned(), repo_key: repo.key, workspaces: vec!["w1".into(), "w2".into()] }],
+            groups: vec![Group { id: "g1".into(), label: Some("keep group".into()), projects: vec!["p1".into()] }],
+            workspaces: vec![Workspace { id: "w1".into(), project_id: "p1".into(), label: Some("keep workspace".into()), path: fixture.linked.to_string_lossy().into_owned(), branch: Some("fixture".into()), is_main: true },
+                Workspace { id: "w2".into(), project_id: "p1".into(), label: None, path: fixture.main.to_string_lossy().into_owned(), branch: None, is_main: false }],
+        };
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let mut session = Session::new();
+        session.restore_path(&path);
+        assert_eq!(session.projects["p1"].repo_root, fixture.main.to_str().unwrap());
+        assert!(!session.workspaces["w1"].is_main);
+        assert!(session.workspaces["w2"].is_main);
+        assert_eq!(session.projects["p1"].workspaces, ["w2", "w1"]);
+        assert_eq!(session.workspaces["w1"].label.as_deref(), Some("keep workspace"));
+        assert_eq!(session.groups[0].projects, ["p1"]);
+        assert_eq!(session.focused_project_id.as_deref(), Some("p1"));
     }
 }

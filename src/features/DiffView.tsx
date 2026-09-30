@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { lazed } from "../shared/lazed";
-import { parseDiff } from "./diff-parser";
+import { type DiffFile, type DiffLine, parseDiff } from "./diff-parser";
 export { parseDiff } from "./diff-parser";
 
 interface Comment {
@@ -8,6 +8,36 @@ interface Comment {
   line: number;
   text: string;
 }
+
+/** One file's diff lines. Memoized — typing a comment or toggling a
+ * confirm re-renders DiffView, and the parsed `files` array is stable
+ * (useMemo on the diff string), so the line DOM must not be rebuilt. */
+const DiffFileBlock = memo(function DiffFileBlock({
+  file,
+  onPickLine,
+}: {
+  file: DiffFile;
+  onPickLine: (file: DiffFile, line: DiffLine) => void;
+}) {
+  return (
+    <div className="diff-file">
+      <div className="diff-fname">{file.path}</div>
+      {file.lines.map((l, i) => (
+        <button
+          key={`${file.path}:${i}`}
+          type="button"
+          className={`diff-line ${l.kind}`}
+          onClick={() => onPickLine(file, l)}
+        >
+          <span className="diff-lno">
+            {l.kind === "add" || l.kind === "ctx" ? l.newNo : ""}
+          </span>
+          <span className="diff-text">{l.text}</span>
+        </button>
+      ))}
+    </div>
+  );
+});
 
 export function DiffView({
   checkout,
@@ -47,6 +77,8 @@ export function DiffView({
   const [confirmMerge, setConfirmMerge] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [removeErr, setRemoveErr] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
 
   const load = useCallback(() => {
     setError(null);
@@ -71,7 +103,11 @@ export function DiffView({
   };
 
   const sendReview = () => {
-    if (!agentTermId || comments.length === 0 || !data) return;
+    if (!agentTermId || comments.length === 0 || !data || sendingRef.current)
+      return;
+    sendingRef.current = true;
+    setSending(true);
+    const submitted = new Set(comments);
     const body = [
       `Review comments on branch ${data.branch}:`,
       "",
@@ -79,8 +115,18 @@ export function DiffView({
       "",
       "Please address these and update the branch.",
     ].join("\n");
-    lazed.agentPrompt(agentTermId, body).catch((e) => setError(String(e)));
-    setComments([]);
+    lazed
+      .agentPrompt(agentTermId, body)
+      .then(() =>
+        setComments((current) =>
+          current.filter((comment) => !submitted.has(comment)),
+        ),
+      )
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        sendingRef.current = false;
+        setSending(false);
+      });
   };
 
   const doMerge = () => {
@@ -95,8 +141,20 @@ export function DiffView({
   const doRemove = (force: boolean) => {
     setConfirmRemove(false);
     lazed
-      .workspaceRemove(workspaceId, force, force)
-      .then(() => onClose())
+      .herdrCall("worktree.remove", { workspace_id: workspaceId, force })
+      .then(async () => {
+        // herdr leaves the branch behind — remove it too
+        if (repoRoot && data?.branch) {
+          const r = await lazed
+            .branchDelete(repoRoot, data.branch, force)
+            .catch((e) => ({ ok: false, output: String(e) }));
+          if (!r.ok) {
+            setRemoveErr(`worktree removed; branch kept: ${r.output}`);
+            return;
+          }
+        }
+        onClose();
+      })
       .catch((e) => setRemoveErr(String(e)));
   };
 
@@ -105,6 +163,12 @@ export function DiffView({
     () => (diff === undefined ? [] : parseDiff(diff)),
     [diff],
   );
+  const pickLine = useCallback((f: DiffFile, l: DiffLine) => {
+    if (l.kind === "add" || l.kind === "ctx") {
+      setDraftFor({ file: f.path, line: l.newNo ?? 0 });
+      setDraft("");
+    }
+  }, []);
 
   return (
     <div className="diff-panel">
@@ -166,27 +230,7 @@ export function DiffView({
           <div className="inbox-empty">no changes yet</div>
         )}
         {files.map((f) => (
-          <div key={f.path} className="diff-file">
-            <div className="diff-fname">{f.path}</div>
-            {f.lines.map((l, i) => (
-              <button
-                key={`${f.path}:${i}`}
-                type="button"
-                className={`diff-line ${l.kind}`}
-                onClick={() => {
-                  if (l.kind === "add" || l.kind === "ctx") {
-                    setDraftFor({ file: f.path, line: l.newNo ?? 0 });
-                    setDraft("");
-                  }
-                }}
-              >
-                <span className="diff-lno">
-                  {l.kind === "add" || l.kind === "ctx" ? l.newNo : ""}
-                </span>
-                <span className="diff-text">{l.text}</span>
-              </button>
-            ))}
-          </div>
+          <DiffFileBlock key={f.path} file={f} onPickLine={pickLine} />
         ))}
       </div>
       {draftFor && (
@@ -227,7 +271,7 @@ export function DiffView({
           <button
             type="button"
             className="fanout-go"
-            disabled={!agentTermId}
+            disabled={!agentTermId || sending}
             onClick={sendReview}
           >
             send {comments.length} comment{comments.length === 1 ? "" : "s"} to

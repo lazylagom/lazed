@@ -1,10 +1,10 @@
-interface DiffLine {
+export interface DiffLine {
   kind: "ctx" | "add" | "del" | "hunk" | "meta";
   text: string;
   newNo?: number;
 }
 
-interface DiffFile {
+export interface DiffFile {
   path: string;
   lines: DiffLine[];
 }
