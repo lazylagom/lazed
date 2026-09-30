@@ -170,6 +170,9 @@ fn handle_conn(stream: UnixStream, session: Shared) {
         } else if m.starts_with("inbox.") {
             let mut s = lock(&session);
             crate::inbox::handle(&mut s, m, &params)
+        } else if m.starts_with("todo.") {
+            let mut s = lock(&session);
+            crate::todo::handle(&mut s, m, &params)
         } else {
             let mut s = lock(&session);
             dispatch(&mut s, m, &params, &tx)
@@ -209,7 +212,7 @@ fn dispatch(s: &mut Session, method: &str, p: &Value, tx: &ClientSender) -> Resu
             Ok(json!({
                 "running": true,
                 "version": env!("CARGO_PKG_VERSION"),
-                "capabilities": ["herdr.overlay.v1", "task.v1", "inbox.v1", "server.restart.v1", "server.stop_if_empty.v1"],
+                "capabilities": ["herdr.overlay.v1", "task.v1", "inbox.v1", "todo.v1", "server.restart.v1", "server.stop_if_empty.v1"],
                 "exe": exe.map(|p| p.to_string_lossy().to_string()),
                 "pid": std::process::id(),
                 "started_at": *STARTED_AT,
@@ -377,11 +380,19 @@ fn project_create(session: &Shared, p: &Value) -> Result<Value, String> {
             Err(e) => return Err(e),
         }
     }
+    // the skill is a convenience — a failed install never fails the import
+    let init = if p.get("init_skills").and_then(Value::as_bool) == Some(true) {
+        crate::crew::init(std::path::Path::new(&repo_root), false)
+            .unwrap_or_else(|e| json!({"error": e}))
+    } else {
+        Value::Null
+    };
     let s = lock(session);
     Ok(json!({
         "project": s.project_json(&project_id),
         "workspace": s.main_workspace(&project_id).map(|w| s.workspace_json(&w.id)),
         "opened": opened,
+        "init": init,
     }))
 }
 

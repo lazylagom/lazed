@@ -309,7 +309,12 @@ export const lazed = {
     invoke<{ text: string }>("pane_read", { paneId, lines }),
 
   // projects
-  projectCreate: (cwd: string, label?: string, groupId?: string) =>
+  projectCreate: (
+    cwd: string,
+    label?: string,
+    groupId?: string,
+    initSkills?: boolean,
+  ) =>
     invoke<{
       project: ProjectInfo;
       workspace?: WorkspaceInfo | null;
@@ -319,7 +324,13 @@ export const lazed = {
         pane_id?: string;
         error?: string;
       } | null;
-    }>("project_create", { cwd, label, groupId }),
+      /** crew skill install result (`initSkills`) */
+      init?: {
+        installed?: string[];
+        skipped?: string[];
+        error?: string;
+      } | null;
+    }>("project_create", { cwd, label, groupId, initSkills }),
   projectFocus: (projectId: string) => invoke("project_focus", { projectId }),
   projectClose: (projectId: string) => invoke("project_close", { projectId }),
   projectRename: (projectId: string, label: string) =>

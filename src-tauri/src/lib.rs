@@ -208,11 +208,12 @@ async fn project_create(
     cwd: String,
     label: Option<String>,
     group_id: Option<String>,
+    init_skills: Option<bool>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
     lazed::api_call(
         "project.create",
-        json!({"cwd": cwd, "label": label, "group_id": group_id}),
+        json!({"cwd": cwd, "label": label, "group_id": group_id, "init_skills": init_skills}),
     )
 
     }).await.map_err(|e| e.to_string())?
@@ -613,6 +614,49 @@ async fn inbox_remove(id: String) -> Result<Value, String> {
     }).await.map_err(|e| e.to_string())?
 }
 
+// ── todo (daemon-owned personal checklist) ─────────────────────────
+
+#[tauri::command]
+async fn todo_list() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    lazed::api_call("todo.list", json!({}))
+
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn todo_add(params: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    lazed::api_call("todo.add", params)
+
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn todo_update(params: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    lazed::api_call("todo.update", params)
+
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn todo_remove(id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    lazed::api_call("todo.remove", json!({"id": id}))
+
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn todo_clear() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+    lazed::api_call("todo.clear", json!({}))
+
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Open an item's source link in the desktop browser — http(s) only.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -908,6 +952,11 @@ pub fn run() {
             inbox_add,
             inbox_update,
             inbox_remove,
+            todo_list,
+            todo_add,
+            todo_update,
+            todo_remove,
+            todo_clear,
             open_url,
         ])
         .build(tauri::generate_context!())

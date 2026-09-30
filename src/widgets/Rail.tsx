@@ -3,11 +3,13 @@ import {
   InboxIcon,
   Pulse01Icon,
   Settings01Icon,
+  Task01Icon,
   ZapIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { memo } from "react";
 
-export type RailView = "projects" | "inbox";
+export type RailView = "projects" | "inbox" | "todo";
 
 type RailItem = {
   icon: typeof Folder01Icon;
@@ -30,6 +32,13 @@ const ITEMS: (RailItem & { id: RailView })[] = [
     title: "Inbox",
     desc: "Captured items awaiting triage",
     kbd: "⇧⌘4",
+  },
+  {
+    id: "todo",
+    icon: Task01Icon,
+    title: "Todo",
+    desc: "Personal quick-capture checklist",
+    kbd: "⇧⌘5",
   },
 ];
 
@@ -72,7 +81,7 @@ function RailButton({
 /** Left edge icon rail — switches which panel occupies the sidebar space.
  * Automations, the session monitor, and settings are screens pinned to
  * the bottom; the rail stays exposed while one is open. */
-export function Rail({
+export const Rail = memo(function Rail({
   active,
   onSelect,
   onAutomations,
@@ -83,6 +92,7 @@ export function Rail({
   settingsOpen,
   automationAlert,
   inboxCount,
+  todoCount,
 }: {
   active: RailView;
   onSelect: (v: RailView) => void;
@@ -95,6 +105,8 @@ export function Rail({
   automationAlert?: boolean;
   /** open inbox items — shown as a badge on the inbox button */
   inboxCount?: number;
+  /** open todos — shown as a badge on the todo button */
+  todoCount?: number;
 }) {
   return (
     <div className="rail">
@@ -103,7 +115,13 @@ export function Rail({
           key={it.id}
           item={it}
           sel={active === it.id}
-          count={it.id === "inbox" ? inboxCount : undefined}
+          count={
+            it.id === "inbox"
+              ? inboxCount
+              : it.id === "todo"
+                ? todoCount
+                : undefined
+          }
           onClick={() => onSelect(it.id)}
         />
       ))}
@@ -142,4 +160,4 @@ export function Rail({
       </div>
     </div>
   );
-}
+});

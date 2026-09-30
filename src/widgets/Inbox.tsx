@@ -1,5 +1,6 @@
 import { BellIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { memo } from "react";
 import type { PaneInfo } from "../shared/lazed";
 
 function basename(p?: string | null) {
@@ -12,7 +13,7 @@ function basename(p?: string | null) {
  *  before done rows — a permission dialog needs action, a finished agent is
  *  just information. The panel is ephemeral by design: dismiss entries and
  *  they reappear only if that terminal goes back to work and blocks again. */
-export function InboxPanel({
+export const InboxPanel = memo(function InboxPanel({
   items,
   onJump,
   onDismiss,
@@ -84,4 +85,4 @@ export function InboxPanel({
       </div>
     </div>
   );
-}
+});

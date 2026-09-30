@@ -48,12 +48,14 @@ import {
   subscribeEvents,
 } from "./shared/lazed";
 import { notificationsEnabled } from "./shared/settings";
+import { type TodoItem, todo } from "./shared/todo";
 import { safeUnlisten } from "./shared/unlisten";
 import { useSessionSnapshot } from "./shared/use-session-snapshot";
 import { InboxPanel } from "./widgets/Inbox";
 import { InboxView } from "./widgets/InboxView";
 import { Rail, type RailView } from "./widgets/Rail";
 import { Sidebar } from "./widgets/Sidebar";
+import { TodoView } from "./widgets/TodoView";
 
 const AutomationEditor = deferred<
   ComponentProps<typeof import("./features/AutomationEditor").AutomationEditor>
@@ -230,15 +232,17 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   // non-null while `lazed doctor` reports missing/broken install links
   const [installReport, setInstallReport] = useState<DoctorReport | null>(null);
-  // left-rail space switch — projects or the GTD inbox;
+  // left-rail space switch — projects, the GTD inbox, or the todo list;
   // automations and session are full-screen overlays
   const [railView, setRailView] = useState<RailView>(() => {
     const v = localStorage.getItem("lazed-rail");
-    return v === "inbox" ? v : "projects";
+    return v === "inbox" || v === "todo" ? v : "projects";
   });
   const [autos, setAutos] = useState<Automation[]>([]);
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
   const [inboxErr, setInboxErr] = useState<string | null>(null);
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
+  const [todoErr, setTodoErr] = useState<string | null>(null);
   const [autoEditor, setAutoEditor] = useState<{
     auto?: Automation;
   } | null>(null);
@@ -291,6 +295,16 @@ export function App() {
         setInboxItems(items);
       })
       .catch((e) => setInboxErr(String(e)));
+  }, []);
+
+  const loadTodo = useCallback(() => {
+    todo
+      .list()
+      .then((items) => {
+        setTodoErr(null);
+        setTodoItems(items);
+      })
+      .catch((e) => setTodoErr(String(e)));
   }, []);
 
   const flash = useCallback((msg: string) => {
@@ -348,6 +362,7 @@ export function App() {
       .catch(() => {});
     loadAutos();
     loadInbox();
+    loadTodo();
     subscribeEvents((ev: LazedEvent) => {
       if (disposed) return;
       const name = ev.event ?? ev.type ?? "";
@@ -358,6 +373,10 @@ export function App() {
       }
       if (name === "inbox.updated") {
         loadInbox();
+        return;
+      }
+      if (name === "todo.updated") {
+        loadTodo();
         return;
       }
       if (name === "herdr.pane.scroll_changed") {
@@ -459,6 +478,7 @@ export function App() {
     scheduleRefresh,
     loadAutos,
     loadInbox,
+    loadTodo,
     setSnap,
     invalidateSnapshot,
   ]);
@@ -914,7 +934,7 @@ export function App() {
   }, [activeWorkspace, focusCreatedTerm]);
 
   const newProject = useCallback(
-    async (cwd?: string, label?: string) => {
+    async (cwd?: string, label?: string, initSkills?: boolean) => {
       setShowImport(false);
       try {
         if (cwd) {
@@ -934,7 +954,15 @@ export function App() {
             }
           }
         }
-        const res = await lazed.projectCreate(cwd ?? "", label);
+        const res = await lazed.projectCreate(
+          cwd ?? "",
+          label,
+          undefined,
+          initSkills,
+        );
+        if (res.init?.error) setError(`crew skill: ${res.init.error}`);
+        else if (res.init?.installed?.length)
+          flash("crew skill installed — ask any agent to use crew");
         const pid = res.project?.project_id;
         if (pid) await lazed.projectFocus(pid);
         const wid = res.workspace?.workspace_id;
@@ -1129,6 +1157,7 @@ export function App() {
           else if (digit === "2") toggleScreen("autos");
           else if (digit === "3") toggleScreen("session");
           else if (digit === "4") selectRail("inbox");
+          else if (digit === "5") selectRail("todo");
         } else if (
           e.metaKey &&
           !e.shiftKey &&
@@ -1148,7 +1177,7 @@ export function App() {
         const i = Math.max(0, list.indexOf(cur ?? ""));
         return list[(i + d + list.length) % list.length];
       };
-      // workspace chords belong to the projects space — on the inbox
+      // workspace chords belong to the projects space — on the inbox/todo
       // rails a bound key is still swallowed (an unhandled ⌘W would close
       // the window, ⌃N would reach the PTY) but fires nothing until those
       // views get chords of their own
@@ -1259,6 +1288,10 @@ export function App() {
         e.preventDefault();
         e.stopPropagation();
         selectRail("inbox");
+      } else if (e.metaKey && e.shiftKey && digit === "5") {
+        e.preventDefault();
+        e.stopPropagation();
+        selectRail("todo");
       } else if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && digit) {
         // ⌘1-9 — jump to the Nth workspace in sidebar order
         e.preventDefault();
@@ -1328,6 +1361,10 @@ export function App() {
   const openInboxCount = useMemo(
     () => inboxItems.filter((i) => i.status === "open").length,
     [inboxItems],
+  );
+  const openTodoCount = useMemo(
+    () => todoItems.filter((i) => !i.done).length,
+    [todoItems],
   );
   // stable term list for the memoized TermGrid — [zoomedTerm] would be a
   // fresh array every render otherwise
@@ -1583,6 +1620,7 @@ export function App() {
           settingsOpen={showSettings}
           automationAlert={autos.some((a) => a.last_error)}
           inboxCount={openInboxCount}
+          todoCount={openTodoCount}
         />
         {railView === "inbox" ? (
           <InboxView
@@ -1596,6 +1634,14 @@ export function App() {
                 : undefined
             }
             onChanged={loadInbox}
+            onFlash={flash}
+            onError={setError}
+          />
+        ) : railView === "todo" ? (
+          <TodoView
+            items={todoItems}
+            error={todoErr}
+            onChanged={loadTodo}
             onFlash={flash}
             onError={setError}
           />

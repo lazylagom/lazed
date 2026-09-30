@@ -2,13 +2,14 @@
 //!
 //!   lazed server [--foreground]       start the daemon
 //!   lazed api <method> [params-json]  one-shot API call over the socket
-//!   lazed task | inbox                durable tasks, GTD inbox
+//!   lazed task | inbox | todo         durable tasks, GTD inbox, todo list
 //!   lazed herdr status|snapshot|call <method> [params-json]
 //!                                     herdr adapter — talks to the herdr
 //!                                     server directly, no lazed daemon needed
 //!   lazed install | uninstall | doctor
 //!                                     manage the CLI link on $HOME
 //!   lazed status | stop | restart     convenience wrappers
+mod crew;
 mod herdr;
 #[path = "../../shared/repo.rs"]
 mod repo;
@@ -19,6 +20,7 @@ mod session;
 mod specs;
 mod state;
 mod tasks;
+mod todo;
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -31,6 +33,8 @@ fn main() {
         Some("api") => cmd_api(&args[1..]),
         Some("task") => tasks::cli(&args[1..]),
         Some("inbox") => inbox::cli(&args[1..]),
+        Some("todo") => todo::cli(&args[1..]),
+        Some("init") => crew::cli(&args[1..]),
         Some(group @ ("agent" | "pane" | "worktree")) => {
             eprintln!(
                 "lazed {group}: moved to herdr — use `herdr {group} …` (see `herdr --skill`)"
@@ -70,6 +74,8 @@ USAGE:
   lazed api <method> [params]     one-shot API call (params = JSON)
   lazed task <start|status|list|read|tell|resume> [options]
   lazed inbox <add|list|done|reopen|snooze|remove>
+  lazed todo <add|list|done|undone|rename|remove|clear>
+  lazed init [--force] [path]     install the crew skill into a project
   (pane/agent/worktree control: `herdr pane …`, `herdr agent …`, `herdr worktree …`)
   lazed herdr <status|snapshot|call <method> [params]>
                                   herdr execution-layer adapter (PLAN §3b)

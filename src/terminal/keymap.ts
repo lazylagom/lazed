@@ -78,7 +78,7 @@ function normalizeCtrlKey(e: KeyboardEvent): string {
 }
 
 /** Ctrl + key -> terminal control character (0x00-0x1F) */
-export function translateCtrl(key: string): string | null {
+function translateCtrl(key: string): string | null {
   if (key.length === 1) {
     const code = key.toUpperCase().charCodeAt(0);
     // Ctrl+A(0x01) .. Ctrl+Z(0x1A)
@@ -106,7 +106,7 @@ export function translateCtrl(key: string): string | null {
 }
 
 /** special key -> VT100/xterm escape sequence */
-export function translateSpecialKey(
+function translateSpecialKey(
   key: string,
   shiftKey: boolean,
   appCursor: boolean,

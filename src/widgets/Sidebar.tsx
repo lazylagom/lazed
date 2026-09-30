@@ -14,7 +14,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { AgentIcon } from "../components/AgentIcon";
 import type {
   AgentStatus,
@@ -161,17 +161,17 @@ function WorkspaceRow({
   onFocusWorkspace: (wsId: string) => void;
   onJumpTerm: (paneId: string) => void;
   onCloseTerm: (t: PaneInfo) => void;
-  onRemoveWorkspace: (ws: WorkspaceInfo, killAgents: boolean) => void;
+  onRemoveWorkspace: (ws: WorkspaceInfo) => void;
   onDiff: (ws: WorkspaceInfo) => void;
 }) {
   const name = ws.label ?? ws.branch ?? basename(ws.path) ?? ws.workspace_id;
   const remove = async () => {
     const agents = panes.filter((t) => t.agent).map((t) => t.agent);
     const message = agents.length
-      ? `Remove workspace “${name}”? Agents still running (${[...new Set(agents)].join(", ")}) — their panes will be killed and the worktree checkout deleted.`
-      : `Remove workspace “${name}”? Its ${panes.length} pane(s) will be killed and the worktree checkout deleted.`;
+      ? `Remove workspace “${name}”? Agents still running (${[...new Set(agents)].join(", ")}) — their panes will be killed, the worktree checkout deleted, and its branch removed.`
+      : `Remove workspace “${name}”? Its ${panes.length} pane(s) will be killed, the worktree checkout deleted, and its branch removed.`;
     const ok = await confirmClose("Remove Workspace", message);
-    if (ok) onRemoveWorkspace(ws, agents.length > 0);
+    if (ok) onRemoveWorkspace(ws);
   };
   return (
     <div className={`side-tree-group ${focusedWs ? "focused" : ""}`}>
@@ -232,7 +232,10 @@ function WorkspaceRow({
   );
 }
 
-export function Sidebar({
+/** Memoized — App re-renders for inbox/automation/notice updates that
+ * don't touch the snapshot; the project tree rebuild is the heaviest
+ * non-terminal render in the app. */
+export const Sidebar = memo(function Sidebar({
   snap,
   focusedWorkspaceId,
   focusedTermId,
@@ -268,7 +271,7 @@ export function Sidebar({
   /** groupId null = move back to ungrouped */
   onAssignProject: (projectId: string, groupId: string | null) => void;
   onCloseTerm: (t: PaneInfo) => void;
-  onRemoveWorkspace: (ws: WorkspaceInfo, killAgents: boolean) => void;
+  onRemoveWorkspace: (ws: WorkspaceInfo) => void;
   onDiff: (ws: WorkspaceInfo) => void;
   /** ⌘N — open the new-worktree sheet for this project */
   onNewWorktree: (projectId: string) => void;
@@ -287,14 +290,30 @@ export function Sidebar({
   } | null>(null);
   const projects = snap?.projects ?? [];
   const groups = snap?.groups ?? [];
-  const termsById = new Map((snap?.panes ?? []).map((t) => [t.pane_id, t]));
-  const wsById = new Map(
-    (snap?.workspaces ?? []).map((w) => [w.workspace_id, w]),
+  const termsById = useMemo(
+    () => new Map((snap?.panes ?? []).map((t) => [t.pane_id, t])),
+    [snap],
   );
-  const tabById = new Map((snap?.tabs ?? []).map((t) => [t.tab_id, t]));
-  const projById = new Map(projects.map((p) => [p.project_id, p]));
-  const groupedIds = new Set(groups.flatMap((g) => g.projects));
-  const ungrouped = projects.filter((p) => !groupedIds.has(p.project_id));
+  const wsById = useMemo(
+    () => new Map((snap?.workspaces ?? []).map((w) => [w.workspace_id, w])),
+    [snap],
+  );
+  const tabById = useMemo(
+    () => new Map((snap?.tabs ?? []).map((t) => [t.tab_id, t])),
+    [snap],
+  );
+  const projById = useMemo(
+    () => new Map(projects.map((p) => [p.project_id, p])),
+    [projects],
+  );
+  const groupedIds = useMemo(
+    () => new Set(groups.flatMap((g) => g.projects)),
+    [groups],
+  );
+  const ungrouped = useMemo(
+    () => projects.filter((p) => !groupedIds.has(p.project_id)),
+    [projects, groupedIds],
+  );
 
   /** a workspace's panes in display order — tab order, then pane order */
   const wsPanes = (ws: WorkspaceInfo): PaneInfo[] =>
@@ -705,4 +724,4 @@ export function Sidebar({
       )}
     </div>
   );
-}
+});

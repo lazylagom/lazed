@@ -108,7 +108,7 @@ body,
   pointer-events: none;
 }
 
-/* first-run banner: `lazed install` prompt when the CLI/skill links are absent */
+/* first-run banner: `lazed install` prompt when the CLI link is absent */
 
 .install-banner {
   display: flex;
@@ -274,7 +274,6 @@ body,
 }
 
 .side-ws-head:hover .side-close,
-.side-tab-head:hover .side-close,
 .side-proj-head:hover .side-close {
   opacity: 1;
 }
@@ -296,84 +295,6 @@ body,
   outline: none;
 }
 
-.side-tabs {
-  margin: 1px 0 4px 12px;
-  padding-left: 10px;
-  border-left: 1px solid var(--line-faint);
-}
-
-.side-tab-head {
-  display: flex;
-  align-items: center;
-  border-radius: 6px;
-}
-
-.side-tab-label {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px 4px 6px;
-  background: none;
-  border: none;
-  color: var(--text-2);
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-  min-width: 0;
-}
-
-.side-tab-label span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.side-tab-head.active .side-tab-label {
-  color: var(--text-hi);
-}
-
-.side-panes {
-  margin: 0 0 2px 12px;
-  padding-left: 6px;
-  border-left: 1px solid var(--line-faint);
-}
-
-.side-pane {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 3px 8px 3px 6px;
-  background: none;
-  border: none;
-  border-radius: 6px;
-  color: var(--text-3);
-  font-size: 11.5px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.side-pane.focused {
-  color: var(--text-hi);
-}
-
-.side-pane-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.side-pane-tower {
-  margin-left: auto;
-  flex-shrink: 0;
-  color: rgb(var(--amber));
-}
-
-.side-pane.focused .side-pane-tower {
-  color: rgb(var(--amber-hi));
-}
-
 .side-ico {
   flex-shrink: 0;
   color: var(--text-4);
@@ -389,8 +310,6 @@ body,
   mask-repeat: no-repeat;
 }
 
-.side-pane.focused .side-ico,
-.side-tab-head.active .side-ico,
 .side-ws-head.focused .side-ico {
   color: rgb(var(--accent));
 }
@@ -477,19 +396,12 @@ body,
 }
 
 .side-proj-head:hover,
-.side-ws-head:hover,
-.side-tab-head:hover,
-.side-pane:hover {
+.side-ws-head:hover {
   background: var(--fill-hover);
 }
 
-.side-tree-group.focused,
-.side-tab-head.active,
-.side-pane.focused {
-  background: var(--fill-active);
-}
-
 .side-tree-group.focused {
+  background: var(--fill-active);
   border-radius: 6px;
 }
 
@@ -537,21 +449,8 @@ body,
   padding-left: 14px;
 }
 
-.side-tree-label {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px 4px 14px;
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--text-4);
-  user-select: none;
-}
-
 /* elbow — vertical from row top to mid, then a tick into the node */
-.side-proj-children .side-ws-head::before,
-.side-tree-label::before {
+.side-proj-children .side-ws-head::before {
   content: "";
   position: absolute;
   left: 0;
@@ -571,16 +470,6 @@ body,
   position: absolute;
   left: 0;
   top: 0;
-  bottom: 0;
-  border-left: 1px solid var(--line-faint);
-}
-
-/* drop from the group label's tick down to the child rail */
-.side-tree-label::after {
-  content: "";
-  position: absolute;
-  left: 12px;
-  top: 50%;
   bottom: 0;
   border-left: 1px solid var(--line-faint);
 }
@@ -631,12 +520,6 @@ body,
 
 .side-primary-label:hover {
   background: var(--fill-hover);
-}
-
-.side-primary-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* focused project — the workspace stack lifts into a card (Orca active
@@ -772,6 +655,555 @@ body,
   color: var(--text-3);
 }
 
+/* ── files panel (right sidebar) ─────────── */
+
+.files-panel {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border-left: 1px solid var(--line);
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
+}
+
+.files-resize {
+  top: 0;
+  left: -4px;
+  width: 8px;
+  height: 100%;
+}
+
+.files-search {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 8px 8px;
+  border-bottom: 1px solid var(--line-faint);
+}
+
+.files-input {
+  padding: 6px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.files-input:focus {
+  border-color: var(--line-focus);
+}
+
+.files-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.files-tabs button {
+  flex: 1;
+  padding: 4px 0;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.files-tabs button.sel {
+  background: var(--bg-5);
+  border-color: var(--line-strong);
+  color: var(--text-hi);
+}
+
+.files-scroll {
+  padding: 2px 6px 8px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+
+.file-row:hover {
+  background: var(--fill-hover);
+}
+
+.file-row.ignored {
+  color: var(--text-5);
+}
+
+.file-caret {
+  width: 10px;
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--text-4);
+}
+
+.file-ico {
+  color: var(--text-4);
+  flex-shrink: 0;
+}
+
+.file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.file-badge.g-M {
+  color: rgb(var(--amber));
+}
+.file-badge.g-D {
+  color: rgb(var(--red));
+}
+.file-badge.g-U {
+  color: rgb(var(--green));
+}
+.file-badge.g-ignored {
+  color: var(--text-5);
+}
+
+.file-row.flat .file-name {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+/* git status tints the name + icon, not just the badge */
+.file-row.s-M .file-name,
+.file-row.s-M .file-ico,
+.file-row.s-M .file-caret {
+  color: rgb(var(--amber));
+}
+
+.file-row.s-D .file-name,
+.file-row.s-D .file-ico,
+.file-row.s-D .file-caret {
+  color: rgb(var(--red));
+}
+
+.file-row.s-U .file-name,
+.file-row.s-U .file-ico,
+.file-row.s-U .file-caret {
+  color: rgb(var(--green));
+}
+
+.file-row.ignored .file-ico,
+.file-row.ignored .file-caret {
+  color: var(--text-5);
+}
+
+.file-row.hit {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 5px 8px;
+}
+
+.hit-loc {
+  color: var(--text-4);
+  font-size: 10.5px;
+}
+
+.hit-loc.s-M {
+  color: rgb(var(--amber));
+}
+.hit-loc.s-D {
+  color: rgb(var(--red));
+}
+.hit-loc.s-U {
+  color: rgb(var(--green));
+}
+.hit-loc.ignored {
+  color: var(--text-5);
+}
+
+.hit-text {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.files-empty {
+  padding: 14px 10px;
+  color: var(--text-5);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.files-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--text-4);
+  font-size: 10.5px;
+  user-select: none;
+}
+
+.files-foot-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.files-foot-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.files-foot-btn:hover {
+  background: var(--fill-hover);
+  color: var(--text);
+}
+
+/* file view — a file opens as a tab surface covering the pane grid
+ * (Orca-style), not as a modal; terminals stay mounted underneath */
+
+.ws-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.ws-file-tab {
+  padding: 0;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ws-file-open {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 4px 5px 14px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.ws-file-x {
+  align-self: stretch;
+  padding: 0 10px 0 4px;
+  background: none;
+  border: none;
+  color: var(--text-5);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.ws-file-x:hover {
+  color: var(--text-1);
+}
+
+/* open file tabs carry the file's git tint too */
+.ws-file-tab.s-M .ws-tab-name {
+  color: rgb(var(--amber));
+}
+.ws-file-tab.s-D .ws-tab-name {
+  color: rgb(var(--red));
+}
+.ws-file-tab.s-U .ws-tab-name {
+  color: rgb(var(--green));
+}
+
+.file-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  z-index: 4;
+}
+
+.fv-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.fv-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the filename end visible on overflow */
+  text-align: left;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.fv-views {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.fv-views button {
+  padding: 3px 9px;
+  background: var(--bg-5);
+  border: none;
+  border-radius: 4px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.fv-views button.sel {
+  background: var(--bg-6);
+  color: var(--text-hi);
+}
+
+.fv-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.fv-btn:hover {
+  background: var(--bg-5);
+  color: var(--text-1);
+}
+
+.fv-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.fv-pre {
+  margin: 0;
+  padding: 12px 14px;
+  white-space: pre;
+  color: var(--text-2);
+}
+
+.fv-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-5);
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
+  font-size: 12px;
+}
+
+.fv-note {
+  padding: 4px 14px 10px;
+  color: rgb(var(--amber));
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
+  font-size: 10.5px;
+}
+
+/* rendered markdown — the file view's .md preview (sanitized upstream) */
+
+.fv-md {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 20px 28px 72px;
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+
+.fv-md h1,
+.fv-md h2,
+.fv-md h3,
+.fv-md h4,
+.fv-md h5,
+.fv-md h6 {
+  color: var(--text-hi);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1.2em 0 0.5em;
+}
+
+.fv-md h1 {
+  font-size: 20px;
+}
+
+.fv-md h2 {
+  font-size: 16px;
+}
+
+.fv-md h3 {
+  font-size: 14px;
+}
+
+.fv-md h4,
+.fv-md h5,
+.fv-md h6 {
+  font-size: 13px;
+}
+
+.fv-md > :first-child {
+  margin-top: 0;
+}
+
+.fv-md p,
+.fv-md ul,
+.fv-md ol {
+  margin: 0.5em 0;
+}
+
+.fv-md ul,
+.fv-md ol {
+  padding-left: 22px;
+}
+
+.fv-md li {
+  margin: 2px 0;
+}
+
+.fv-md code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+  background: var(--bg-5);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.fv-md pre {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 12px;
+  overflow: auto;
+  margin: 0.7em 0;
+}
+
+.fv-md pre code {
+  background: none;
+  padding: 0;
+}
+
+.fv-md blockquote {
+  margin: 0.6em 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--text-3);
+}
+
+.fv-md a {
+  color: rgb(var(--blue));
+}
+
+.fv-md table {
+  border-collapse: collapse;
+  margin: 0.7em 0;
+}
+
+.fv-md th,
+.fv-md td {
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+}
+
+.fv-md th {
+  background: var(--bg-3);
+  color: var(--text-1);
+}
+
+.fv-md hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 1.2em 0;
+}
+
+.fv-md img {
+  max-width: 100%;
+}
+
+/* titlebar toggle buttons */
+
+.titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-4);
+  cursor: pointer;
+}
+
+.titlebar-btn:hover {
+  background: var(--fill-hover);
+  color: var(--text-2);
+}
+
+.titlebar-btn.sel {
+  color: rgb(var(--accent));
+}
+
 /* ── main grid ───────────────────────────── */
 
 .main {
@@ -839,17 +1271,6 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 200px;
-}
-
-.ws-tab-chip {
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  background: var(--bg-5);
-  color: var(--text-3);
-  text-transform: uppercase;
 }
 
 .ws-tab-count {
@@ -1243,67 +1664,6 @@ body,
   text-align: center;
 }
 
-.about-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 14px;
-  border-bottom: 1px solid var(--line);
-}
-
-.about-title {
-  font-weight: 600;
-}
-
-.about-ver {
-  color: var(--text-4);
-  font-size: 12px;
-}
-
-.about-notice {
-  margin: 0;
-  padding: 12px 14px;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--text-3);
-  white-space: pre-wrap;
-}
-
-.import-head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 12px 14px;
-  color: var(--text-hi);
-  font-size: 13px;
-  font-weight: 600;
-  border-bottom: 1px solid var(--line);
-}
-
-.import-row {
-  display: flex;
-  align-items: stretch;
-}
-
-.import-row .modal-input {
-  border-bottom: 1px solid var(--line);
-}
-
-.import-row button {
-  background: none;
-  border: none;
-  border-bottom: 1px solid var(--line);
-  color: var(--text-3);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0 12px;
-  white-space: nowrap;
-}
-
-.import-row button:hover {
-  color: var(--text-hi);
-}
-
 /* ── add-a-project (orca-style) ──────────── */
 
 .modal.addproj {
@@ -1388,6 +1748,20 @@ body,
   color: var(--text-3);
 }
 
+.addproj-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.addproj-opt input {
+  margin-top: 2px;
+}
+
 .prompt-targets {
   display: flex;
   gap: 6px;
@@ -1416,66 +1790,11 @@ body,
 
 /* ── inbox ───────────────────────────────── */
 
-.inbox-panel {
-  position: fixed;
-  top: 46px;
-  right: 12px;
-  width: 320px;
-  background: var(--bg-4);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: var(--shadow-lg);
-  z-index: 90;
-  overflow: hidden;
-}
-
-.inbox-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  border-bottom: 1px solid var(--line);
-}
-
-.inbox-head .side-close {
-  opacity: 1;
-}
-
 .inbox-empty {
   padding: 16px;
   color: var(--text-4);
   font-size: 12px;
   text-align: center;
-}
-
-.inbox-item-row {
-  display: flex;
-  align-items: stretch;
-  border-bottom: 1px solid var(--line-faint);
-}
-
-.inbox-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-  padding: 8px 12px;
-  background: none;
-  border: none;
-  color: var(--text-2);
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.inbox-item:hover {
-  background: var(--fill-hover);
 }
 
 .inbox-dismiss {
@@ -1489,37 +1808,6 @@ body,
 
 .inbox-dismiss:hover {
   color: var(--text-hi);
-}
-
-.inbox-clear {
-  background: none;
-  border: none;
-  color: var(--text-4);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  cursor: pointer;
-  margin-right: 8px;
-}
-
-.inbox-clear:hover {
-  color: var(--text-hi);
-}
-
-.inbox-name {
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.inbox-where {
-  color: var(--text-4);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
 }
 
 /* ── fan-out ─────────────────────────────── */
@@ -1758,106 +2046,6 @@ body,
   color: var(--text-hi);
 }
 
-/* ── remote ──────────────────────────────── */
-
-.remote-machine {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.remote-machine:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.remote-machine-target {
-  color: var(--text-4);
-  font-size: 11px;
-}
-
-.remote-machine-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.remote-machine-row .remote-machine {
-  flex: 1;
-}
-
-.remote-machine-act {
-  padding: 4px 6px;
-  background: none;
-  border: none;
-  color: var(--text-4);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.remote-machine-act:hover {
-  color: var(--text-hi);
-}
-
-.remote-machine-edit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  color: var(--text-2);
-  font-size: 12px;
-}
-
-.remote-machine-edit .modal-input {
-  flex: 1;
-  padding: 6px 8px;
-  border-bottom: none;
-  background: var(--bg-1);
-  border-radius: 4px;
-}
-
-.remote-machine-edit button {
-  padding: 4px 10px;
-  background: var(--text);
-  border: none;
-  border-radius: 4px;
-  color: var(--bg-4);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.remote-add {
-  border-top: 1px solid var(--line);
-}
-
-.remote-add-row {
-  display: flex;
-  gap: 6px;
-  padding: 8px;
-}
-
-.remote-add-row button {
-  flex: 1;
-  padding: 8px;
-  background: var(--bg-5);
-  border: none;
-  border-radius: 6px;
-  color: var(--text-2);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.remote-add-row button:disabled {
-  color: var(--text-5);
-  cursor: default;
-}
-
-.remote-add-row button:not(:disabled):hover {
-  color: var(--text-hi);
-  background: var(--bg-6);
-}
-
 /* ── settings screen (orca-style) ────────── */
 
 .settings {
@@ -1869,6 +2057,16 @@ body,
   z-index: 200;
   display: flex;
   background: var(--bg-1);
+}
+
+/* invisible drag strip across the top of full-screen screens — the overlay
+   * covers the real titlebar, so this restores a grab area */
+.set-drag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 34px;
 }
 
 .set-nav {
@@ -2131,14 +2329,6 @@ body,
   word-break: break-all;
 }
 
-.set-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--line-faint);
-}
-
 .set-field-wrap {
   display: flex;
   flex-direction: column;
@@ -2189,31 +2379,6 @@ body,
 
 .set-field-link:hover {
   text-decoration: underline;
-}
-
-.set-actions {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 16px 13px;
-}
-
-.set-actions-gap {
-  flex: 1;
-}
-
-.set-note {
-  padding: 0 16px 10px;
-  font-size: 11px;
-  color: var(--text-4);
-}
-
-.set-note.ok {
-  color: rgb(var(--green));
-}
-
-.set-note.err {
-  color: rgb(var(--red));
 }
 
 /* ── integrations (orca-style provider cards) ── */
@@ -3466,6 +3631,25 @@ body,
 
 /* ── gtd inbox (rail view) ───────────────── */
 
+/* the inbox/todo rail views own the whole content area — the column is
+ * left-aligned like a regular list (no centered max-width) */
+.ibx-screen {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+}
+
+.ibx-col {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  padding: 4px 20px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
 .rail-count {
   position: absolute;
   top: 2px;
@@ -3510,7 +3694,7 @@ body,
   padding: 28px 16px;
   color: var(--text-4);
   font-size: 12px;
-  text-align: center;
+  text-align: left;
   line-height: 1.6;
 }
 
@@ -3639,6 +3823,63 @@ body,
   background: var(--bg-3);
 }
 
+/* ── todo (rail view — reuses the ibx shell) ── */
+
+.td-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-4);
+  cursor: pointer;
+}
+
+.td-check:hover {
+  color: rgb(var(--green));
+}
+
+.td-row.done .td-check {
+  color: rgb(var(--green) / 0.7);
+}
+
+.td-row.done .ibx-title {
+  text-decoration: line-through;
+  color: var(--text-4);
+}
+
+.td-edit {
+  padding: 2px 6px;
+  font-size: 12.5px;
+}
+
+.td-done-bar {
+  display: flex;
+  align-items: center;
+}
+
+.td-done-bar .ibx-snoozed-toggle {
+  flex: 1;
+}
+
+.td-clear {
+  padding: 4px 12px;
+  background: none;
+  border: none;
+  color: var(--text-5);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.td-clear:hover {
+  color: rgb(var(--red));
+}
+
 .proj-menu-item:disabled {
   opacity: 0.45;
   cursor: default;
@@ -3721,553 +3962,4 @@ body,
 .newwt-go {
   margin-top: 16px;
   border-radius: 9px;
-}
-
-/* ── files panel (right sidebar) ─────────── */
-
-.files-panel {
-  position: relative;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-2);
-  border-left: 1px solid var(--line);
-  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
-    "Helvetica Neue", sans-serif;
-}
-
-.files-resize {
-  top: 0;
-  left: -4px;
-  width: 8px;
-  height: 100%;
-}
-
-.files-search {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 2px 8px 8px;
-  border-bottom: 1px solid var(--line-faint);
-}
-
-.files-input {
-  padding: 6px 10px;
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 12px;
-  outline: none;
-}
-
-.files-input:focus {
-  border-color: var(--line-focus);
-}
-
-.files-tabs {
-  display: flex;
-  gap: 4px;
-}
-
-.files-tabs button {
-  flex: 1;
-  padding: 4px 0;
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  color: var(--text-3);
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.files-tabs button.sel {
-  background: var(--bg-5);
-  border-color: var(--line-strong);
-  color: var(--text-hi);
-}
-
-.files-scroll {
-  padding: 2px 6px 8px;
-}
-
-.file-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 3px 6px;
-  background: none;
-  border: none;
-  border-radius: 5px;
-  color: var(--text-2);
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-  min-width: 0;
-}
-
-.file-row:hover {
-  background: var(--fill-hover);
-}
-
-.file-row.ignored {
-  color: var(--text-5);
-}
-
-.file-caret {
-  width: 10px;
-  flex-shrink: 0;
-  display: inline-flex;
-  color: var(--text-4);
-}
-
-.file-ico {
-  color: var(--text-4);
-  flex-shrink: 0;
-}
-
-.file-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-badge {
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.file-badge.g-M {
-  color: rgb(var(--amber));
-}
-.file-badge.g-D {
-  color: rgb(var(--red));
-}
-.file-badge.g-U {
-  color: rgb(var(--green));
-}
-.file-badge.g-ignored {
-  color: var(--text-5);
-}
-
-.file-row.flat .file-name {
-  font-size: 11.5px;
-  color: var(--text-3);
-}
-
-/* git status tints the name + icon, not just the badge */
-.file-row.s-M .file-name,
-.file-row.s-M .file-ico,
-.file-row.s-M .file-caret {
-  color: rgb(var(--amber));
-}
-
-.file-row.s-D .file-name,
-.file-row.s-D .file-ico,
-.file-row.s-D .file-caret {
-  color: rgb(var(--red));
-}
-
-.file-row.s-U .file-name,
-.file-row.s-U .file-ico,
-.file-row.s-U .file-caret {
-  color: rgb(var(--green));
-}
-
-.file-row.ignored .file-ico,
-.file-row.ignored .file-caret {
-  color: var(--text-5);
-}
-
-.file-row.hit {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 5px 8px;
-}
-
-.hit-loc {
-  color: var(--text-4);
-  font-size: 10.5px;
-}
-
-.hit-loc.s-M {
-  color: rgb(var(--amber));
-}
-.hit-loc.s-D {
-  color: rgb(var(--red));
-}
-.hit-loc.s-U {
-  color: rgb(var(--green));
-}
-.hit-loc.ignored {
-  color: var(--text-5);
-}
-
-.hit-text {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-3);
-  font-size: 11.5px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-}
-
-.files-empty {
-  padding: 14px 10px;
-  color: var(--text-5);
-  font-size: 11.5px;
-  text-align: center;
-}
-
-.files-foot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border-top: 1px solid var(--line);
-  color: var(--text-4);
-  font-size: 10.5px;
-  user-select: none;
-}
-
-.files-foot-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.files-foot-btn {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  background: none;
-  border: none;
-  border-radius: 4px;
-  color: var(--text-3);
-  font-size: 10.5px;
-  cursor: pointer;
-}
-
-.files-foot-btn:hover {
-  background: var(--fill-hover);
-  color: var(--text);
-}
-
-/* file view — a file opens as a tab surface covering the pane grid
- * (Orca-style), not as a modal; terminals stay mounted underneath */
-
-.ws-body {
-  flex: 1;
-  min-height: 0;
-  min-width: 0;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-}
-
-.ws-file-tab {
-  padding: 0;
-  gap: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.ws-file-open {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 5px 4px 5px 14px;
-  background: none;
-  border: none;
-  color: inherit;
-  font: inherit;
-  font-size: inherit;
-  cursor: pointer;
-}
-
-.ws-file-x {
-  align-self: stretch;
-  padding: 0 10px 0 4px;
-  background: none;
-  border: none;
-  color: var(--text-5);
-  font-size: 10px;
-  cursor: pointer;
-}
-
-.ws-file-x:hover {
-  color: var(--text-1);
-}
-
-/* open file tabs carry the file's git tint too */
-.ws-file-tab.s-M .ws-tab-name {
-  color: rgb(var(--amber));
-}
-.ws-file-tab.s-D .ws-tab-name {
-  color: rgb(var(--red));
-}
-.ws-file-tab.s-U .ws-tab-name {
-  color: rgb(var(--green));
-}
-
-.file-view {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-1);
-  z-index: 4;
-}
-
-.fv-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--line);
-  flex-shrink: 0;
-}
-
-.fv-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl; /* keep the filename end visible on overflow */
-  text-align: left;
-  font-size: 11.5px;
-  color: var(--text-3);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-}
-
-.fv-views {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.fv-views button {
-  padding: 3px 9px;
-  background: var(--bg-5);
-  border: none;
-  border-radius: 4px;
-  color: var(--text-3);
-  font-size: 10.5px;
-  cursor: pointer;
-}
-
-.fv-views button.sel {
-  background: var(--bg-6);
-  color: var(--text-hi);
-}
-
-.fv-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  border-radius: 5px;
-  color: var(--text-3);
-  cursor: pointer;
-}
-
-.fv-btn:hover {
-  background: var(--bg-5);
-  color: var(--text-1);
-}
-
-.fv-body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
-.fv-pre {
-  margin: 0;
-  padding: 12px 14px;
-  white-space: pre;
-  color: var(--text-2);
-}
-
-.fv-empty {
-  padding: 24px;
-  text-align: center;
-  color: var(--text-5);
-  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
-    "Helvetica Neue", sans-serif;
-  font-size: 12px;
-}
-
-.fv-note {
-  padding: 4px 14px 10px;
-  color: rgb(var(--amber));
-  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
-    "Helvetica Neue", sans-serif;
-  font-size: 10.5px;
-}
-
-/* rendered markdown — the file view's .md preview (sanitized upstream) */
-
-.fv-md {
-  max-width: 780px;
-  margin: 0 auto;
-  padding: 20px 28px 72px;
-  font-family: "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text",
-    "Helvetica Neue", sans-serif;
-  font-size: 13px;
-  line-height: 1.65;
-  color: var(--text-2);
-}
-
-.fv-md h1,
-.fv-md h2,
-.fv-md h3,
-.fv-md h4,
-.fv-md h5,
-.fv-md h6 {
-  color: var(--text-hi);
-  font-weight: 600;
-  line-height: 1.3;
-  margin: 1.2em 0 0.5em;
-}
-
-.fv-md h1 {
-  font-size: 20px;
-}
-
-.fv-md h2 {
-  font-size: 16px;
-}
-
-.fv-md h3 {
-  font-size: 14px;
-}
-
-.fv-md h4,
-.fv-md h5,
-.fv-md h6 {
-  font-size: 13px;
-}
-
-.fv-md > :first-child {
-  margin-top: 0;
-}
-
-.fv-md p,
-.fv-md ul,
-.fv-md ol {
-  margin: 0.5em 0;
-}
-
-.fv-md ul,
-.fv-md ol {
-  padding-left: 22px;
-}
-
-.fv-md li {
-  margin: 2px 0;
-}
-
-.fv-md code {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 11.5px;
-  background: var(--bg-5);
-  padding: 1px 5px;
-  border-radius: 4px;
-}
-
-.fv-md pre {
-  background: var(--bg-3);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 10px 12px;
-  overflow: auto;
-  margin: 0.7em 0;
-}
-
-.fv-md pre code {
-  background: none;
-  padding: 0;
-}
-
-.fv-md blockquote {
-  margin: 0.6em 0;
-  padding: 2px 12px;
-  border-left: 3px solid var(--line-strong);
-  color: var(--text-3);
-}
-
-.fv-md a {
-  color: rgb(var(--blue));
-}
-
-.fv-md table {
-  border-collapse: collapse;
-  margin: 0.7em 0;
-}
-
-.fv-md th,
-.fv-md td {
-  border: 1px solid var(--line);
-  padding: 4px 10px;
-}
-
-.fv-md th {
-  background: var(--bg-3);
-  color: var(--text-1);
-}
-
-.fv-md hr {
-  border: none;
-  border-top: 1px solid var(--line);
-  margin: 1.2em 0;
-}
-
-.fv-md img {
-  max-width: 100%;
-}
-
-/* titlebar toggle buttons */
-
-.titlebar-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 22px;
-  background: none;
-  border: none;
-  border-radius: 5px;
-  color: var(--text-4);
-  cursor: pointer;
-}
-
-.titlebar-btn:hover {
-  background: var(--fill-hover);
-  color: var(--text-2);
-}
-
-.titlebar-btn.sel {
-  color: rgb(var(--accent));
 }

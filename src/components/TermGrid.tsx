@@ -1,8 +1,11 @@
+import { memo } from "react";
 import type { PaneInfo } from "../shared/lazed";
 import { TermView } from "./TermView";
 
-/** Equal-width flex row of a tab's panes (order matches tab.panes). */
-export function TermGrid({
+/** Equal-width flex row of a tab's panes (order matches tab.panes).
+ * Memoized — App re-renders on events that don't touch the grid (notices,
+ * inbox items, overlays), and each TermView mount is expensive. */
+export const TermGrid = memo(function TermGrid({
   terms,
   focusedTerm,
   onFocusTerm,
@@ -27,4 +30,4 @@ export function TermGrid({
       ))}
     </div>
   );
-}
+});

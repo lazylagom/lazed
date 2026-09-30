@@ -130,7 +130,7 @@ it("retains import styling, folder selection and the window Escape listener life
   await act(async () => {
     element(".addproj-card").click();
   });
-  expect(imported).toHaveBeenCalledWith("/tmp/project/", "project");
+  expect(imported).toHaveBeenCalledWith("/tmp/project/", "project", true);
   key(window, "Escape");
   expect(close).toHaveBeenCalledTimes(1);
   act(() => root.render(null));

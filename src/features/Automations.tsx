@@ -506,6 +506,7 @@ export function Automations({
         }
       }}
     >
+      <div className="set-drag" data-tauri-drag-region />
       <div className="set-nav">
         <button type="button" className="set-back" onClick={onClose}>
           <HugeiconsIcon icon={ArrowLeft01Icon} size={13} strokeWidth={1.5} />

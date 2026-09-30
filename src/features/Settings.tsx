@@ -81,7 +81,11 @@ const SHORTCUT_GROUPS: {
   },
   {
     name: "Sidebar",
-    items: [["⇧⌘1", "Projects rail"]],
+    items: [
+      ["⇧⌘1", "Projects rail"],
+      ["⇧⌘4", "Inbox rail"],
+      ["⇧⌘5", "Todo rail"],
+    ],
   },
 ];
 
@@ -451,15 +455,12 @@ function IntegrationsPane() {
     s: IntegrationSiteState,
   ) => {
     const name = s.label || hostLabel(s.fields.base) || "this site";
-    const ok = await ask(
-      `Disconnect ${name}? Its stored token is deleted from the Keychain.`,
-      {
-        title: `Disconnect ${p.label}`,
-        kind: "warning",
-        okLabel: "Disconnect",
-        cancelLabel: "Cancel",
-      },
-    ).catch(() => false);
+    const ok = await ask(`Disconnect ${name}? Its stored token is deleted.`, {
+      title: `Disconnect ${p.label}`,
+      kind: "warning",
+      okLabel: "Disconnect",
+      cancelLabel: "Cancel",
+    }).catch(() => false);
     if (!ok) return;
     setResults((r) => ({ ...r, [siteKey(p.id, s.id)]: null }));
     integrations
@@ -737,6 +738,7 @@ export function Settings({
         }
       }}
     >
+      <div className="set-drag" data-tauri-drag-region />
       <div className="set-nav">
         <button type="button" className="set-back" onClick={onClose}>
           <HugeiconsIcon icon={ArrowLeft01Icon} size={13} strokeWidth={1.5} />

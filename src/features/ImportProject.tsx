@@ -1,7 +1,7 @@
 import { FolderIcon, MultiplicationSignIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Modal } from "../components/Modal";
 
 function basename(p: string) {
@@ -13,9 +13,11 @@ export function ImportProject({
   onImport,
   onClose,
 }: {
-  onImport: (cwd?: string, label?: string) => void;
+  onImport: (cwd?: string, label?: string, initSkills?: boolean) => void;
   onClose: () => void;
 }) {
+  const [initSkills, setInitSkills] = useState(true);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -29,7 +31,7 @@ export function ImportProject({
       directory: true,
       title: "add a project",
     }).catch(() => null);
-    if (typeof dir === "string") onImport(dir, basename(dir));
+    if (typeof dir === "string") onImport(dir, basename(dir), initSkills);
   };
 
   return (
@@ -60,6 +62,17 @@ export function ImportProject({
           </span>
         </span>
       </button>
+      <label className="addproj-opt">
+        <input
+          type="checkbox"
+          checked={initSkills}
+          onChange={(e) => setInitSkills(e.target.checked)}
+        />
+        <span>
+          Install the <code>crew</code> skill — multi-agent pipeline for claude,
+          codex, pi, devin, gemini
+        </span>
+      </label>
     </Modal>
   );
 }
