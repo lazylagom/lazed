@@ -1,14 +1,15 @@
 ---
 name: crew
-description: Run a task through a crew of coding agents on herdr — research, design, adversarial design review, coding, parallel code reviews and tests, each stage a separate agent in its own tab of one worktree, handing results forward as files, with human approval gates. Use when the user says "crew" or asks to run work through the crew / staged multi-agent pipeline. Works from any agent (claude, codex, pi, devin, gemini) running inside a herdr pane.
+description: Run a task through a crew of coding agents on herdr — research, design, adversarial design review, coding, parallel code reviews and tests, each stage a separate agent in its own tab of one worktree (parallel stages side by side in one tab), handing results forward as files, with human approval gates. Use when the user says "crew" or asks to run work through the crew / staged multi-agent pipeline. Works from any agent (claude, codex, pi, devin, gemini) running inside a herdr pane.
 ---
 
 # crew
 
 You are the **orchestrator**. You never do stage work yourself: you start one
 agent per stage, hand each one the previous stages' result files, check what
-comes back, and ask the user at gates. Every stage runs in its own tab of one
-git worktree, so the user can watch or step into any of them.
+comes back, and ask the user at gates. Every stage runs in its own pane of one
+git worktree (its own tab, or side by side with its `parallel` group), so the
+user can watch or step into any of them.
 
 All control goes through the `herdr` CLI. If the herdr skill is not already
 in your context, run `herdr --skill` and follow its rules — they override
@@ -68,14 +69,27 @@ echo '.crew/' >> "$(git -C <checkout> rev-parse --git-common-dir)/info/exclude"
 
 ## 3. Run each stage
 
-**Location.** The first stage uses the worktree's root pane. Every other
-stage gets its own tab:
+**Location.** One tab per step, where a step is a single stage or a
+`parallel` group. The stages of a group share one tab, split side by side,
+so the user can watch them together.
 
-```sh
-herdr tab create --workspace <ws> --cwd <checkout> --label <stage-id> --no-focus
-```
+- The first step uses the worktree's root pane. Every later step gets a new
+  tab, labelled with the stage id, or with the group name for a group:
 
-and uses the returned root pane.
+  ```sh
+  herdr tab create --workspace <ws> --cwd <checkout> --label <stage-id|group> --no-focus
+  ```
+
+  The first stage of the step uses the returned root pane.
+- Each further stage of a group splits the previous stage's pane to the
+  right and uses the new pane:
+
+  ```sh
+  herdr pane split <prev-pane-id> --direction right --cwd <checkout> --no-focus
+  ```
+
+A stage that runs again (retry, or a rerun after one) reuses its agent
+and pane. Never open a second tab or pane for it.
 
 **Agent.** Name it `<slug>-<stage-id>` (lowercase, at most 32 chars,
 `[a-z][a-z0-9_-]*`):
@@ -89,7 +103,7 @@ herdr agent start <name> --kind <kind> --pane <pane-id>
 1. The stage role paragraph from `crew.md`.
 2. `Do this stage yourself in this pane. Do not spawn subagents or
    background agents.` — the crew already gives each stage its own agent
-   in a visible tab; hidden subagents duplicate that and return summaries
+   in a visible pane; hidden subagents duplicate that and return summaries
    instead of first-hand reads.
 3. `Goal: <the user's request>`
 4. `Inputs:` the result files of all earlier stages, as absolute paths.
@@ -129,7 +143,7 @@ After the agent settles:
 ## 5. Finish
 
 Report a short table: stage, agent kind, verdict, result path. Then the
-branch and workspace. Leave the agents and tabs in place so the user can
+branch and workspace. Leave the agents, tabs and panes in place so the user can
 inspect them.
 
 Do **not** merge, push, remove the worktree or close tabs unless the user

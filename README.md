@@ -80,7 +80,7 @@ lazed CLI는 herdr에 없는 것만 제공한다:
 - `lazed install|uninstall|doctor`, `lazed status|stop|restart`.
 - `lazed init [--force] [path]` — 프로젝트에 `crew` 스킬 설치(앱 Import 시 기본 설치). 원본은
   `.agents/skills/crew/`(codex·gemini·pi·devin), `.claude/skills/crew`는 그 디렉터리로의 상대 링크.
-  아무 에이전트에게 "crew로 …해줘" → research→design→verify→coding→리뷰×2→test를 단계별 tab의
+  아무 에이전트에게 "crew로 …해줘" → research→design→verify→coding→리뷰×2→test를 단계별 tab(병렬 리뷰는 한 tab에 pane으로 나란히)의
   에이전트로 돌리고 `.crew/<slug>/` 파일로 넘김. 단계 구성은 `.agents/skills/crew/crew.md`에서 편집.
 
 에이전트는 herdr 스킬(`herdr --skill`)로 pane·agent·worktree를 다룬다. lazed 고유 명령은
