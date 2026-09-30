@@ -36,6 +36,17 @@ def cli(*args: str) -> dict:
         return {}
 
 
+def cli_all(*args: str) -> dict:
+    out = subprocess.run(
+        ["herdr", *HERDR_ARGS, *args], capture_output=True, text=True
+    )
+    try:
+        return json.loads(out.stdout)
+    except json.JSONDecodeError as e:
+        FAILURES.append(f"herdr {args}: bad JSON ({e}) {out.stderr.strip()}")
+        return {}
+
+
 def check(name: str, ok: bool, detail: str = ""):
     if ok:
         print(f"  ok   {name}")
@@ -101,6 +112,41 @@ if layouts:
             )
 else:
     print("  (no layout yet — pane checks skipped)")
+
+print("herdr api schema --json — worktree contract lazed reads")
+sch = cli_all("api", "schema", "--json")
+defs = dig(sch, "schemas", "success_response", "$defs") or {}
+req_defs = dig(sch, "schemas", "request", "$defs") or {}
+rr = (defs.get("ResponseResult") or {}).get("oneOf") or []
+wt_create = next(
+    (
+        v
+        for v in rr
+        if {"workspace", "tab", "root_pane", "worktree"}
+        <= set(v.get("required") or [])
+    ),
+    None,
+)
+check("worktree.create result = workspace+tab+root_pane+worktree", wt_create is not None)
+for name, def_name, field in (
+    ("workspace.workspace_id", "WorkspaceInfo", "workspace_id"),
+    ("worktree.checkout_path", "WorkspaceWorktreeInfo", "checkout_path"),
+    ("tab.tab_id", "TabInfo", "tab_id"),
+    ("root_pane.pane_id", "PaneInfo", "pane_id"),
+):
+    req = (defs.get(def_name) or {}).get("required") or []
+    check(f"{name} required", field in req)
+wcp = (req_defs.get("WorktreeCreateParams") or {}).get("properties") or {}
+check(
+    "WorktreeCreateParams cwd/branch/base/label",
+    all(k in wcp for k in ("cwd", "branch", "base", "label")),
+)
+wrp = req_defs.get("WorktreeRemoveParams") or {}
+check(
+    "WorktreeRemoveParams workspace_id required + force",
+    "workspace_id" in (wrp.get("required") or [])
+    and "force" in (wrp.get("properties") or {}),
+)
 
 print("herdr machine list --json")
 ml = cli("machine", "list", "--json")

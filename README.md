@@ -8,10 +8,10 @@ herdr가 코어다: workspace / tab / pane과 그 ID(`w1`, `w1:t1`, `w1:p1`), PT
 herdr의 것이다. lazed는 herdr에 없는 것만 덧붙인다:
 
 - **조직층** — `group > project` 계층. herdr workspace를 저장소(project) 아래에
-  파일링하고, main 체크아웃과 linked worktree를 구분한다.
-- **worktree 파이프라인** — 생성(`git worktree add` → herdr workspace로 열기),
-  fan-out, 안전 제거(에이전트 점유 확인·재시도·branch 정리).
+  파일링하고, main 체크아웃과 linked worktree를 구분한다(외부에서 열린
+  workspace도 cwd의 repo로 자동 편입).
 - **tasks** — worktree + 에이전트 + 첫 프롬프트를 하나의 `request_id`로 묶은 내구 기록.
+- **fan-out** — 프롬프트 하나 → N개 `task`(각각 herdr worktree + 에이전트).
 - **GTD Inbox / Automations / 알림 / install·update.**
 
 두 데몬은 서로 독립이다. `lazed` 데몬(`~/.local/state/lazed/lazed.sock`)은 조직층
@@ -35,6 +35,11 @@ herdr가 없으면 조직층만 동작하는 degraded 모드로 뜬다. 창을 �
   GitHub 리뷰 요청·Slack 채널) + 커스텀 셸 폴러 → collect/notify/command/agent/
   inbox 액션.
 - **Session Monitor** (⇧⌘3) — 워크스페이스 전체의 에이전트 상태를 한 화면에.
+- **Files 패널** (⇧⌘E, 타이틀바 오른쪽 버튼) — 활성 workspace 체크아웃의 파일
+  트리를 오른쪽 사이드바에 표시. git 상태 배지(M/U/D/무시됨·디렉터리 롤업),
+  이름/내용 검색 탭. 파일 클릭 시 메인 영역에 파일 탭으로 열림(Orca 패턴) —
+  변경 파일은 diff 우선, markdown은 렌더링 프리뷰, 나머지는 텍스트. esc/⌘W로
+  닫기. 로컬 fs 전용 — herdr와 무관하게 src-tauri 커맨드가 처리한다.
 - **Settings** (⌘,) — Jira 등 연동 계정. 토큰은 데몬이 스폰하는 폴러의 env로 주입된다.
 
 ## 단축키
@@ -51,19 +56,20 @@ herdr가 없으면 조직층만 동작하는 degraded 모드로 뜬다. 창을 �
 | ⌘1-9 / ⌃1-9 | N번째 workspace / tab |
 | ⇧⌘Enter | focused pane 확대 토글 |
 | ⌘K / ⇧⌘A / ⇧⌘F | 프롬프트 바 / 에이전트 시작 / fan-out |
+| ⇧⌘E | files 패널 토글 (오른쪽 사이드바) |
 | ⇧⌘1-4 | projects / automations / session / inbox |
 
 ## CLI
 
-에이전트(그리고 사람)가 pane·에이전트를 다룰 때는 **herdr CLI**를 그대로 쓴다 —
-`herdr pane split --current`, `herdr agent start reviewer --kind codex --pane w1:p3`,
-`herdr agent prompt reviewer "…" --wait`. 자세한 것은 `herdr --skill`.
+에이전트(그리고 사람)가 pane·에이전트·worktree를 다룰 때는 **herdr CLI**를 그대로
+쓴다 — `herdr pane split --current`, `herdr agent start reviewer --kind codex
+--pane w1:p3`, `herdr agent prompt reviewer "…" --wait`, `herdr worktree
+create --cwd "$PWD" --branch fix` (worktree는 생성되면서 곧장 herdr workspace로
+열리고, lazed가 cwd의 repo project 아래로 자동 편입한다). 자세한 것은 `herdr
+--skill`.
 
 lazed CLI는 herdr에 없는 것만 제공한다:
 
-- `lazed worktree create --branch NAME [--repo PATH] [--base REF]` — git worktree를
-  만들고 herdr workspace로 열어 project 아래에 파일링. 결과의 `pane_id`로 에이전트를
-  시작한다. `lazed worktree list|remove WORKSPACE_ID [--force] [--kill-agents]`.
 - `lazed task start --branch NAME --kind KIND -- "프롬프트"` — worktree + 에이전트 +
   첫 프롬프트를 한 `request_id`로. `task status|read|tell|resume|list`.
 - `lazed inbox add|list|done|reopen|snooze|remove`.
@@ -72,8 +78,13 @@ lazed CLI는 herdr에 없는 것만 제공한다:
 - `lazed herdr status|snapshot|call` — herdr 어댑터 상태·스냅샷(데몬 없이 herdr에
   직접).
 - `lazed install|uninstall|doctor`, `lazed status|stop|restart`.
+- `lazed init [--force] [path]` — 프로젝트에 `crew` 스킬 설치(앱 Import 시 기본 설치). 원본은
+  `.agents/skills/crew/`(codex·gemini·pi·devin), `.claude/skills/crew`는 그 디렉터리로의 상대 링크.
+  아무 에이전트에게 "crew로 …해줘" → research→design→verify→coding→리뷰×2→test를 단계별 tab의
+  에이전트로 돌리고 `.crew/<slug>/` 파일로 넘김. 단계 구성은 `.agents/skills/crew/crew.md`에서 편집.
 
-`skills/lazed/SKILL.md`가 에이전트용 계약이다 — herdr 스킬 위에 위 명령만 덧붙인다.
+에이전트는 herdr 스킬(`herdr --skill`)로 pane·agent·worktree를 다룬다. lazed 고유 명령은
+`lazed task|inbox|todo --help`로 확인한다.
 
 ## 설치
 
@@ -105,7 +116,8 @@ override.
 - `~/.local/state/lazed/` — `lazed.sock`, `session.json`(group/project/workspace 주석),
   `inbox.json`, `tasks/`, `lazed.log`
 - `~/.config/lazed/` — `agents.json`(launch spec), 연동 설정
-- `~/.lazed/worktrees/<repo>/<branch>` — worktree 체크아웃
+- worktree 체크아웃 위치는 herdr가 정한다(기본 `~/.herdr/worktrees/<repo>/<branch>`;
+  `herdr worktree create --path`로 override)
 - herdr 자체 상태는 `~/.config/herdr/sessions/<session>/`에 있다(lazed가 건드리지 않음).
 
 ## 제거

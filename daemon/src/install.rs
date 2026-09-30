@@ -1,6 +1,6 @@
 //! `lazed install | uninstall | doctor` — manage the files lazed puts on a
-//! machine outside its own state dir: the `~/.local/bin/lazed` symlink and
-//! the agent-skill links. `install` records what it creates in
+//! machine outside its own state dir: the `~/.local/bin/lazed` symlink.
+//! `install` records what it creates in
 //! `<state>/install.json`; `uninstall` removes only what that manifest lists
 //! — or, without one, asks before touching the known paths. `--purge` also
 //! wipes state, config, worktrees, and app data.
@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 
 use crate::state;
 
-const SKILL_LINKS: [&str; 2] = [".agents/skills/lazed", ".claude/skills/lazed"];
 const HERDR_LEFTOVERS: [&str; 4] = [
     ".local/bin/herdr",
     ".herdr",
@@ -36,26 +35,6 @@ fn self_exe() -> Result<PathBuf, String> {
     std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("cannot resolve own executable: {e}"))
-}
-
-/// Where the skill source lives relative to this binary: inside the app
-/// bundle, a source checkout, or an explicit override — in that order.
-fn skills_source(exe: &Path) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    for c in [
-        dir.join("skills/lazed"), // lazed.app/Contents/Resources/lazed
-        dir.join("../skills/lazed"), // lazed.app/Contents/Resources/bin/lazed
-        dir.join("../../../skills/lazed"), // daemon/target/<profile>/lazed → repo
-    ] {
-        if c.join("SKILL.md").is_file() {
-            return c.canonicalize().ok();
-        }
-    }
-    std::env::var("LAZED_SKILLS_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.join("SKILL.md").is_file())
-        .and_then(|p| p.canonicalize().ok())
 }
 
 /// Resolve a symlink's target to an absolute canonical path (the stored
@@ -156,18 +135,17 @@ fn path_on_path_env(dir: &Path) -> bool {
 }
 
 pub fn install(args: &[String]) -> i32 {
-    let mut skills_only = false;
-    let mut bin_only = false;
     let mut dry = false;
     let mut yes = false;
     for a in args {
         match a.as_str() {
-            "--skills-only" => skills_only = true,
-            "--bin-only" => bin_only = true,
+            // agent skills are herdr's now (`herdr --skill`); the CLI link
+            // is all that's left, so --bin-only is accepted as a no-op
+            "--bin-only" => {}
             "--dry-run" => dry = true,
             "--yes" | "-y" => yes = true,
             "--help" | "-h" => {
-                eprintln!("usage: lazed install [--skills-only] [--bin-only] [--dry-run] [--yes]");
+                eprintln!("usage: lazed install [--dry-run] [--yes]");
                 return 0;
             }
             _ => {
@@ -175,10 +153,6 @@ pub fn install(args: &[String]) -> i32 {
                 return 2;
             }
         }
-    }
-    if skills_only && bin_only {
-        eprintln!("lazed install: choose --skills-only or --bin-only, not both");
-        return 2;
     }
     let exe = match self_exe() {
         Ok(p) => p,
@@ -217,25 +191,7 @@ pub fn install(args: &[String]) -> i32 {
             }
         }
     };
-    if !skills_only {
-        try_link(cli_path(), &exe, &mut entries);
-    }
-    if !bin_only {
-        match skills_source(&exe) {
-            Some(src) => {
-                for rel in SKILL_LINKS {
-                    try_link(home().join(rel), &src, &mut entries);
-                }
-            }
-            None => {
-                eprintln!(
-                    "lazed install: skill source not found near {} — set LAZED_SKILLS_DIR",
-                    exe.display()
-                );
-                failed = true;
-            }
-        }
-    }
+    try_link(cli_path(), &exe, &mut entries);
     if failed {
         return 1;
     }
@@ -255,7 +211,7 @@ pub fn install(args: &[String]) -> i32 {
                 return 1;
             }
         }
-        if !skills_only && !path_on_path_env(&cli_path().parent().unwrap().to_path_buf()) {
+        if !path_on_path_env(&cli_path().parent().unwrap().to_path_buf()) {
             println!("note: ~/.local/bin is not on PATH — add it to use `lazed` from a shell");
         }
         println!("manifest: {}", manifest_path().display());
@@ -309,9 +265,11 @@ fn remove_path(p: &Path) {
     }
 }
 
-/// `uninstall --purge`: wipe state, config, worktrees, app data. Worktrees
-/// with uncommitted changes (or that git can't verify) block the purge
-/// unless --yes.
+/// `uninstall --purge`: wipe state, config, legacy worktrees, app data.
+/// The ~/.lazed/worktrees tree only contains checkouts made by older
+/// lazed versions (herdr owns worktrees now, under ~/.herdr/worktrees,
+/// which lazed never touches). Checkouts with uncommitted changes (or
+/// that git can't verify) block the purge unless --yes.
 fn purge_check(yes: bool) -> Result<Vec<PathBuf>, String> {
     let wt_root = state::worktrees_dir();
     let mut blocked: Vec<(PathBuf, &str)> = Vec::new();
@@ -435,7 +393,7 @@ pub fn uninstall(args: &[String]) -> i32 {
     }
     let manifest = read_manifest();
     let found: Vec<PathBuf> = if manifest.is_none() {
-        [cli_path()].into_iter().chain(SKILL_LINKS.iter().map(|r| home().join(r)))
+        [cli_path()].into_iter()
             .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
             .collect()
     } else { Vec::new() };
@@ -530,7 +488,6 @@ fn check(checks: &mut Vec<Value>, id: &str, path: &Path, status: &str, detail: S
 
 pub fn doctor(args: &[String]) -> i32 {
     let json_out = args.iter().any(|a| a == "--json");
-    let exe = self_exe().ok();
     let mut checks: Vec<Value> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -560,33 +517,6 @@ pub fn doctor(args: &[String]) -> i32 {
             "blocked",
             "exists but is not a symlink — not managed by lazed install".into(),
         ),
-    }
-
-    // skill links + where a fresh link would point
-    let src = exe.as_deref().and_then(skills_source);
-    for (id, rel) in [("skill.agents", SKILL_LINKS[0]), ("skill.claude", SKILL_LINKS[1])] {
-        let link = home().join(rel);
-        match std::fs::symlink_metadata(&link) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(id.into());
-                check(&mut checks, id, &link, "missing", "run `lazed install`".into());
-            }
-            Err(e) => check(&mut checks, id, &link, "error", e.to_string()),
-            Ok(md) if md.file_type().is_symlink() => match link_target(&link) {
-                Some(t) if t.join("SKILL.md").is_file() => {
-                    check(&mut checks, id, &link, "ok", t.display().to_string())
-                }
-                Some(t) => check(&mut checks, id, &link, "broken", format!("no SKILL.md under {}", t.display())),
-                None => check(&mut checks, id, &link, "broken", "unreadable target".into()),
-            },
-            Ok(_) => check(&mut checks, id, &link, "ok", "real directory (not a lazed link)".into()),
-        }
-    }
-    if src.is_none() {
-        warnings.push(format!(
-            "skill source not found near {} (set LAZED_SKILLS_DIR)",
-            exe.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
-        ));
     }
 
     check(

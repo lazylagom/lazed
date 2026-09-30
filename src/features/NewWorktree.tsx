@@ -6,7 +6,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useRef, useState } from "react";
 import { Modal } from "../components/Modal";
 
-/** What the caller needs to run `workspace.create` (git worktree add). */
+/** What the caller needs to run herdr `worktree.create` (git worktree add). */
 export interface NewWorktreeRequest {
   branch: string;
   base?: string;
@@ -14,9 +14,10 @@ export interface NewWorktreeRequest {
 }
 
 /**
- * ⌘N on the selected project — a git worktree for a new branch, checked out
- * under ~/.lazed/worktrees/<repo>/<branch-slug> with its own pane. Branch is
- * the only required field; an empty base means "fork from the current HEAD".
+ * ⌘N on the selected project — herdr `worktree.create` checks out a new
+ * branch in a git worktree and opens it as a workspace with its own pane.
+ * Branch is the only required field; an empty base means "fork from the
+ * current HEAD".
  */
 export function NewWorktree({
   projectName,
@@ -115,7 +116,7 @@ export function NewWorktree({
       <div className="newwt-note">
         {invalid && trimmed
           ? "Not a valid branch name."
-          : "A new checkout under ~/.lazed/worktrees with its own pane. Uncommitted changes are not copied."}
+          : "A new git worktree opened as its own workspace. Uncommitted changes are not copied."}
       </div>
       {error && <div className="newwt-error">{error}</div>}
 

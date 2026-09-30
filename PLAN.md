@@ -88,8 +88,8 @@ herdr에 없는 것만 덧붙인다. (2026-09-22 확정 — 초안의 "lazed 네
 | 모델·ID | workspace / tab / pane, `w1` `w1:t1` `w1:p1`. lazed는 자기 ID를 발급하지 않음 | `group > project` — herdr `workspace_id`에 붙는 주석(project_id, is_main, branch) |
 | 실행 | PTY, 프레임 스트림, 상태 감지(22종 매니페스트), 네이티브 복원, 원격 SSH | — |
 | 에이전트 | `agent start/prompt/wait/read/get/list/send-keys`, 이름 바인딩, `pane.report_agent` 훅 | tasks(내구 기록: worktree+agent+prompt를 하나의 request_id로) |
-| CLI·스킬 | 에이전트는 `herdr …`를 직접 호출. herdr 스킬이 기본 | `lazed worktree|task|inbox`만. SKILL.md는 herdr 스킬 위에 이것만 덧붙임 |
-| worktree | `worktree.create/open/remove` 기본 제공 | 안전 제거 파이프라인(trash·retry·branch 정리·에이전트 점유 확인), fan-out — 체크아웃 후 herdr `workspace.create(cwd)`로 열기 |
+| CLI·스킬 | 에이전트는 `herdr …`를 직접 호출. herdr 스킬이 기본 | `lazed task|inbox|todo`만 (lazed 전용 스킬 없음 — 2026-09-30 삭제) |
+| worktree | `worktree.create/open/remove/list` — 체크아웃 생성·제거·목록 전부 | fan-out(tasks)만. 생성 직후 reconcile이 pane cwd의 repo로 project에 자동 편입 — 별도 등록 호출 없음 |
 | 기타 | — | Inbox, Automations, 알림, install/update |
 
 ```
@@ -167,7 +167,7 @@ herdr에 없는 것만 덧붙인다. (2026-09-22 확정 — 초안의 "lazed 네
 - agent start/prompt/wait를 UI로 노출 (새 에이전트 스폰 모달, 프롬프트 브로드캐스트)
 - blocked 인박스: 승인 필요 에이전트를 한 목록에 → 클릭 시 해당 pane으로 점프
 - macOS 알림 (done/blocked 전이 시)
-- `skills/lazed/SKILL.md`: pane 안 에이전트가 herdr CLI로 다른 pane 조작 가능하게
+- `skills/lazed/SKILL.md`: pane 안 에이전트가 herdr CLI로 다른 pane 조작 가능하게 (v3에서 삭제 — herdr 스킬로 대체)
 
 구현 노트:
 - `⇧⌘A` AgentPicker (23종 manifest 카탈로그 필터링) → focused pane에 `agent start`
@@ -181,7 +181,7 @@ herdr에 없는 것만 덧붙인다. (2026-09-22 확정 — 초안의 "lazed 네
 - 결과 비교 후 승자 머지 플로우
 
 구현 노트:
-- `⇧⌘F` Fanout 모달: repo/base/prefix/에이전트 종류(칩 다중선택)/공통 프롬프트 → kind별 `worktree create --branch <prefix>-<kind>` → root pane에 `agent start` → `agent prompt`
+- `⇧⌘F` Fanout 모달: repo/base/prefix/에이전트 종류(칩 다중선택)/공통 프롬프트 → kind별 `task.start --branch <prefix>-<kind>`(내부에서 herdr `worktree.create` → `agent start` → `agent prompt`) — 에이전트·worktree는 전부 herdr, lazed는 durable task 기록만
 - worktree 응답에 `workspace` + `root_pane` 포함 → 추가 생성 불필요. agent start 전 1.5s 대기(새 셸 init), prompt 전 3s 대기(TUI 부팅)
 - 사이드바 worktree workspace에 `⑂` 버튼 → DiffView: `git diff <merge-base>` 파싱(커밋+작업트리 전부), 라인 클릭 → 코멘트 → `agent prompt`로 `file:line — text` 회송
 - merge 버튼 → 확인 → `git -C <repo_root> merge --no-ff` (컨플릭트는 에러 문자열로 표시)
@@ -253,7 +253,7 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 1. 새 에이전트 모달: kind 선택(claude/codex/…), workspace/tab 지정 → pane.split + pane.run
 2. agent 상태 전이 감지 시 사이드바 배지 + blocked 인박스 뷰 + macOS 알림
 3. 프롬프트 브로드캐스트: 선택한 여러 pane에 같은 텍스트 전송
-4. skills/lazed/SKILL.md 작성: pane 안 에이전트가 herdr CLI로 다른 pane/agent를 조작하는 가이드
+4. skills/lazed/SKILL.md 작성: pane 안 에이전트가 herdr CLI로 다른 pane/agent를 조작하는 가이드 (v3에서 삭제 — herdr 스킬로 대체)
 ```
 
 ### 프롬프트 4 — fan-out + 리뷰 루프
@@ -275,6 +275,7 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 - [x] **세션 모델 → herdr overlay (Step B)** — `session.rs` = groups/projects + workspace 주석(herdr `workspace_id → project_id/path/branch/is_main`), 순수 모델(IO 없음). lazed ID는 `gN`/`pN`만. `session.snapshot`이 herdr 스냅샷을 가져와 reconcile(TUI에서 닫힌 workspace 주석 제거, lazed 밖에서 열린 workspace는 cwd의 repo로 자동 편입) 후 병합. herdr 다운 시 주석만으로 degraded 스냅샷. session.json v3.
 - [x] **PTY·에이전트 제어 제거** — `term.rs` `render.rs` `terminal_protocol.rs` `agent.rs` `named.rs` `control.rs` `history.rs` `integrations/pi.ts` 삭제(−4,400줄), `cli.rs`는 `lazed worktree`만, `tasks.rs`는 herdr `agent.start/prompt/get` + `pane.read`로 교체(이름 `task-<id>`). `workspace.remove`는 herdr `agents[]`로 점유 확인 후 제거 파이프라인 → herdr `workspace.close`. Cargo 의존성 portable-pty/alacritty/base64/rustix 제거. SKILL.md를 herdr CLI 기준 + `lazed worktree|task|inbox`로 재작성. 라이브 herdr 상대 e2e(project.create→ws, worktree create/remove, 외부 ws 편입, herdr stop→degraded→재기동) 확인.
 - [x] **앱: herdr 계약 전환** — `src-tauri/src/herdr.rs`(herdr 바이너리 해석·`herdr --session lazed server` auto-launch·pane당 `terminal session control` 자식 프로세스 스트림), `lib.rs` 커맨드를 `pane_attach/input/resize/scroll/detach/close/create/send/read` + herdr 패스스루(`tab.*`, `agent.start{name: kind-pane}`, `agent.prompt{target}`)로 교체. 프론트 모델을 herdr PaneInfo/TabInfo/WorkspaceInfo로 교체(`normalize()`가 `ws.tabs`/`tab.panes`/agent_name을 클라이언트에서 파생), 이벤트는 `herdr.*`, 스크롤은 px→줄 변환 + `pane.scroll_changed` 오버레이. DaemonUpdate/Settings: lazed 재시작이 pane을 죽이지 않으므로 terms 게이트 제거. 번들 `bin/herdr` 복구(`dist` = fetch-herdr + stage-lazed). README를 Path C 기준으로 재작성.
+- [x] **worktree 표면 제거 (herdr 우선 규칙)** — `lazed worktree` CLI와 데몬 `workspace.create`/`workspace.remove`/`worktree.list` 삭제, 자체 git 제거 파이프라인(trash·retry·branch 정리·점유 확인·locked 감지, ~700줄) 전부 삭제. 생성·제거·목록은 `herdr worktree …`(`worktree.create/remove/list` 소켓 API) 그대로 — CLI는 `herdr worktree`, 앱은 `herdr.call` 패스스루(`herdr_call` 커맨드 추가). `task.start`는 내부에서 `worktree.create` 호출 + dirty 소스 거부와 durable record만 유지(체크아웃 경로는 herdr이 정함). 점유 확인·branch 정리는 herdr에 없는 정책이었지만 규칙상 폐기 — 앱의 삭제 확인 다이얼로그가 에이전트 이름을 보여주는 것이 유일한 게이트. `removing_workspaces`·`sweep_worktree_trash` 제거.
 - [ ] **실기 검증** — `make dev`로 앱 기동: 부팅 시 두 데몬 auto-launch, pane 렌더/입력/리사이즈/스크롤, ⌘D 분할·⌘T 탭, 에이전트 시작(이름 `kind-w1-p3`)·알림, worktree 생성/제거, herdr 재시작 후 재연결. 한글 IME 회귀(`0a7587f`) 재확인.
 - [ ] **앱 스트림 클라이언트 부활** — v2 `terminal session control` 파이프라인. 두 데몬 auto-detect-launch, herdr 부재 시 placeholder.
 - [x] **빌드/번들 복구** — `dist` = `fetch-herdr` + `stage-lazed`, `tauri.bundle.json`에 `bin/herdr`, `NOTICE`("lazed bundles the herdr binary")가 다시 사실이 됨. About 모달은 NOTICE 원문을 그대로 표시.
@@ -292,6 +293,8 @@ herdr의 workspace/tab/pane 모델을 미러링하는 GUI를 구현해줘:
 - [x] **GTD Inbox (rail ⇧⌘4)** — 데몬 소유 범용 capture 큐: `inbox.add/list/update/remove` 소켓 API + `lazed inbox` CLI + `<state>/inbox.json` 영속화 (세션과 독립 — 데몬/앱 재시작 무관). `(source,key)` 중복 시 내용만 갱신, done/snoozed 상태 유지; snooze는 list 읽기 시 lazy expiry로 open 복귀 (타이머 스레드 없음). 수집 경로: automation의 새 `inbox` 액션 (기존 폴러 프레임워크 재사용 — Jira/Slack 프리셋 포함, JSON line의 `url|link|permalink` 필드 또는 plain line의 첫 http(s) 토큰이 source 링크가 됨). Rail 두 번째 아이콘 + open 개수 배지; triage = done / snooze(1h·내일 9시·3일) / 원본 링크 열기(`open_url` — http(s)만) / 위임(`task.start` worktree+agent, request_id `inbox-<itemid>` 멱등 — 또는 focused pane 전송). Dock 뱃지 = agent attention + open inbox 합산. 에이전트 blocked/done 모달(⇧⌘I)은 별도 유지.
 - [x] **Jira Mention automation 프리셋** — `jira @me` 칩: `/myself`로 accountId 해석 → JQL `(comment ~ "<accountId>" OR description ~ "<accountId>") AND updated >= -14d`로 검색 (Cloud는 mention의 accountId가 텍스트 인덱스에 토큰으로 들어감 — `[~accountid:…]` 위키마커는 Server/DC 전용이라 Cloud JQL에는 벌어 accountId 사용, 후보 축소용일 뿐 정확한 판정은 코멘트별 스캔이 담당) → 코멘트 ADF의 `mention` 노드를 accountId로 대조해 **멘션 1건당 아이템 1개**를 emit (`id = ISSUE-KEY#commentId`이라 같은 이슈의 후속 멘션도 중복 제거에 걸리지 않음, `url`은 `?focusedCommentId=`로 해당 코멘트를 바로 염). Cloud(api/3 ADF)와 self-hosted(api/2 위키마크업 `[~user]`, 이메일 없으면 Bearer PAT) 모두 대응 — 검색 응답에 `comment` 필드가 없으면 이슈별 `/comment`로 폴백. 폴러는 `python3` 힙독 스크립트(백엔드 변경 없음), `requires`는 `JIRA_BASE`/`JIRA_API_TOKEN`. notify/inbox 액션과 조합해 쓰는 것을 전제.
 - [x] **Automations 카탈로그(켜기/끄기)** — Automations 화면 상단 "Ready-made" 카드에 `custom`을 제외한 모든 프리셋(Jira mention @me · Jira assigned · GitHub review · Slack)을 토글 스위치로 나열. 켜면 프리셋 기본값(`inbox` 액션, 5분 주기)으로 자동화를 생성·시작하고, 끄면 일시 중지 — 에디터를 열지 않아도 됨. 저장된 자동화는 새 `preset` 필드(Rust `Automation.preset`, save 입력에 포함)로 카탈로그 행에 매핑되고, 필드가 없는 기존 자동화는 프리셋 명령과 일치할 때만 매핑. 카탈로그 행에서도 편집/즉시 실행/아이템 펼치기 가능, 연동 미설정 시 "open integrations" 링크 표시. 직접 만든 자동화는 아래 "Custom" 섹션에 기존 행(삭제 포함)으로 유지.
+- [x] **Todo (rail ⇧⌘5)** — 데몬 소유 개인 체크리스트: `todo.add/list/update/remove/clear` 소켓 API + `lazed todo` CLI + `<state>/todo.json` 영속화 (inbox와 독립 스토어 — inbox는 triage 큐, todo는 사용자 소유 리스트). 정렬 = open 최신순 → done 최근 완료순 (done_at 추적). UI: 진입 시 입력창 자동 포커스로 즉시 capture, 체크박스 토글 / 더블클릭 rename / hover ✕ 삭제 / done 섹션 접기 + clear. `todo.updated` 이벤트로 CLI·앱 동기화, rail 배지 = open 개수 (Dock 뱃지 합산 제외 — todo는 attention이 아닌 영속 리스트).
+- [x] **Files 패널 (오른쪽 사이드바, ⇧⌘E)** — 활성 workspace 체크아웃의 파일 트리(Orca 패턴). `src-tauri/fs.rs`: `fs_tree`(git ls-files+porcelain으로 gitignore 존중, 무시·embedded repo 디렉터리는 collapsed 표기, 디렉터리 배지 롤업 M/D>U>!), `fs_read`(512KB 캡·binary 감지), `fs_search`(rg → git grep --untracked 폴백), `fs_diff`(`git diff HEAD`), `open_path`. 전부 spawn_blocking 로컬 fs — 데몬·herdr 무관, 원격 미지원(로컬 전용 결정). 프론트 `FilesPanel.tsx`: 트리+배지+Names/Contents 검색 탭, 파일 클릭 → 메인 영역의 파일 탭(`FileView.tsx`, ws-tabs에 lazed 소유 탭 — herdr 탭 아님): 변경 파일은 diff 우선, .md는 marked+DOMPurify 렌더링 프리뷰, diff/text/preview 토글, esc·⌘W·탭 ✕로 닫기, root 바뀌면 탭 무효화. 푸터에 branch/변경 수/pane 수 + worktree diff 진입 버튼. 6초 폴링 갱신, 패널 폭은 `useSidebarWidth`를 side/key 파라미터화해 재사용.
 - [ ] **동시 멀티 원격** — 현재 단일 `REMOTE` static(`remote_ctx()` 경계). 멀티화하려면 target별 context map + 이벤트/control 스트림을 context별로 라우팅 + pane id 네임스페이스 처리 필요 (서로 다른 서버가 같은 `w1:p1`을 가질 수 있음 — UI에서 서버 프리픽스 필요, herdr 스킬 문서도 동일 경고)
 - [ ] **모바일 read-only 뷰** — Orca 모니터링 패턴 참고
 

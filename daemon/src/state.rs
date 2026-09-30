@@ -39,8 +39,10 @@ pub fn agents_path() -> PathBuf {
     config_dir().join("agents.json")
 }
 
-/// Worktree checkouts: ~/.lazed/worktrees/<repo>/<branch-slug>
-/// (override root: LAZED_WORKTREE_DIR).
+/// Legacy worktree root: ~/.lazed/worktrees/<repo>/<branch-slug>
+/// (override root: LAZED_WORKTREE_DIR). lazed no longer creates checkouts —
+/// herdr owns those under ~/.herdr/worktrees. This path stays only so
+/// `uninstall --purge` can clean up checkouts made by older lazed versions.
 pub fn worktrees_dir() -> PathBuf {
     if let Ok(d) = std::env::var("LAZED_WORKTREE_DIR") {
         return PathBuf::from(d);

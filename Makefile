@@ -9,7 +9,7 @@ help: ## show this help
 deps: ## install frontend deps
 	$(BUN) install
 
-install: ## link lazed CLI + agent skills into ~/ (builds release daemon first; herdr is separate)
+install: ## link lazed CLI into ~/ (builds release daemon first; herdr is separate)
 	$(CARGO) build --release --manifest-path daemon/Cargo.toml
 	daemon/target/release/lazed install
 
@@ -49,7 +49,7 @@ format: ## biome format --write
 build: ## frontend production build (dist/)
 	$(BUN) run build
 
-dist: ## full app bundle (herdr + daemon + skills staged, then tauri build)
+dist: ## full app bundle (herdr + daemon staged, then tauri build)
 	$(BUN) run dist
 
 schema-check: ## verify herdr schema fields lazed depends on
@@ -59,5 +59,5 @@ perf: ## frame-stream perf measurement (throwaway herdr session)
 	python3 scripts/perf_stream.py
 
 clean: ## remove generated artifacts (dist/, staged bundle payload, cargo target)
-	rm -rf dist src-tauri/bin src-tauri/skills
+	rm -rf dist src-tauri/bin
 	$(CARGO) clean --manifest-path src-tauri/Cargo.toml

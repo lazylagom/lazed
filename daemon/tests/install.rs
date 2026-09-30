@@ -1,6 +1,5 @@
 //! install/doctor/uninstall against a throwaway HOME — the real one must
-//! never be touched. `CARGO_BIN_EXE_lazed` is the debug binary; its
-//! `<exe>/../../../skills/lazed` lookup lands on the repo's skills dir.
+//! never be touched. `CARGO_BIN_EXE_lazed` is the debug binary.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -13,7 +12,6 @@ fn lazed(home: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("LAZED_STATE_DIR")
         .env_remove("LAZED_CONFIG_DIR")
         .env_remove("LAZED_WORKTREE_DIR")
-        .env_remove("LAZED_SKILLS_DIR")
         .output()
         .unwrap()
 }
@@ -27,10 +25,6 @@ fn tmp_home(tag: &str) -> PathBuf {
 
 fn exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lazed")).canonicalize().unwrap()
-}
-
-fn skills_src() -> PathBuf {
-    exe().parent().unwrap().join("../../../skills/lazed").canonicalize().unwrap()
 }
 
 /// Every entry under `root` whose name contains "lazed".
@@ -60,10 +54,9 @@ fn install_doctor_uninstall_purge_leaves_no_trace() {
 
     let cli = home.join(".local/bin/lazed");
     assert_eq!(cli.canonicalize().unwrap(), exe());
+    // agent skills are herdr's (`herdr --skill`) — install links none
     for rel in [".agents/skills/lazed", ".claude/skills/lazed"] {
-        let link = home.join(rel);
-        assert!(link.join("SKILL.md").is_file(), "{rel} should resolve to the skill");
-        assert_eq!(link.canonicalize().unwrap(), skills_src());
+        assert!(home.join(rel).symlink_metadata().is_err(), "{rel} must not exist");
     }
     assert!(home.join(".local/state/lazed/install.json").is_file());
 
@@ -89,7 +82,7 @@ fn install_doctor_uninstall_purge_leaves_no_trace() {
 #[test]
 fn install_never_overwrites_a_real_directory() {
     let home = tmp_home("realdir");
-    let real = home.join(".agents/skills/lazed");
+    let real = home.join(".local/bin/lazed");
     std::fs::create_dir_all(&real).unwrap();
     std::fs::write(real.join("keep.txt"), "mine").unwrap();
 
@@ -97,14 +90,11 @@ fn install_never_overwrites_a_real_directory() {
     assert!(!out.status.success(), "install must fail on a real dir");
     assert_eq!(std::fs::read_to_string(real.join("keep.txt")).unwrap(), "mine");
     assert!(!real.symlink_metadata().unwrap().file_type().is_symlink());
-    // the cli link is independent and still went in
-    assert!(home.join(".local/bin/lazed").exists());
 
-    // uninstall removes only what the manifest recorded — the real dir stays
+    // uninstall without a manifest only considers symlinks — the real dir stays
     let out = lazed(&home, &["uninstall", "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(std::fs::read_to_string(real.join("keep.txt")).unwrap(), "mine");
-    assert!(!home.join(".local/bin/lazed").exists());
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -112,11 +102,8 @@ fn install_never_overwrites_a_real_directory() {
 fn uninstall_without_manifest_removes_only_symlinks() {
     let home = tmp_home("legacy");
     let cli = home.join(".local/bin/lazed");
-    let skill = home.join(".agents/skills/lazed");
     std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(exe(), &cli).unwrap();
-    std::os::unix::fs::symlink(skills_src(), &skill).unwrap();
 
     // non-tty without --yes must refuse rather than guess
     let out = lazed(&home, &["uninstall"]);
@@ -125,7 +112,7 @@ fn uninstall_without_manifest_removes_only_symlinks() {
 
     let out = lazed(&home, &["uninstall", "--yes"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(!cli.exists() && !skill.exists());
+    assert!(!cli.exists());
     let _ = std::fs::remove_dir_all(&home);
 }
 
