@@ -1,3 +1,4 @@
+import { TauriEvent } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Terminal } from "@xterm/xterm";
 import { safeUnlisten } from "../shared/unlisten";
@@ -335,21 +336,28 @@ export class IMEOverlay {
       this.writeDroppedPaths(paths);
     });
 
+    // listen to DRAG_DROP directly rather than onDragDropEvent(): that
+    // helper registers four listeners and its combined unlisten drops each
+    // async _unlisten promise, so a #15799 rejection escapes safeUnlisten's
+    // catch as an unhandled rejection
     void getCurrentWindow()
-      .onDragDropEvent((event) => {
-        if (this.isDisposed || event.payload.type !== "drop") {
-          return;
-        }
-        if (
-          !this.containsDropPosition(
-            event.payload.position.x,
-            event.payload.position.y,
-          )
-        ) {
-          return;
-        }
-        this.writeDroppedPaths(event.payload.paths);
-      })
+      .listen<{ paths: string[]; position: { x: number; y: number } }>(
+        TauriEvent.DRAG_DROP,
+        (event) => {
+          if (this.isDisposed) {
+            return;
+          }
+          if (
+            !this.containsDropPosition(
+              event.payload.position.x,
+              event.payload.position.y,
+            )
+          ) {
+            return;
+          }
+          this.writeDroppedPaths(event.payload.paths);
+        },
+      )
       .then((unlisten) => {
         // safeUnlisten defers past the registration eval — calling
         // unlisten() right after listen() resolves races and leaks the

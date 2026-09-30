@@ -1,17 +1,16 @@
 // @vitest-environment jsdom
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import type { EventCallback } from "@tauri-apps/api/event";
-import type { DragDropEvent } from "@tauri-apps/api/window";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IMEOverlay } from "./ime-overlay";
 
 const tauriWindowState = vi.hoisted(() => ({
-  onDragDropEventMock: vi.fn(),
+  listenMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    onDragDropEvent: tauriWindowState.onDragDropEventMock,
+    listen: tauriWindowState.listenMock,
   }),
 }));
 
@@ -96,13 +95,15 @@ function fireInput(
   el.dispatchEvent(event);
 }
 
+type DropPayload = { paths: string[]; position: { x: number; y: number } };
+
 function fireNativeDrop(x: number, y: number, paths = ["/tmp/photo.png"]) {
   // Tauri broadcasts the same window event to every mounted pane.
-  for (const [handler] of tauriWindowState.onDragDropEventMock.mock.calls) {
-    (handler as EventCallback<DragDropEvent>)({
+  for (const [, handler] of tauriWindowState.listenMock.mock.calls) {
+    (handler as EventCallback<DropPayload>)({
       event: "tauri://drag-drop",
       id: 1,
-      payload: { type: "drop", position: new PhysicalPosition(x, y), paths },
+      payload: { position: new PhysicalPosition(x, y), paths },
     });
   }
 }
@@ -113,7 +114,7 @@ describe("IMEOverlay file drops", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    tauriWindowState.onDragDropEventMock.mockResolvedValue(vi.fn());
+    tauriWindowState.listenMock.mockResolvedValue(vi.fn());
     vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
     );
@@ -270,7 +271,7 @@ describe("IMEOverlay", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    tauriWindowState.onDragDropEventMock.mockResolvedValue(vi.fn());
+    tauriWindowState.listenMock.mockResolvedValue(vi.fn());
     env = createTestEnv();
   });
 
