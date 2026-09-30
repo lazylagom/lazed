@@ -1,9 +1,9 @@
 //! Connected accounts for automations. Non-secret fields live in
-//! `<app_config_dir>/integrations.json`; secrets live in the macOS
-//! Keychain under the app identifier. Stored values are injected into
-//! spawned shells as env vars — only for keys the environment doesn't
-//! already define, so ambient env always wins (dev-tool convention, same
-//! as ORCA_*_TOKEN taking precedence in Orca).
+//! `<app_config_dir>/integrations.json`; secrets live in
+//! `<app_config_dir>/tokens.json` (mode 0600). Stored values are injected
+//! into spawned shells as env vars — only for keys the environment
+//! doesn't already define, so ambient env always wins (dev-tool
+//! convention, same as ORCA_*_TOKEN taking precedence in Orca).
 //!
 //! Each provider holds an ordered list of sites (Orca-style: one provider
 //! card, N connected accounts). The first fully-configured site feeds the
@@ -21,7 +21,6 @@ use serde_json::{json, Map, Value};
 
 use crate::env;
 
-const KEYCHAIN_SERVICE: &str = "com.lazed.app";
 const PROBE_TIMEOUT_SECS: u64 = 15;
 
 /// Provider registry — `fields` are the required non-secret keys for a
@@ -53,7 +52,7 @@ fn provider(id: &str) -> Option<&'static Provider> {
 
 /// One connected account under a provider — `fields` holds non-secret
 /// config (`kind`, `label`, `base`, `email`, `username`, …); its token
-/// lives in the Keychain under `integration.{provider}.{site}.token`.
+/// lives in tokens.json under `{provider}/{site}`.
 #[derive(Serialize, Deserialize, Clone)]
 struct Site {
     id: String,
@@ -76,13 +75,21 @@ struct Store {
 
 static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
 static STORE_PATH: OnceLock<PathBuf> = OnceLock::new();
-/// Tokens read from the Keychain, cached so spawned shells don't
-/// re-prompt on every poll. Keyed by "{provider}/{site}".
+/// All stored tokens, loaded from tokens.json on first use — spawned
+/// shells never re-read the file per poll. Keyed by "{provider}/{site}".
 static TOKENS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static TOKENS_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 fn tokens() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
     TOKENS
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| {
+            let map = TOKENS_PATH
+                .get()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            Mutex::new(map)
+        })
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
@@ -91,35 +98,52 @@ fn cache_key(provider: &str, site: &str) -> String {
     format!("{provider}/{site}")
 }
 
-fn token_account(provider: &str, site: &str) -> String {
-    format!("integration.{provider}.{site}.token")
-}
-
-fn keychain_get(provider: &str, site: &str) -> Option<String> {
-    let key = cache_key(provider, site);
-    if let Some(t) = tokens().get(&key) {
-        return Some(t.clone());
+/// tokens.json — owner-only (0600), tmp+rename like save_store.
+fn save_tokens(map: &HashMap<String, String>) -> Result<(), String> {
+    let path = TOKENS_PATH.get().ok_or("tokens store not initialized")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &token_account(provider, site)).ok()?;
-    let token = entry.get_password().ok().filter(|t| !t.is_empty())?;
-    tokens().insert(key, token.clone());
-    Some(token)
-}
-
-fn keychain_set(provider: &str, site: &str, token: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, &token_account(provider, site))
-        .map_err(|e| e.to_string())?;
-    entry.set_password(token).map_err(|e| e.to_string())?;
-    tokens().insert(cache_key(provider, site), token.to_string());
-    Ok(())
-}
-
-fn keychain_delete(provider: &str, site: &str) {
-    tokens().remove(&cache_key(provider, site));
-    if let Ok(entry) =
-        keyring::Entry::new(KEYCHAIN_SERVICE, &token_account(provider, site))
+    let body = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
     {
-        let _ = entry.delete_credential();
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    // mode() only applies at creation — a leftover tmp with laxer perms
+    // would leak through the rename, so fix it unconditionally.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+fn token_get(provider: &str, site: &str) -> Option<String> {
+    tokens()
+        .get(&cache_key(provider, site))
+        .cloned()
+        .filter(|t| !t.is_empty())
+}
+
+fn token_set(provider: &str, site: &str, token: &str) -> Result<(), String> {
+    let mut m = tokens();
+    m.insert(cache_key(provider, site), token.to_string());
+    save_tokens(&m)
+}
+
+fn token_delete(provider: &str, site: &str) {
+    let mut m = tokens();
+    if m.remove(&cache_key(provider, site)).is_some() {
+        let _ = save_tokens(&m);
     }
 }
 
@@ -140,11 +164,13 @@ fn save_store(store: &Store) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-/// Called once from setup() — resolves the store path, loads it, and
-/// migrates the legacy shape (`provider -> flat fields` + one Keychain
-/// token) into a single `default` site per provider.
+/// Called once from setup() — resolves the store paths, loads them, and
+/// migrates the legacy shape (`provider -> flat fields`) into a single
+/// `default` site per provider. Tokens previously in the macOS Keychain
+/// are not migrated — sites need their token re-entered once.
 pub fn init(dir: PathBuf) {
     let _ = STORE_PATH.set(dir.join("integrations.json"));
+    let _ = TOKENS_PATH.set(dir.join("tokens.json"));
     let path = STORE_PATH.get().cloned().unwrap_or_default();
     let raw: Option<Value> = std::fs::read_to_string(&path)
         .ok()
@@ -184,17 +210,6 @@ pub fn init(dir: PathBuf) {
     }
     let dirty = !migrated.is_empty();
     let _ = STORE.set(Mutex::new(store));
-    for pid in migrated {
-        let legacy = format!("integration.{pid}.token");
-        if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, &legacy) {
-            if let Ok(t) = entry.get_password() {
-                if !t.is_empty() {
-                    let _ = keychain_set(&pid, "default", &t);
-                }
-            }
-            let _ = entry.delete_credential();
-        }
-    }
     if dirty {
         let _ = with_store(|s| save_store(s));
     }
@@ -220,7 +235,7 @@ fn site_configured(p: &Provider, site: &Site) -> bool {
             .get(*f)
             .and_then(Value::as_str)
             .is_some_and(|v| !v.is_empty())
-    }) && keychain_get(p.id, &site.id).is_some()
+    }) && token_get(p.id, &site.id).is_some()
 }
 
 /// Values injected into spawned shells for every configured provider —
@@ -241,7 +256,7 @@ pub fn env_overrides() -> Vec<(String, String)> {
         };
         for (field, var) in p.env_map {
             let value = if *field == "token" {
-                keychain_get(p.id, &site.id)
+                token_get(p.id, &site.id)
             } else {
                 site.fields
                     .get(*field)
@@ -267,7 +282,7 @@ fn site_public(p: &Provider, site: &Site) -> Value {
         "id": site.id,
         "label": site.fields.get("label").and_then(Value::as_str),
         "configured": site_configured(p, site),
-        "token_set": keychain_get(p.id, &site.id).is_some(),
+        "token_set": token_get(p.id, &site.id).is_some(),
         "fields": obj,
     })
 }
@@ -306,7 +321,7 @@ fn new_site_id() -> String {
 
 /// Upsert one site under a provider. `site` absent creates a new entry;
 /// `token` absent/null keeps the stored secret, "" clears it, a value
-/// replaces it (Keychain, never the json file).
+/// replaces it (tokens.json, never integrations.json).
 pub fn save(input: &Value) -> Result<Value, String> {
     let pid = input
         .get("provider")
@@ -352,8 +367,8 @@ pub fn save(input: &Value) -> Result<Value, String> {
             }
         }
         match input.get("token").and_then(Value::as_str) {
-            Some("") => keychain_delete(p.id, &site.id),
-            Some(t) => keychain_set(p.id, &site.id, t)?,
+            Some("") => token_delete(p.id, &site.id),
+            Some(t) => token_set(p.id, &site.id, t)?,
             None => {}
         }
         let out = provider_public(p, s.integrations.get(p.id));
@@ -366,7 +381,7 @@ pub fn save(input: &Value) -> Result<Value, String> {
 pub fn delete(provider_id: &str, site_id: &str) -> Result<(), String> {
     let p =
         provider(provider_id).ok_or_else(|| format!("unknown provider {provider_id}"))?;
-    keychain_delete(p.id, site_id);
+    token_delete(p.id, site_id);
     with_store(|s| {
         if let Some(ps) = s.integrations.get_mut(p.id) {
             ps.sites.retain(|x| x.id != site_id);
@@ -395,7 +410,7 @@ pub fn test(provider_id: &str, site_id: &str) -> Result<Value, String> {
         }
         (
             site.fields.clone(),
-            keychain_get(p.id, &site.id).unwrap_or_default(),
+            token_get(p.id, &site.id).unwrap_or_default(),
         )
     };
     match p.id {

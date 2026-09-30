@@ -2,8 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 /** Connected accounts — provider metadata is UI-side; the backend stores
  * sites (non-secret fields) in integrations.json and each site's `token`
- * in the Keychain. Values reach spawned shells as env vars, only where
- * the ambient env doesn't already define them. */
+ * in tokens.json (mode 0600) in the app config dir. Values reach spawned
+ * shells as env vars, only where the ambient env doesn't already define
+ * them. */
 export interface IntegrationFieldSpec {
   key: string;
   label: string;
@@ -52,18 +53,18 @@ export const INTEGRATION_PROVIDERS: IntegrationProviderSpec[] = [
     sub: "Browse, create, and start work from Jira Cloud issues.",
     docs_url: "https://id.atlassian.com/manage-profile/security/api-tokens",
     blurb:
-      "Connect a Jira Cloud site with an API token, or a self-hosted Jira with a personal access token or username and password. Credentials are stored locally — tokens live in the macOS Keychain.",
+      "Connect a Jira Cloud site with an API token, or a self-hosted Jira with a personal access token or username and password. Credentials are stored locally — tokens live in a file only your user can read.",
     scope_note:
       "Credentials and account checks for this provider are owned by this desktop client.",
     sites_note:
-      "Each connected Jira site has one token stored in the macOS Keychain.",
+      "Each connected Jira site has one token stored in a local file (0600) on this Mac.",
     connect_label: "Connect Jira",
     add_label: "Add Jira site",
     modal_title: "Connect Jira site",
     modal_sub:
       "Use a Jira Cloud site URL, Atlassian email, and API token to browse issues.",
     lock_note:
-      "Your token is stored in the macOS Keychain and never written to disk.",
+      "Your token stays on this Mac — a 0600-permission file in the app's config directory.",
     tabs: [
       {
         id: "cloud",
