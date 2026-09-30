@@ -483,10 +483,14 @@ body,
   background: var(--fill-hover);
 }
 
-.side-ws-head.focused,
+.side-tree-group.focused,
 .side-tab-head.active,
 .side-pane.focused {
   background: var(--fill-active);
+}
+
+.side-tree-group.focused {
+  border-radius: 6px;
 }
 
 /* the tree guide itself marks focus — the elbow into the focused row

@@ -174,7 +174,7 @@ function WorkspaceRow({
     if (ok) onRemoveWorkspace(ws, agents.length > 0);
   };
   return (
-    <div className="side-tree-group">
+    <div className={`side-tree-group ${focusedWs ? "focused" : ""}`}>
       <div className={`side-ws-head ${focusedWs ? "focused" : ""}`}>
         <button
           type="button"
