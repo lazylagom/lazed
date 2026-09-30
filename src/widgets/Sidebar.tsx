@@ -102,6 +102,7 @@ function PaneRow({
 }) {
   const name =
     t.label ?? t.agent_name ?? t.agent ?? basename(t.cwd) ?? t.pane_id;
+  const agent = t.agent ?? t.display_agent;
   const close = async () => {
     const ok = await confirmClose(
       "Close Pane",
@@ -118,7 +119,13 @@ function PaneRow({
         title={t.cwd ?? undefined}
       >
         <span className={`dot ${t.agent_status ?? "unknown"}`} />
-        <AgentIcon agent={t.agent ?? t.display_agent} />
+        {agent ? (
+          <span className={`side-agent-icon ${statusClass(t.agent_status)}`}>
+            <AgentIcon agent={agent} />
+          </span>
+        ) : (
+          <AgentIcon />
+        )}
         <span className={`side-ws-name ${statusClass(t.agent_status)}`}>
           {name}
         </span>
