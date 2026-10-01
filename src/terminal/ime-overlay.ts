@@ -314,7 +314,7 @@ export class IMEOverlay {
       e.preventDefault();
       const text = e.clipboardData?.getData("text");
       this.flushPendingHangulJamo();
-      if (text) this.writeToPty(text);
+      if (text) this.writeToPty(formatPasteForTerminal(text));
       this.input.value = "";
     });
   }
@@ -768,6 +768,19 @@ function parseFileUri(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Paste as one bracketed block with CR line endings, like xterm's own
+ * paste. Always bracketed: herdr's frames never replay DECSET 2004, so
+ * xterm can't tell whether the app asked for it — and an agent prompt fed
+ * unbracketed lines treats them as typed keys and drops the head of a long
+ * paste. A stray end marker in the clipboard is stripped so it can't close
+ * the block early.
+ */
+export function formatPasteForTerminal(text: string): string {
+  const body = text.replaceAll("\x1b[201~", "").replace(/\r?\n/g, "\r");
+  return `\x1b[200~${body}\x1b[201~`;
 }
 
 function formatDroppedPathsForTerminal(paths: string[]): string {

@@ -108,6 +108,44 @@ function fireNativeDrop(x: number, y: number, paths = ["/tmp/photo.png"]) {
   }
 }
 
+describe("IMEOverlay paste", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tauriWindowState.listenMock.mockResolvedValue(vi.fn());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  function firePaste(el: HTMLElement, text: string) {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: { getData: () => text },
+    });
+    el.dispatchEvent(event);
+    return event;
+  }
+
+  it("writes the clipboard as one bracketed block with CR line endings", () => {
+    const { input, writeToPty } = createTestEnv();
+    const event = firePaste(input, '{\n  "a": 1,\r\n  "b": 2\n}\n');
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(writeToPty).toHaveBeenCalledTimes(1);
+    expect(writeToPty).toHaveBeenCalledWith(
+      '\x1b[200~{\r  "a": 1,\r  "b": 2\r}\r\x1b[201~',
+    );
+  });
+
+  it("strips an embedded end marker so the block can't close early", () => {
+    const { input, writeToPty } = createTestEnv();
+    firePaste(input, "a\x1b[201~rm -rf ~\n");
+
+    expect(writeToPty).toHaveBeenCalledWith("\x1b[200~arm -rf ~\r\x1b[201~");
+  });
+});
+
 describe("IMEOverlay file drops", () => {
   let first: ReturnType<typeof createTestEnv>;
   let second: ReturnType<typeof createTestEnv>;
