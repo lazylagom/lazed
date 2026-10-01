@@ -17,7 +17,7 @@ export function Modal({
   onClose: () => void;
   onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
   className?: string;
-  initialFocusRef?: RefObject<HTMLInputElement | null>;
+  initialFocusRef?: RefObject<HTMLElement | null>;
 }) {
   useEffect(() => {
     initialFocusRef?.current?.focus();

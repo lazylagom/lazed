@@ -377,6 +377,14 @@ async fn worktree_merge(repo: String, branch: String) -> Result<Value, String> {
     }).await.map_err(|e| e.to_string())?
 }
 
+/// Local branches of a repo — the new-worktree sheet's branch picker.
+#[tauri::command]
+async fn repo_branches(repo: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || git::repo_branches(&repo))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Delete a branch in `repo` — the second half of worktree removal, which
 /// herdr's `worktree.remove` deliberately leaves behind.
 #[tauri::command]
@@ -917,6 +925,7 @@ pub fn run() {
             tab_close,
             worktree_diff,
             worktree_merge,
+            repo_branches,
             branch_delete,
             fs_tree,
             fs_watch,

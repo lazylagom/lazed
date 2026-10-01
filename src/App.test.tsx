@@ -370,7 +370,7 @@ it("⌘N creates a worktree for the selected project", async () => {
     ),
   );
 
-  const branch = host.querySelector<HTMLInputElement>(".newwt-input");
+  const branch = host.querySelector<HTMLInputElement>(".newwt-name");
   expect(branch).toBeTruthy();
   const setter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,

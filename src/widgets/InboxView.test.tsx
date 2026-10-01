@@ -16,6 +16,118 @@ afterEach(() => {
   host.textContent = "";
   vi.clearAllMocks();
 });
+it("groups open items into collapsible provider sections", async () => {
+  root = createRoot(host);
+  await act(async () =>
+    root.render(
+      <InboxView
+        items={[
+          {
+            id: "i1",
+            title: "assigned issue",
+            source: "Jira — issues assigned to me (REST)",
+            at: 3,
+            status: "open",
+          },
+          {
+            id: "i2",
+            title: "mention",
+            source: "Jira mention @me",
+            provider: "jira",
+            at: 2,
+            status: "open",
+          },
+          {
+            id: "i3",
+            title: "channel msg",
+            source: "Slack — channel messages (REST)",
+            at: 1,
+            status: "open",
+          },
+          {
+            id: "i4",
+            title: "quick capture",
+            source: "manual",
+            at: 0,
+            status: "open",
+          },
+        ]}
+        projects={[]}
+        onChanged={() => {}}
+        onFlash={() => {}}
+        onError={() => {}}
+      />,
+    ),
+  );
+  const heads = [...host.querySelectorAll(".ibx-group-head")];
+  expect(heads.map((h) => h.textContent)).toEqual([
+    "▾Jira2",
+    "▾Slack1",
+    "▾Captured1",
+  ]);
+  expect(host.querySelectorAll(".ibx-row").length).toBe(4);
+  // collapsing a section hides its rows
+  await act(async () => (heads[0] as HTMLButtonElement).click());
+  expect(host.querySelectorAll(".ibx-row").length).toBe(2);
+});
+
+it("clusters jira rows under a shared issue head", async () => {
+  backend.invoke.mockResolvedValue({});
+  root = createRoot(host);
+  await act(async () =>
+    root.render(
+      <InboxView
+        items={[
+          {
+            id: "i1",
+            title: "CS-1 assigned",
+            source: "Jira — issues assigned to me (REST)",
+            key: "CS-1",
+            at: 3,
+            status: "open",
+          },
+          {
+            id: "i2",
+            title: "CS-1#9 summary · someone: ping",
+            source: "Jira mention @me",
+            provider: "jira",
+            key: "CS-1#9",
+            at: 2,
+            status: "open",
+          },
+          {
+            id: "i3",
+            title: "CS-2 assigned",
+            source: "Jira — issues assigned to me (REST)",
+            key: "CS-2",
+            at: 1,
+            status: "open",
+          },
+        ]}
+        projects={[]}
+        onChanged={() => {}}
+        onFlash={() => {}}
+        onError={() => {}}
+      />,
+    ),
+  );
+  const keys = [...host.querySelectorAll(".ibx-issue-key")].map(
+    (el) => el.textContent,
+  );
+  expect(keys).toEqual(["CS-1", "CS-2"]);
+  expect(host.querySelectorAll(".ibx-row").length).toBe(3);
+  // the issue head's check marks every row in the cluster done
+  await act(async () =>
+    (
+      host.querySelector('[title="mark all done"]') as HTMLButtonElement
+    ).click(),
+  );
+  const updates = backend.invoke.mock.calls.filter(
+    ([cmd]) => cmd === "inbox_update",
+  );
+  expect(updates.length).toBe(2);
+});
+
 it.each([null, { accepted: false }, { accepted: true }])(
   "archives delegated capture only with an accepted receipt: %s",
   async (receipt) => {

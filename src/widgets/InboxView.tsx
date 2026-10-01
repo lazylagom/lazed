@@ -1,13 +1,34 @@
 import {
   ArrowUpRight01Icon,
+  Calendar01Icon,
+  CheckListIcon,
   CheckmarkCircle02Icon,
   Clock01Icon,
+  DiscordIcon,
+  FigmaIcon,
+  GithubIcon,
+  GitlabIcon,
+  GoogleIcon,
   InboxIcon,
+  Mail01Icon,
+  NotionIcon,
+  QuillWrite01Icon,
   SentIcon,
+  SlackIcon,
+  Task01Icon,
+  TrelloIcon,
+  WorkflowIcon,
+  ZoomIcon,
 } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
-import { type InboxItem, inbox, openUrl } from "../shared/inbox";
+import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type InboxItem,
+  inbox,
+  jiraIssueOf,
+  openUrl,
+  providerOf,
+} from "../shared/inbox";
 import {
   AGENT_KINDS,
   type PaneInfo,
@@ -43,6 +64,61 @@ type Menu =
   | { kind: "snooze"; item: InboxItem; x: number; y: number }
   | { kind: "delegate"; item: InboxItem; x: number; y: number };
 
+/** Per-provider icon + label for section headers — Akiflow-style. Unknown
+ * slugs (custom automation sources) fall back to the workflow glyph and the
+ * source name itself. */
+const PROVIDER_META: Record<string, { label: string; icon: IconSvgElement }> = {
+  manual: { label: "Captured", icon: QuillWrite01Icon },
+  jira: { label: "Jira", icon: Task01Icon },
+  slack: { label: "Slack", icon: SlackIcon },
+  gmail: { label: "Gmail", icon: Mail01Icon },
+  mail: { label: "Mail", icon: Mail01Icon },
+  github: { label: "GitHub", icon: GithubIcon },
+  gitlab: { label: "GitLab", icon: GitlabIcon },
+  notion: { label: "Notion", icon: NotionIcon },
+  trello: { label: "Trello", icon: TrelloIcon },
+  figma: { label: "Figma", icon: FigmaIcon },
+  discord: { label: "Discord", icon: DiscordIcon },
+  google: { label: "Google", icon: GoogleIcon },
+  calendar: { label: "Calendar", icon: Calendar01Icon },
+  zoom: { label: "Zoom", icon: ZoomIcon },
+  linear: { label: "Linear", icon: WorkflowIcon },
+  asana: { label: "Asana", icon: CheckListIcon },
+  todoist: { label: "Todoist", icon: CheckListIcon },
+};
+
+function providerMeta(key: string) {
+  return (
+    PROVIDER_META[key] ?? {
+      label: key,
+      icon: WorkflowIcon,
+    }
+  );
+}
+
+/** Cluster a jira group's rows by issue — assignments ("CS-1") and each
+ * mention ("CS-1#commentId") collapse under one head per issue. Rows with
+ * no detectable key stay as standalone rows, in place. */
+function issueClusters(items: InboxItem[]) {
+  const out: { issue: string | null; items: InboxItem[] }[] = [];
+  const byIssue = new Map<string, { issue: string; items: InboxItem[] }>();
+  for (const item of items) {
+    const issue = jiraIssueOf(item);
+    if (!issue) {
+      out.push({ issue: null, items: [item] });
+      continue;
+    }
+    let c = byIssue.get(issue);
+    if (!c) {
+      c = { issue, items: [] };
+      byIssue.set(issue, c);
+      out.push(c);
+    }
+    c.items.push(item);
+  }
+  return out;
+}
+
 const SNOOZES: { label: string; at: () => number }[] = [
   {
     label: "in 1 hour",
@@ -63,9 +139,11 @@ const SNOOZES: { label: string; at: () => number }[] = [
   },
 ];
 
-/** The GTD inbox — every captured item lands here for triage. Sources:
+/** The GTD inbox — every captured item lands here for triage, grouped into
+ * collapsible provider sections (Jira, Slack, Gmail… Akiflow-style). Sources:
  * quick-add below, `lazed inbox add`, and automations with an inbox action
- * (Jira, Slack, anything that prints one item per line). */
+ * (a preset supplies the provider; a custom poller can emit a JSON
+ * `provider` field, and its name groups anything else). */
 export function InboxView({
   items,
   error,
@@ -89,6 +167,7 @@ export function InboxView({
   const [draft, setDraft] = useState("");
   const [menu, setMenu] = useState<Menu | null>(null);
   const [showSnoozed, setShowSnoozed] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [delegateProject, setDelegateProject] = useState("");
   const [delegateKind, setDelegateKind] = useState("claude");
   const [busy, setBusy] = useState(false);
@@ -96,6 +175,33 @@ export function InboxView({
 
   const open = items.filter((i) => i.status === "open");
   const snoozed = items.filter((i) => i.status === "snoozed");
+
+  // provider sections, ordered by each group's newest item (items arrive
+  // newest-first from the daemon — first occurrence wins). Done items stay
+  // in place, marked; snoozed items live in the collapsed section below.
+  const groups = useMemo(() => {
+    const byKey = new Map<string, InboxItem[]>();
+    for (const item of items) {
+      if (item.status === "snoozed") continue;
+      const key = providerOf(item);
+      const bucket = byKey.get(key);
+      if (bucket) bucket.push(item);
+      else byKey.set(key, [item]);
+    }
+    return [...byKey.entries()].map(([key, items]) => ({
+      key,
+      items,
+      ...providerMeta(key),
+    }));
+  }, [items]);
+
+  const toggleGroup = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   useEffect(() => {
     if (!menu) return;
@@ -188,70 +294,84 @@ export function InboxView({
     }
   };
 
-  const row = (item: InboxItem) => (
-    <div key={item.id} className="ibx-row">
-      <div className="ibx-main">
-        <div className="ibx-title" title={item.body ?? item.title}>
-          {item.title}
-        </div>
-        <div className="ibx-meta">
-          <span className="ibx-source">{item.source}</span>
-          <span>{relTime(item.at)}</span>
-          {item.status === "snoozed" && (
-            <span className="ibx-until">
-              ⏰ {snoozeLabel(item.snooze_until)}
-            </span>
+  const row = (item: InboxItem) => {
+    // the source chip only survives when it adds info beyond the section
+    // header — "manual" in Captured, or the automation name that IS the group
+    const group = providerOf(item);
+    const showSource = item.source !== "manual" && item.source.trim() !== group;
+    const isDone = item.status === "done";
+    return (
+      <div key={item.id} className={`ibx-row${isDone ? " done" : ""}`}>
+        <div className="ibx-actions ibx-actions-lead">
+          {item.url && (
+            <button
+              type="button"
+              className="ibx-btn"
+              title={`open ${item.url}`}
+              onClick={() =>
+                openUrl(item.url ?? "").catch((e) => onError(String(e)))
+              }
+            >
+              <HugeiconsIcon
+                icon={ArrowUpRight01Icon}
+                size={15}
+                strokeWidth={1.7}
+              />
+            </button>
           )}
-        </div>
-      </div>
-      <div className="ibx-actions">
-        {item.url && (
           <button
             type="button"
             className="ibx-btn"
-            title={`open ${item.url}`}
+            title="snooze"
+            onClick={(e) => openMenu(e, item, "snooze")}
+          >
+            <HugeiconsIcon icon={Clock01Icon} size={15} strokeWidth={1.7} />
+          </button>
+          <button
+            type="button"
+            className="ibx-btn"
+            title="delegate to agent / pane"
+            onClick={(e) => openMenu(e, item, "delegate")}
+          >
+            <HugeiconsIcon icon={SentIcon} size={15} strokeWidth={1.7} />
+          </button>
+          <button
+            type="button"
+            className={`ibx-btn ibx-done${isDone ? " on" : ""}`}
+            title={isDone ? "reopen" : "mark done"}
             onClick={() =>
-              openUrl(item.url ?? "").catch((e) => onError(String(e)))
+              run(
+                inbox.update(item.id, {
+                  status: isDone ? "open" : "done",
+                }),
+              )
             }
           >
             <HugeiconsIcon
-              icon={ArrowUpRight01Icon}
-              size={12}
-              strokeWidth={1.5}
+              icon={CheckmarkCircle02Icon}
+              size={15}
+              strokeWidth={1.7}
             />
           </button>
-        )}
-        <button
-          type="button"
-          className="ibx-btn"
-          title="snooze"
-          onClick={(e) => openMenu(e, item, "snooze")}
-        >
-          <HugeiconsIcon icon={Clock01Icon} size={12} strokeWidth={1.5} />
-        </button>
-        <button
-          type="button"
-          className="ibx-btn"
-          title="delegate to agent / pane"
-          onClick={(e) => openMenu(e, item, "delegate")}
-        >
-          <HugeiconsIcon icon={SentIcon} size={12} strokeWidth={1.5} />
-        </button>
-        <button
-          type="button"
-          className="ibx-btn ibx-done"
-          title="mark done"
-          onClick={() => run(inbox.update(item.id, { status: "done" }))}
-        >
-          <HugeiconsIcon
-            icon={CheckmarkCircle02Icon}
-            size={12}
-            strokeWidth={1.5}
-          />
-        </button>
+        </div>
+        <div className="ibx-main">
+          <div className="ibx-title" title={item.body ?? item.title}>
+            {item.title}
+          </div>
+          <div className="ibx-meta">
+            {showSource && <span className="ibx-source">{item.source}</span>}
+            <span>{relTime(item.at)}</span>
+            {item.status === "snoozed" && (
+              <span className="ibx-until">
+                ⏰ {snoozeLabel(item.snooze_until)}
+              </span>
+            )}
+            {isDone && <span className="ibx-done-tag">done</span>}
+          </div>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="ibx-screen">
@@ -302,7 +422,90 @@ export function InboxView({
               </div>
             )
           )}
-          {open.map(row)}
+          {groups.map((g) => (
+            <div key={g.key} className="ibx-group">
+              <button
+                type="button"
+                className="ibx-group-head"
+                title={collapsed.has(g.key) ? "expand" : "collapse"}
+                onClick={() => toggleGroup(g.key)}
+              >
+                <span className="ibx-group-caret">
+                  {collapsed.has(g.key) ? "▸" : "▾"}
+                </span>
+                <HugeiconsIcon icon={g.icon} size={13} strokeWidth={1.7} />
+                <span className="ibx-group-label">{g.label}</span>
+                <span className="ibx-group-count">{g.items.length}</span>
+              </button>
+              {!collapsed.has(g.key) &&
+                (g.key === "jira"
+                  ? issueClusters(g.items).map((c) => {
+                      if (!c.issue)
+                        return (
+                          <Fragment key={c.items[0].id}>
+                            {c.items.map(row)}
+                          </Fragment>
+                        );
+                      const allDone = c.items.every((i) => i.status === "done");
+                      const url = c.items
+                        .find((i) => i.url)
+                        ?.url?.split("?")[0];
+                      return (
+                        <div
+                          key={c.issue}
+                          className={`ibx-issue${allDone ? " all-done" : ""}`}
+                        >
+                          <div className="ibx-issue-head">
+                            <span className="ibx-issue-key">{c.issue}</span>
+                            <span className="ibx-issue-count">
+                              {c.items.length}
+                            </span>
+                            {url && (
+                              <button
+                                type="button"
+                                className="ibx-btn"
+                                title={`open ${url}`}
+                                onClick={() =>
+                                  openUrl(url).catch((e) => onError(String(e)))
+                                }
+                              >
+                                <HugeiconsIcon
+                                  icon={ArrowUpRight01Icon}
+                                  size={12}
+                                  strokeWidth={1.7}
+                                />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className={`ibx-btn ibx-done${allDone ? " on" : ""}`}
+                              title={allDone ? "reopen all" : "mark all done"}
+                              onClick={() =>
+                                run(
+                                  Promise.all(
+                                    c.items.map((i) =>
+                                      inbox.update(i.id, {
+                                        status: allDone ? "open" : "done",
+                                      }),
+                                    ),
+                                  ),
+                                )
+                              }
+                            >
+                              <HugeiconsIcon
+                                icon={CheckmarkCircle02Icon}
+                                size={13}
+                                strokeWidth={1.7}
+                              />
+                            </button>
+                          </div>
+                          {c.items.map(row)}
+                        </div>
+                      );
+                    })
+                  : g.items.map(row))}
+            </div>
+          ))}
           {snoozed.length > 0 && (
             <button
               type="button"

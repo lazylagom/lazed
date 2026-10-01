@@ -37,6 +37,10 @@ pub struct AutomationItem {
     /// the first http(s) token in plain lines
     #[serde(default)]
     pub url: Option<String>,
+    /// provider slug ("jira", "slack", "gmail"…) — picked from `provider` in
+    /// JSON lines; the inbox action groups by it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// epoch seconds when the item was first seen
     pub at: u64,
     /// an action run completed for this item (auto or manual)
@@ -78,8 +82,9 @@ pub struct Automation {
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
     /// Poller: a shell command whose stdout yields one item per line.
-    /// JSON lines are understood ({id|key|name, title|summary|text}); plain
-    /// lines use the first whitespace token as the item id.
+    /// JSON lines are understood ({id|key|name, title|summary|text,
+    /// url|link|permalink, provider}); plain lines use the first whitespace
+    /// token as the item id.
     #[serde(default)]
     pub command: String,
     #[serde(default)]
@@ -218,10 +223,14 @@ fn parse_item(line: &str) -> AutomationItem {
         let url = pick(&["url", "link", "permalink"])
             .filter(|u| !u.is_empty())
             .or_else(|| find_url(line));
+        let provider = pick(&["provider"])
+            .map(|p| p.trim().to_lowercase())
+            .filter(|p| !p.is_empty());
         return AutomationItem {
             id,
             text,
             url,
+            provider,
             at: now_secs(),
             fired: false,
         };
@@ -235,6 +244,7 @@ fn parse_item(line: &str) -> AutomationItem {
         id,
         text: line.to_string(),
         url: find_url(line),
+        provider: None,
         at: now_secs(),
         fired: false,
     }
@@ -329,6 +339,19 @@ fn run_agent_action(
     Ok(())
 }
 
+/// Provider slug for a catalog preset — its first '-' segment ("jira-rest" →
+/// "jira"), with aliases for ids that don't name their provider
+/// ("gh-review" → "github"). Items without one group under the automation
+/// name in the inbox.
+fn preset_provider(preset: &str) -> Option<String> {
+    let head = preset.split('-').next()?.trim().to_lowercase();
+    match head.as_str() {
+        "" | "custom" => None,
+        "gh" => Some("github".into()),
+        h => Some(h.to_string()),
+    }
+}
+
 fn run_action(auto: &Automation, item: &AutomationItem) -> Result<(), String> {
     match &auto.action {
         Action::Collect => Ok(()),
@@ -355,6 +378,9 @@ fn run_action(auto: &Automation, item: &AutomationItem) -> Result<(), String> {
                 "title": item.text,
                 "key": item.id,
                 "source": auto.name,
+                "provider": item.provider.clone().or_else(|| {
+                    auto.preset.as_deref().and_then(preset_provider)
+                }),
                 "url": item.url,
             }),
         )
@@ -706,11 +732,31 @@ mod tests {
     }
 
     #[test]
+    fn json_lines_pick_provider() {
+        let items = parse_items(
+            "{\"id\":\"m1\",\"title\":\"hello\",\"provider\":\" Gmail \"}\nplain line\n",
+        );
+        assert_eq!(items[0].provider.as_deref(), Some("gmail"));
+        assert_eq!(items[1].provider, None);
+    }
+
+    #[test]
+    fn preset_provider_uses_first_segment_with_aliases() {
+        assert_eq!(preset_provider("jira-rest").as_deref(), Some("jira"));
+        assert_eq!(preset_provider("jira-mention").as_deref(), Some("jira"));
+        assert_eq!(preset_provider("slack-channel").as_deref(), Some("slack"));
+        assert_eq!(preset_provider("gh-review").as_deref(), Some("github"));
+        assert_eq!(preset_provider("custom"), None);
+        assert_eq!(preset_provider(""), None);
+    }
+
+    #[test]
     fn render_quotes_only_for_shell() {
         let item = AutomationItem {
             id: "A-1".into(),
             text: "it's here".into(),
             url: None,
+            provider: None,
             at: 0,
             fired: false,
         };

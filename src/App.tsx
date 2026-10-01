@@ -7,7 +7,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ask } from "@tauri-apps/plugin-dialog";
 import {
   isPermissionGranted,
   requestPermission,
@@ -20,6 +19,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { ConfirmHost, confirmDialog } from "./components/ConfirmDialog";
 import { deferred } from "./components/Deferred";
 import { TermGrid } from "./components/TermGrid";
 import { AgentPicker } from "./features/AgentPicker";
@@ -289,7 +289,7 @@ export function App() {
 
   const loadInbox = useCallback(() => {
     inbox
-      .list()
+      .list(true)
       .then((items) => {
         setInboxErr(null);
         setInboxItems(items);
@@ -846,15 +846,14 @@ export function App() {
           !force &&
           (msg.includes("use --force") || msg.includes("modified or untracked"))
         ) {
-          force = await ask(
-            `"${ws.path}" has modified or untracked files. Force-remove the checkout anyway? Uncommitted work will be lost.`,
-            {
-              title: "Force Remove Workspace",
-              kind: "warning",
-              okLabel: "Force Remove",
-              cancelLabel: "Cancel",
-            },
-          ).catch(() => false);
+          force = await confirmDialog({
+            title: "Force Remove Workspace",
+            message:
+              "This checkout has modified or untracked files. Force-remove it anyway? Uncommitted work will be lost.",
+            detail: ws.path,
+            okLabel: "Force Remove",
+            danger: true,
+          });
           if (force) continue;
         } else {
           setError(msg);
@@ -873,15 +872,14 @@ export function App() {
       .catch((e) => ({ ok: false, output: String(e) }));
     if (gone.ok) return;
     if (!force && gone.output.includes("not fully merged")) {
-      const del = await ask(
-        `Branch "${branch}" isn't fully merged. Delete it anyway?`,
-        {
-          title: "Delete Branch",
-          kind: "warning",
-          okLabel: "Delete Branch",
-          cancelLabel: "Keep Branch",
-        },
-      ).catch(() => false);
+      const del = await confirmDialog({
+        title: "Delete Branch",
+        message: "This branch isn't fully merged. Delete it anyway?",
+        detail: branch,
+        okLabel: "Delete Branch",
+        cancelLabel: "Keep Branch",
+        danger: true,
+      });
       if (!del) return;
       const retry = await lazed
         .branchDelete(repo, branch, true)
@@ -1552,6 +1550,7 @@ export function App() {
           }}
         />
       )}
+      <ConfirmHost />
       {newWtProject && (
         <NewWorktree
           projectName={

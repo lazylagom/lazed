@@ -242,7 +242,7 @@ export function Session({
                           />
                           <span className="sess-ws-name">{wsName}</span>
                           <span className="sess-dim">
-                            {ws.is_main ? "main" : "worktree"} ·{" "}
+                            {ws.is_main ? "root checkout" : "worktree"} ·{" "}
                             {ws.workspace_id}
                           </span>
                         </div>

@@ -50,7 +50,7 @@
   --shadow-lg: 0 12px 40px rgb(0 0 0 / 0.67);
 
   /* layout */
-  --rail-w: 46px; /* left icon rail — full-screen screens start right of it */
+  --rail-w: 52px; /* left icon rail — full-screen screens start right of it */
 }
 
 html {
@@ -246,17 +246,6 @@ body,
 .side-caret {
   flex-shrink: 0;
   color: var(--text-4);
-}
-
-.side-pill {
-  font-size: 10px;
-  font-weight: 500;
-  color: var(--text-3);
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  padding: 0 5px;
-  line-height: 15px;
-  flex-shrink: 0;
 }
 
 .side-close {
@@ -2693,8 +2682,8 @@ body,
 
 .rail-btn {
   position: relative;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3703,6 +3692,50 @@ body,
   font-size: 10.5px;
 }
 
+/* provider group sections — collapsible headers with the integration icon */
+.ibx-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 9px 12px 5px;
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ibx-group-head:hover {
+  color: var(--text-hi);
+}
+
+.ibx-group-caret {
+  width: 10px;
+  color: var(--text-4);
+  font-size: 9px;
+}
+
+.ibx-group-head svg {
+  flex-shrink: 0;
+}
+
+.ibx-group-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ibx-group-count {
+  margin-left: auto;
+  color: var(--text-4);
+  font-weight: 500;
+}
+
 .ibx-row {
   display: flex;
   align-items: flex-start;
@@ -3788,6 +3821,78 @@ body,
   color: rgb(var(--green));
 }
 
+/* inbox rows lead with their actions: always visible, larger, brighter.
+ * min-width fits all four buttons so titles line up even when a row has
+ * no url button */
+.ibx-actions.ibx-actions-lead {
+  gap: 2px;
+  min-width: 118px;
+  margin: -2px 8px -2px -6px;
+  opacity: 1;
+}
+
+.ibx-actions-lead .ibx-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--text-3);
+}
+
+.ibx-actions-lead .ibx-btn:hover {
+  background: var(--fill-hover);
+  color: var(--text-hi);
+}
+
+.ibx-actions-lead .ibx-btn.ibx-done:hover {
+  color: rgb(var(--green));
+}
+
+/* a done row stays in place — struck-through title, lit check, done tag */
+.ibx-row.done .ibx-title {
+  text-decoration: line-through;
+  color: var(--text-4);
+}
+
+.ibx-row.done .ibx-btn.ibx-done {
+  color: rgb(var(--green));
+}
+
+.ibx-done-tag {
+  color: rgb(var(--green) / 0.8);
+}
+
+/* jira issue sub-groups — every row about one issue sits under a shared
+ * head carrying issue-level open/done actions */
+.ibx-issue-head {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 6px 3px 12px;
+  border-bottom: 1px solid var(--line-faint);
+}
+
+.ibx-issue-key {
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.ibx-issue.all-done .ibx-issue-key {
+  color: var(--text-4);
+}
+
+.ibx-issue-count {
+  margin-left: auto;
+  color: var(--text-4);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.ibx-issue .ibx-row {
+  padding-left: 24px;
+}
+
 .ibx-btn:disabled {
   opacity: 0.4;
   cursor: default;
@@ -3844,6 +3949,16 @@ body,
   color: rgb(var(--green));
 }
 
+/* far-left delete — faint until hovered */
+.td-del {
+  margin-top: 1px;
+  color: var(--text-5);
+}
+
+.td-del:hover {
+  color: rgb(var(--red));
+}
+
 .td-row.done .td-check {
   color: rgb(var(--green) / 0.7);
 }
@@ -3856,28 +3971,6 @@ body,
 .td-edit {
   padding: 2px 6px;
   font-size: 12.5px;
-}
-
-.td-done-bar {
-  display: flex;
-  align-items: center;
-}
-
-.td-done-bar .ibx-snoozed-toggle {
-  flex: 1;
-}
-
-.td-clear {
-  padding: 4px 12px;
-  background: none;
-  border: none;
-  color: var(--text-5);
-  font-size: 10.5px;
-  cursor: pointer;
-}
-
-.td-clear:hover {
-  color: rgb(var(--red));
 }
 
 .proj-menu-item:disabled {
@@ -3896,6 +3989,7 @@ body,
   width: 460px;
   padding: 20px 22px 22px;
   border-radius: 14px;
+  overflow: visible; /* the branch picker escapes the modal edge */
 }
 
 .newwt-repo {
@@ -3930,7 +4024,7 @@ body,
 
 .newwt-label {
   flex-shrink: 0;
-  width: 48px;
+  width: 70px;
   color: var(--text-3);
   font-size: 12px;
 }
@@ -3943,6 +4037,77 @@ body,
   color: var(--text-hi);
   font-size: 13px;
   outline: none;
+}
+
+/* branch combobox — the field anchors a floating pick list */
+.newwt-combo {
+  position: relative;
+}
+
+.newwt-caret {
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  background: none;
+  border: none;
+  color: var(--text-4);
+  cursor: pointer;
+}
+
+.newwt-caret:hover {
+  color: var(--text-2);
+}
+
+.newwt-branch-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  max-height: 210px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-4);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: var(--shadow-lg);
+}
+
+.newwt-branch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.newwt-branch:hover,
+.newwt-branch.hl {
+  background: var(--fill-hover);
+}
+
+.newwt-branch.hl {
+  color: var(--text-hi);
+}
+
+.newwt-branch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.newwt-branch-tag {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-4);
+  font-size: 10.5px;
 }
 
 .newwt-note {
@@ -3962,4 +4127,98 @@ body,
 .newwt-go {
   margin-top: 16px;
   border-radius: 9px;
+}
+
+/* ── confirm dialog (in-app replacement for native ask) ── */
+
+.modal.confirm {
+  width: 520px;
+  padding: 22px 24px 22px;
+  border-radius: 14px;
+}
+
+.confirm-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  background: rgb(var(--amber) / 0.1);
+  color: rgb(var(--amber));
+}
+
+.confirm-ico.danger {
+  background: rgb(var(--red) / 0.1);
+  color: rgb(var(--red));
+}
+
+.confirm-msg {
+  margin-top: 14px;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.confirm-detail {
+  margin-top: 12px;
+  padding: 9px 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--text-3);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.confirm-btn {
+  padding: 8px 16px;
+  background: var(--bg-5);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.confirm-btn:hover {
+  background: var(--bg-6);
+  color: var(--text-hi);
+}
+
+.confirm-btn:focus-visible {
+  outline: 2px solid rgb(var(--accent) / 0.5);
+  outline-offset: 2px;
+}
+
+.confirm-btn.primary {
+  background: var(--text);
+  border-color: transparent;
+  color: var(--bg-4);
+  font-weight: 600;
+}
+
+.confirm-btn.primary:hover {
+  background: var(--text-hi);
+}
+
+.confirm-btn.primary.danger {
+  background: rgb(var(--red) / 0.14);
+  border-color: rgb(var(--red) / 0.35);
+  color: rgb(var(--red));
+}
+
+.confirm-btn.primary.danger:hover {
+  background: rgb(var(--red) / 0.22);
 }

@@ -22,6 +22,12 @@ pub struct InboxItem {
     /// where it came from — "manual", an automation name, "jira", "slack"…
     #[serde(default = "default_source")]
     pub source: String,
+    /// integration that produced it — "jira", "slack", "gmail", "github"…
+    /// (lowercase slug). Set by the producer: an automation's preset, a
+    /// poller's JSON `provider` field, or `--provider`. The UI groups the
+    /// inbox by it, falling back to `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// dedupe key within the source (jira issue key, slack ts…) — a repeated
     /// (source, key) refreshes the existing item instead of duplicating
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,6 +58,16 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Provider slug: lowercase, trimmed, capped — it's a UI grouping key, so
+/// "Jira" and "jira" must land in the same bucket.
+fn normalize_provider(p: &Value) -> Option<String> {
+    let v = p.get("provider").and_then(Value::as_str)?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(v.to_lowercase().chars().take(64).collect())
 }
 
 fn path() -> PathBuf {
@@ -113,6 +129,7 @@ pub fn handle(s: &mut Session, method: &str, p: &Value) -> Result<Value, String>
                     v.to_string()
                 }
             };
+            let provider = normalize_provider(p);
             let key = p
                 .get("key")
                 .and_then(Value::as_str)
@@ -140,6 +157,9 @@ pub fn handle(s: &mut Session, method: &str, p: &Value) -> Result<Value, String>
                     it.title = title;
                     it.body = body;
                     it.url = url;
+                    if provider.is_some() {
+                        it.provider = provider.clone();
+                    }
                     let item = it.clone();
                     save(&g)?;
                     drop(g);
@@ -150,6 +170,7 @@ pub fn handle(s: &mut Session, method: &str, p: &Value) -> Result<Value, String>
             let item = InboxItem {
                 id: format!("i{}", &crate::tasks::random_id()[..12]),
                 source,
+                provider,
                 key,
                 title,
                 body,
@@ -249,7 +270,7 @@ pub fn handle(s: &mut Session, method: &str, p: &Value) -> Result<Value, String>
 
 // ── CLI ─────────────────────────────────────────────────────────────
 
-const CLI_HELP: &str = "usage: lazed inbox add <title...> [--url U] [--source S] [--key K] [--body B | --stdin]
+const CLI_HELP: &str = "usage: lazed inbox add <title...> [--url U] [--source S] [--provider P] [--key K] [--body B | --stdin]
        lazed inbox list [--all]
        lazed inbox done|reopen|remove <id>
        lazed inbox snooze <id> <+SECS | EPOCH>";
@@ -282,6 +303,7 @@ fn cli_run(args: &[String]) -> Result<Value, String> {
                 let field = match a {
                     "--url" => "url",
                     "--source" => "source",
+                    "--provider" => "provider",
                     "--key" => "key",
                     "--body" => "body",
                     "--stdin" => {
@@ -370,6 +392,7 @@ mod tests {
         let item = InboxItem {
             id: "i1".into(),
             source: "jira".into(),
+            provider: None,
             key: Some("CS-1".into()),
             title: "old".into(),
             body: None,
@@ -391,10 +414,27 @@ mod tests {
     }
 
     #[test]
+    fn provider_normalizes_to_a_lowercase_slug() {
+        assert_eq!(
+            normalize_provider(&json!({"provider": " Jira "})).as_deref(),
+            Some("jira")
+        );
+        assert_eq!(normalize_provider(&json!({"provider": "  "})), None);
+        assert_eq!(normalize_provider(&json!({})), None);
+        assert_eq!(
+            normalize_provider(&json!({"provider": "x".repeat(100)}))
+                .unwrap()
+                .len(),
+            64
+        );
+    }
+
+    #[test]
     fn expired_snooze_flips_to_open() {
         let mut g = vec![InboxItem {
             id: "i2".into(),
             source: "manual".into(),
+            provider: None,
             key: None,
             title: "t".into(),
             body: None,

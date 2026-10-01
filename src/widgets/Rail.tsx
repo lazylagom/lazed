@@ -62,7 +62,7 @@ function RailButton({
       aria-label={item.title}
       onClick={onClick}
     >
-      <HugeiconsIcon icon={item.icon} size={17} strokeWidth={1.5} />
+      <HugeiconsIcon icon={item.icon} size={20} strokeWidth={1.5} />
       {alert && <span className="rail-alert" />}
       {count !== undefined && count > 0 && (
         <span className="rail-count">{count > 99 ? "99+" : count}</span>

@@ -379,6 +379,13 @@ export const lazed = {
       repo,
       branch,
     }),
+  /** local branches of a repo — the new-worktree sheet's branch picker;
+   * `checked_out` marks branches another worktree already holds */
+  repoBranches: (repo: string) =>
+    invoke<{ branches: { name: string; checked_out: boolean }[] }>(
+      "repo_branches",
+      { repo },
+    ),
   /** delete the branch a removed worktree was on (herdr leaves it behind);
    * `force` maps to `git branch -D` */
   branchDelete: (repo: string, branch: string, force?: boolean) =>

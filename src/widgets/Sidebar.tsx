@@ -7,6 +7,7 @@ import {
   GitBranchIcon,
   GitCompareIcon,
   GroupLayersIcon,
+  Home01Icon,
   MoreHorizontalIcon,
   PencilEdit01Icon,
   PlusIcon,
@@ -16,6 +17,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { AgentIcon } from "../components/AgentIcon";
+import { confirmDialog } from "../components/ConfirmDialog";
 import type {
   AgentStatus,
   GroupInfo,
@@ -170,7 +172,13 @@ function WorkspaceRow({
     const message = agents.length
       ? `Remove workspace “${name}”? Agents still running (${[...new Set(agents)].join(", ")}) — their panes will be killed, the worktree checkout deleted, and its branch removed.`
       : `Remove workspace “${name}”? Its ${panes.length} pane(s) will be killed, the worktree checkout deleted, and its branch removed.`;
-    const ok = await confirmClose("Remove Workspace", message);
+    const ok = await confirmDialog({
+      title: "Remove Workspace",
+      message,
+      detail: ws.path,
+      okLabel: "Remove",
+      danger: true,
+    });
     if (ok) onRemoveWorkspace(ws);
   };
   return (
@@ -180,16 +188,15 @@ function WorkspaceRow({
           type="button"
           className="side-ws-label side-primary-label"
           onClick={() => onFocusWorkspace(ws.workspace_id)}
-          title={ws.path}
+          title={ws.is_main ? `${ws.path} (repo root)` : ws.path}
         >
           <HugeiconsIcon
-            icon={GitBranchIcon}
+            icon={ws.is_main ? Home01Icon : GitBranchIcon}
             size={12}
             strokeWidth={1.5}
             className="side-ico"
           />
           <span className="side-ws-name">{name}</span>
-          {ws.is_main && <span className="side-pill">main</span>}
           {panes.length > 0 && (
             <span className="side-tree-count">{panes.length}</span>
           )}

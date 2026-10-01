@@ -29,8 +29,10 @@ herdr가 없으면 조직층만 동작하는 degraded 모드로 뜬다. 창을 �
 - **blocked·done 인박스** (⇧⌘I) + macOS 알림(클릭 시 해당 pane으로 점프), Dock 뱃지.
 - **worktree** — ⌘N 새 worktree, ⇧⌘F fan-out(프롬프트 하나 → N개 worktree ×
   N개 에이전트), diff 뷰 라인 주석 → 에이전트 회송, 비교 후 머지.
-- **GTD Inbox** (⇧⌘4) — 데몬 소유 capture 큐(`inbox.json` 영속). done/snooze/
-  원본 링크 열기/에이전트 위임으로 triage.
+- **GTD Inbox** (⇧⌘4) — 데몬 소유 capture 큐(`inbox.json` 영속). provider별
+  (Jira·Slack·Gmail…) 접이식 섹션으로 triage — done/snooze/원본 링크 열기/
+  에이전트 위임. provider는 프리셋이 자동 부여하거나 폴러 JSON line의
+  `provider` 필드·`--provider`로 지정.
 - **Automations** (⇧⌘2) — ready-made 프리셋(Jira assigned·Jira @me 멘션·
   GitHub 리뷰 요청·Slack 채널) + 커스텀 셸 폴러 → collect/notify/command/agent/
   inbox 액션.

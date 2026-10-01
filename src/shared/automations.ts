@@ -22,6 +22,8 @@ export interface AutomationItem {
   /** source link — from url/link/permalink in JSON lines, or the first
    * http(s) token in plain lines */
   url?: string;
+  /** provider slug — from `provider` in JSON lines; the inbox groups by it */
+  provider?: string;
   /** epoch seconds */
   at: number;
   fired: boolean;
@@ -81,7 +83,8 @@ export const automations = {
 };
 
 /** Poller presets — the command is any shell producing one item per line
- * (JSON lines or `id…text`); placeholders are meant to be edited.
+ * (JSON lines `{id|key|name, title|summary|text, url|link|permalink,
+ * provider}` or `id…text`); placeholders are meant to be edited.
  * `requires` declares what the spawn env must provide — the editor checks
  * it and links gaps to Settings → Integrations or an install hint.
  *

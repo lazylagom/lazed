@@ -5,7 +5,7 @@ import {
   SquareIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type TodoItem, todo } from "../shared/todo";
 
 function relTime(at: number): string {
@@ -18,7 +18,9 @@ function relTime(at: number): string {
 
 /** The personal todo list — a quick-capture checklist on the rail. Add
  * items the moment they come to mind (the input is focused on open, or
- * `lazed todo add` from any terminal); check them off, clear the done. */
+ * `lazed todo add` from any terminal); check them off in place, clear the
+ * done. Rows render by capture time so checking an item doesn't move it —
+ * the done mark is just a struck-through title and a lit box. */
 export function TodoView({
   items,
   error,
@@ -34,7 +36,6 @@ export function TodoView({
   onError: (msg: string) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [showDone, setShowDone] = useState(false);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(
     null,
   );
@@ -42,6 +43,9 @@ export function TodoView({
 
   const open = items.filter((i) => !i.done);
   const done = items.filter((i) => i.done);
+  // capture-time order keeps a row where it was when it got checked —
+  // the daemon's list puts done last, which would shuffle it to the bottom
+  const sorted = useMemo(() => [...items].sort((a, b) => b.at - a.at), [items]);
 
   // capture is the point — the input is ready the moment the view opens
   useEffect(() => {
@@ -96,6 +100,14 @@ export function TodoView({
 
   const row = (item: TodoItem) => (
     <div key={item.id} className={`ibx-row td-row ${item.done ? "done" : ""}`}>
+      <button
+        type="button"
+        className="ibx-btn td-del"
+        title="delete"
+        onClick={() => run(todo.remove(item.id))}
+      >
+        <HugeiconsIcon icon={Cancel01Icon} size={12} strokeWidth={1.5} />
+      </button>
       {check(item)}
       <div className="ibx-main">
         {editing?.id === item.id ? (
@@ -124,16 +136,6 @@ export function TodoView({
             {relTime(item.done ? (item.done_at ?? item.at) : item.at)}
           </span>
         </div>
-      </div>
-      <div className="ibx-actions">
-        <button
-          type="button"
-          className="ibx-btn"
-          title="delete"
-          onClick={() => run(todo.remove(item.id))}
-        >
-          <HugeiconsIcon icon={Cancel01Icon} size={12} strokeWidth={1.5} />
-        </button>
       </div>
     </div>
   );
@@ -184,27 +186,17 @@ export function TodoView({
               </div>
             )
           )}
-          {open.map(row)}
+          {sorted.map(row)}
           {done.length > 0 && (
-            <div className="td-done-bar">
-              <button
-                type="button"
-                className="ibx-snoozed-toggle"
-                onClick={() => setShowDone((v) => !v)}
-              >
-                {showDone ? "▾" : "▸"} done ({done.length})
-              </button>
-              <button
-                type="button"
-                className="td-clear"
-                title="delete all done items"
-                onClick={() => run(todo.clear(), `cleared ${done.length}`)}
-              >
-                clear
-              </button>
-            </div>
+            <button
+              type="button"
+              className="ibx-snoozed-toggle"
+              title="delete all done items"
+              onClick={() => run(todo.clear(), `cleared ${done.length}`)}
+            >
+              clear done ({done.length})
+            </button>
           )}
-          {showDone && done.map(row)}
         </div>
       </div>
     </div>

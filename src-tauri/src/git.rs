@@ -95,6 +95,30 @@ pub fn worktree_merge(repo: &str, branch: &str) -> Result<Value, String> {
     }
 }
 
+/// Local branches of a repo for the new-worktree sheet's branch picker.
+/// `checked_out` marks branches another worktree already holds — git refuses
+/// `worktree add` on them, so the UI shows them as unavailable.
+pub fn repo_branches(repo: &str) -> Result<Value, String> {
+    let names = git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    // `worktree list --porcelain` is the authoritative checked-out set —
+    // `%(worktreepath)` needs git ≥2.36, this works everywhere.
+    let mut used = std::collections::HashSet::new();
+    if let Ok(list) = git(repo, &["worktree", "list", "--porcelain"]) {
+        for line in list.lines() {
+            if let Some(b) = line.strip_prefix("branch refs/heads/") {
+                used.insert(b.to_string());
+            }
+        }
+    }
+    let branches: Vec<Value> = names
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|name| json!({"name": name, "checked_out": used.contains(name)}))
+        .collect();
+    Ok(json!({"branches": branches}))
+}
+
 /// Delete the branch a removed worktree was on — herdr's `worktree.remove`
 /// leaves it behind by design. `-d` refuses to drop unmerged work; `force`
 /// switches to `-D`. A missing branch is success: "no such branch" is the
