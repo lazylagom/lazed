@@ -390,7 +390,7 @@ it("⌘N creates a worktree for the selected project", async () => {
     params: {
       cwd: "/tmp/demo",
       branch: "feature/x",
-      base: undefined,
+      base: "develop",
       label: undefined,
     },
   });

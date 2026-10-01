@@ -31,7 +31,7 @@ export function NewWorktree({
   onClose: () => void;
 }) {
   const [branch, setBranch] = useState("");
-  const [base, setBase] = useState("");
+  const [base, setBase] = useState("develop");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const branchRef = useRef<HTMLInputElement>(null);
