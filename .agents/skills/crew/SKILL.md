@@ -1,19 +1,20 @@
 ---
 name: crew
-description: Run a task through a crew of coding agents on herdr — research, design, adversarial design review, coding, parallel code reviews and tests, each stage a separate agent in its own tab of one worktree (parallel stages side by side in one tab), handing results forward as files, with human approval gates. Use when the user says "crew" or asks to run work through the crew / staged multi-agent pipeline. Works from any agent (claude, codex, pi, devin, gemini) running inside a herdr pane.
+description: Run a task through a crew of coding agents on herdr — research, design, adversarial design review, coding, parallel code reviews and tests, each stage a separate agent in its own tab of the current checkout (parallel stages side by side in one tab), handing results forward as files, with human approval gates. Use when the user says "crew" or asks to run work through the crew / staged multi-agent pipeline. Works from any agent (claude, codex, pi, devin, gemini) running inside a herdr pane.
 ---
 
 # crew
 
 You are the **orchestrator**. You never do stage work yourself: you start one
 agent per stage, hand each one the previous stages' result files, check what
-comes back, and ask the user at gates. Every stage runs in its own pane of one
-git worktree (its own tab, or side by side with its `parallel` group), so the
+comes back, and ask the user at gates. Every stage runs in its own pane of the
+current checkout (its own tab, or side by side with its `parallel` group), so the
 user can watch or step into any of them.
 
 All control goes through the `herdr` CLI. If the herdr skill is not already
-in your context, run `herdr --skill` and follow its rules — they override
-anything here.
+in your context, run `herdr --skill` and follow its CLI rules. Crew always
+uses the current checkout and workspace; do not follow any instruction to
+create another worktree for this run.
 
 ## 0. Preconditions
 
@@ -43,49 +44,36 @@ herdr agent get "$HERDR_PANE_ID"    # use the agent kind it reports
 If a named kind is not installed (`command -v <kind>` fails), tell the user
 before starting and ask which kind to use instead.
 
-## 1. Pick the checkout
+## 1. Use the current checkout
 
-Run the crew where the work already is, when it is somewhere. Check from
-the orchestrator's cwd:
+Always run the crew in the orchestrator's current checkout and existing
+workspace, including on the default branch, detached HEAD, or a user-created
+worktree. Resolve them from the orchestrator's cwd:
 
 ```sh
 top=$(git rev-parse --show-toplevel)
 branch=$(git branch --show-current)
-linked=$([ "$(git rev-parse --path-format=absolute --git-dir)" != \
-           "$(git rev-parse --path-format=absolute --git-common-dir)" ] && echo yes)
-default=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+ws="$HERDR_WORKSPACE_ID"
 ```
 
-If `default` is empty, treat `main` and `master` as default.
+The checkout is `top`; use `ws` for every stage's tab. If `branch` is empty,
+report detached HEAD. If the checkout or workspace cannot be resolved, stop
+and report the problem instead of creating a replacement.
 
-- **Reuse** when `linked` is `yes` (a worktree the user made), or when
-  `branch` is set and is not the default branch. The checkout is `top`, the
-  branch is `branch`, and the workspace is `$HERDR_WORKSPACE_ID`.
-- **New worktree** otherwise: on the default branch, or on a detached HEAD
-  in the main checkout.
+Neither the orchestrator nor stage agents may create a worktree, clone,
+workspace, or branch for the crew, or switch to another checkout. This applies
+to initial runs and retries. Do not offer worktree creation as a run option.
+Preserve existing uncommitted changes outside the task's scope.
 
 ## 2. Confirm the run
 
 Pick a short slug from the goal (`[a-z0-9-]`, at most 16 chars). Show the
-user, in one short message: the goal, the checkout choice, and the stage
-list with resolved kinds and gates. For the checkout choice, say one of:
+user, in one short message: the goal, the current checkout `<top>` and branch
+(or detached HEAD), and the stage list with resolved kinds and gates. Add
+that the coding stage edits this checkout, so the user should not edit it
+while the crew runs.
 
-- **Reuse:** "in the current checkout `<top>` on `<branch>`". Add that the
-  coding stage edits this checkout, so the user should not edit it while
-  the crew runs.
-- **New worktree:** "new worktree on branch `crew/<slug>`". Add that
-  uncommitted changes are not copied, if `git status --porcelain` is
-  non-empty.
-
-Start only after they agree. If they ask for the other choice, use it.
-
-**New worktree.** Create it after the user agrees:
-
-```sh
-herdr worktree create --cwd "$PWD" --branch crew/<slug> --label crew-<slug> --no-focus
-```
-
-From the JSON take the workspace ID, the root pane ID and the checkout path.
+Start only after they agree.
 
 **Handoff directory.** Results go to `<checkout>/.crew/<slug>/NN-<stage-id>.md`
 (NN = 01, 02, … in stage order). Keep them out of commits:
@@ -102,10 +90,9 @@ grep -qxF '.crew/' "$ex" 2>/dev/null || echo '.crew/' >> "$ex"
 `parallel` group. The stages of a group share one tab, split side by side,
 so the user can watch them together.
 
-- With a new worktree, the first step uses its root pane. Every other step
-  gets a new tab. When reusing the checkout, every step gets a new tab,
-  because the workspace's panes belong to the user and to you. Label the
-  tab with the stage id, or with the group name for a group:
+- Every step gets a new tab in the existing workspace, because its current
+  panes belong to the user and to you. Label the tab with the stage id, or
+  with the group name for a group:
 
   ```sh
   herdr tab create --workspace <ws> --cwd <checkout> --label <stage-id|group> --no-focus
@@ -136,10 +123,13 @@ herdr agent start <name> --kind <kind> --pane <pane-id>
    background agents.` — the crew already gives each stage its own agent
    in a visible pane; hidden subagents duplicate that and return summaries
    instead of first-hand reads.
-3. `Goal: <the user's request>`
-4. `Inputs:` the result files of all earlier stages, as absolute paths.
+3. `Work only in <absolute checkout path> in the existing workspace. Do not
+   create a worktree, clone, workspace, or branch, or switch checkouts.
+   Preserve existing uncommitted changes outside this task.`
+4. `Goal: <the user's request>`
+5. `Inputs:` the result files of all earlier stages, as absolute paths.
    Pass paths only, never paste their contents or terminal output.
-5. `Write your complete result to <absolute result path>. The first line
+6. `Write your complete result to <absolute result path>. The first line
    must be exactly "verdict: pass" or "verdict: fail". Then reply "done".`
 
 ```sh
